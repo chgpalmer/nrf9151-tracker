@@ -1,0 +1,39 @@
+# Freestanding NCS (cellular) application = west manifest repo (T2 topology).
+# Imports sdk-nrf v3.4.0 but trims to a minimal cellular / nrf9151 ns set
+# via name-allowlist so contributors don't pull the whole SDK.
+manifest:
+  self:
+    path: nrf9151-fw
+
+  remotes:
+    - name: ncs
+      url-base: https://github.com/nrfconnect
+
+  projects:
+    - name: nrf
+      remote: ncs
+      repo-path: sdk-nrf
+      revision: v3.4.0
+      clone-depth: 1
+      import:
+        # Only these projects (and their required deps) are cloned.
+        # NCS-level + a subset of zephyr modules needed for nrf9151 ns.
+        name-allowlist:
+          # zephyr RTOS fork
+          - zephyr
+          # NCS crypto / TF-M / modem stack
+          - nrfxlib
+          - trusted-firmware-m
+          - mbedtls
+          - oberon-psa-crypto
+          - qcbor
+          - t_cose
+          - mcuboot
+          # zephyr modules (must also be in sdk-nrf's zephyr allowlist)
+          - hal_nordic
+          - cmsis
+          - cmsis_6
+          - picolibc
+          - segger
+          - zcbor
+          - tf-psa-crypto

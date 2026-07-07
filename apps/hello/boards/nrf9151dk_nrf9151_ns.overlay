@@ -1,0 +1,4 @@
+/* TF-M owns uart1 as a secure peripheral; the NS app must not touch it. */
+&uart1 {
+	status = "disabled";
+};
