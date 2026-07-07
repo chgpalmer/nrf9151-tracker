@@ -13,6 +13,10 @@
 #include <string.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/posix/netinet/in.h>
+#include <zephyr/posix/sys/socket.h>
+#include <zephyr/posix/arpa/inet.h>
+#include <zephyr/posix/unistd.h>
 #include <zephyr/net/socket.h>
 #include <zephyr/net/http/client.h>
 #include <nrf_modem_gnss.h>
@@ -119,32 +123,48 @@ static uint8_t http_recv_buf[512];
 static char    http_payload[256];
 static char    http_host[64];
 
+static int http_response_cb(struct http_response *rsp,
+			    enum http_final_call final_data,
+			    void *user_data)
+{
+	if (final_data == HTTP_DATA_FINAL) {
+		LOG_INF("HTTP %d %s", rsp->http_status_code,
+			rsp->http_status);
+	}
+	return 0;
+}
+
+/* Pass NULL for p to send a dummy payload (LTE data-path test only). */
 static int http_post_fix(const struct nrf_modem_gnss_pvt_data_frame *p)
 {
-	struct net_sockaddr_in server = {0};
+	struct sockaddr_in server = {0};
 	int sock, err;
 
-	/* count sats used in fix */
-	uint8_t used = 0;
+	if (p == NULL) {
+		snprintf(http_payload, sizeof(http_payload),
+			 "{\"dummy\":true,\"msg\":\"lte-datapath-test\"}");
+	} else {
+		uint8_t used = 0;
 
-	for (int i = 0; i < NRF_MODEM_GNSS_MAX_SATELLITES; i++) {
-		if (p->sv[i].flags & NRF_MODEM_GNSS_SV_FLAG_USED_IN_FIX) {
-			used++;
+		for (int i = 0; i < NRF_MODEM_GNSS_MAX_SATELLITES; i++) {
+			if (p->sv[i].flags & NRF_MODEM_GNSS_SV_FLAG_USED_IN_FIX) {
+				used++;
+			}
 		}
+
+		snprintf(http_payload, sizeof(http_payload),
+			 "{\"lat\":%.6f,\"lon\":%.6f,"
+			 "\"alt\":%.1f,\"acc\":%.1f,"
+			 "\"sats_used\":%u,"
+			 "\"ts\":\"%04u-%02u-%02uT%02u:%02u:%02uZ\"}",
+			 p->latitude, p->longitude,
+			 (double)p->altitude, (double)p->accuracy,
+			 used,
+			 p->datetime.year, p->datetime.month, p->datetime.day,
+			 p->datetime.hour, p->datetime.minute, p->datetime.seconds);
 	}
 
-	snprintf(http_payload, sizeof(http_payload),
-		 "{\"lat\":%.6f,\"lon\":%.6f,"
-		 "\"alt\":%.1f,\"acc\":%.1f,"
-		 "\"sats_used\":%u,"
-		 "\"ts\":\"%04u-%02u-%02uT%02u:%02u:%02uZ\"}",
-		 p->latitude, p->longitude,
-		 (double)p->altitude, (double)p->accuracy,
-		 used,
-		 p->datetime.year, p->datetime.month, p->datetime.day,
-		 p->datetime.hour, p->datetime.minute, p->datetime.seconds);
-
-	sock = zsock_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 	if (sock < 0) {
 		LOG_ERR("socket: %d", errno);
 		return -errno;
@@ -152,13 +172,13 @@ static int http_post_fix(const struct nrf_modem_gnss_pvt_data_frame *p)
 
 	server.sin_family = AF_INET;
 	server.sin_port = htons(POST_SERVER_PORT);
-	zsock_inet_pton(AF_INET, POST_SERVER_HOST, &server.sin_addr);
+	inet_pton(AF_INET, POST_SERVER_HOST, &server.sin_addr);
 
-	err = zsock_connect(sock, (struct net_sockaddr *)&server, sizeof(server));
+	err = connect(sock, (struct sockaddr *)&server, sizeof(server));
 	if (err) {
 		LOG_ERR("connect to %s:%d failed: %d", POST_SERVER_HOST,
 			POST_SERVER_PORT, errno);
-		zsock_close(sock);
+		close(sock);
 		return -errno;
 	}
 
@@ -173,12 +193,13 @@ static int http_post_fix(const struct nrf_modem_gnss_pvt_data_frame *p)
 		.payload            = http_payload,
 		.payload_len        = strlen(http_payload),
 		.content_type_value = "application/json",
+		.response           = http_response_cb,
 		.recv_buf           = http_recv_buf,
 		.recv_buf_len       = sizeof(http_recv_buf),
 	};
 
 	err = http_client_req(sock, &req, 5000, NULL);
-	zsock_close(sock);
+	close(sock);
 
 	if (err < 0) {
 		LOG_ERR("http_client_req: %d", err);
@@ -350,24 +371,21 @@ int main(void)
 			print_status(&pvt, now);
 		}
 
-		/* POST every POST_INTERVAL_MS, only when we have a fix + LTE */
-		if (now - last_post_ms >= POST_INTERVAL_MS) {
-			if (has_fix && lte_connected) {
-				last_post_ms = now;
-				LOG_INF("sending fix to %s:%d%s",
-					POST_SERVER_HOST, POST_SERVER_PORT,
-					POST_PATH);
-				err = http_post_fix(&pvt);
-				if (err) {
-					LOG_WRN("post failed: %d (will retry)", err);
-				}
-			} else {
-				LOG_INF("post skipped: fix=%s lte=%s",
-					has_fix ? "yes" : "no",
-					lte_connected ? "up" : "down");
-				/* reset timer so we retry quickly once both are ready */
-				last_post_ms = now - POST_INTERVAL_MS + 3000;
+		/* POST every POST_INTERVAL_MS as soon as LTE is up.
+		 * Send real fix payload when available, dummy when not --
+		 * this tests the data path independently of GNSS. */
+		if (now - last_post_ms >= POST_INTERVAL_MS && lte_connected) {
+			last_post_ms = now;
+			LOG_INF("sending %s payload to %s:%d%s",
+				has_fix ? "fix" : "dummy",
+				POST_SERVER_HOST, POST_SERVER_PORT, POST_PATH);
+			err = http_post_fix(has_fix ? &pvt : NULL);
+			if (err) {
+				LOG_WRN("post failed: %d (will retry)", err);
 			}
+		} else if (!lte_connected) {
+			LOG_DBG("post waiting for LTE");
+			last_post_ms = now - POST_INTERVAL_MS + 3000;
 		}
 	}
 

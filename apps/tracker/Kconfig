@@ -11,8 +11,8 @@ config TRACKER_POST_INTERVAL_S
 	range 1 3600
 
 config TRACKER_SERVER_HOST
-	string "HTTP server IP or hostname"
-	default "httpbin.org"
+	string "HTTP server IP address (DNS not yet wired up, use IP)"
+	default "3.219.145.192"
 
 config TRACKER_SERVER_PORT
 	int "HTTP server port"
