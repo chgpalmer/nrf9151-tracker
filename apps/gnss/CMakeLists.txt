@@ -4,8 +4,10 @@ project(gnss_sample)
 
 zephyr_library_sources(src/main.c)
 
+# assistance.c is only needed for nRF Cloud and SUPL backends (pulls in cJSON/cloud deps)
 zephyr_library_sources_ifdef(CONFIG_GNSS_SAMPLE_ASSISTANCE_NRF_CLOUD src/assistance.c)
 zephyr_library_sources_ifdef(CONFIG_GNSS_SAMPLE_ASSISTANCE_SUPL src/assistance.c)
-zephyr_library_sources_ifdef(CONFIG_GNSS_SAMPLE_ASSISTANCE_MINIMAL src/assistance.c)
+
+# minimal backend: factory almanac + LTE network time, no cloud deps
 zephyr_library_sources_ifdef(CONFIG_GNSS_SAMPLE_ASSISTANCE_MINIMAL src/assistance_minimal.c)
 zephyr_library_sources_ifdef(CONFIG_GNSS_SAMPLE_ASSISTANCE_MINIMAL src/mcc_location_table.c)
