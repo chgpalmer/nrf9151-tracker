@@ -41,6 +41,9 @@ WEST := $(VENV)/bin/west
 SDK  := $(HOME)/zephyr-sdk-1.0.1
 GDB  := $(SDK)/gnu/arm-zephyr-eabi/bin/arm-zephyr-eabi-gdb
 
+# nrfutil lives in ~/.local/bin; add it to PATH for all targets
+export PATH := $(HOME)/.local/bin:$(PATH)
+
 # Trust the system CA bundle for TLS-inspecting proxies
 CA := /etc/ssl/certs/ca-certificates.crt
 export REQUESTS_CA_BUNDLE := $(CA)

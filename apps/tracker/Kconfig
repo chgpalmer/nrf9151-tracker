@@ -1,0 +1,30 @@
+menu "Tracker"
+
+config TRACKER_LOG_LEVEL
+	int "Log level"
+	default 3
+	range 0 4
+
+config TRACKER_POST_INTERVAL_S
+	int "HTTP POST interval in seconds"
+	default 10
+	range 1 3600
+
+config TRACKER_SERVER_HOST
+	string "HTTP server IP or hostname"
+	default "httpbin.org"
+
+config TRACKER_SERVER_PORT
+	int "HTTP server port"
+	default 80
+	range 1 65535
+
+config TRACKER_SERVER_PATH
+	string "HTTP POST path"
+	default "/post"
+
+endmenu
+
+menu "Zephyr Kernel"
+source "Kconfig.zephyr"
+endmenu

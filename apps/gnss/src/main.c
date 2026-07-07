@@ -45,7 +45,9 @@ static struct k_work ttff_test_start_work;
 static double time_to_fix;
 #endif
 
-static const char update_indicator[] = {'\\', '|', '/', '-'};
+/* Throttle the combined status block (PVT events arrive ~1 Hz). */
+#define STATUS_PRINT_INTERVAL_MS 5000
+static int64_t last_status_print;
 
 static struct nrf_modem_gnss_pvt_data_frame last_pvt;
 static uint64_t fix_timestamp;
@@ -666,38 +668,72 @@ static void print_flags(struct nrf_modem_gnss_pvt_data_frame *pvt_data)
 	}
 }
 
-static void print_fix_data(struct nrf_modem_gnss_pvt_data_frame *pvt_data)
+static const char *reg_status_str(int status)
 {
-	printf("Latitude:          %.06f\n", pvt_data->latitude);
-	printf("Longitude:         %.06f\n", pvt_data->longitude);
-	printf("Accuracy:          %.01f m\n", (double)pvt_data->accuracy);
-	printf("Altitude:          %.01f m\n", (double)pvt_data->altitude);
-	printf("Altitude accuracy: %.01f m\n", (double)pvt_data->altitude_accuracy);
-	printf("Speed:             %.01f m/s\n", (double)pvt_data->speed);
-	printf("Speed accuracy:    %.01f m/s\n", (double)pvt_data->speed_accuracy);
-	printf("V. speed:          %.01f m/s\n", (double)pvt_data->vertical_speed);
-	printf("V. speed accuracy: %.01f m/s\n", (double)pvt_data->vertical_speed_accuracy);
-	printf("Heading:           %.01f deg\n", (double)pvt_data->heading);
-	printf("Heading accuracy:  %.01f deg\n", (double)pvt_data->heading_accuracy);
-	printf("Date:              %04u-%02u-%02u\n",
-	       pvt_data->datetime.year,
-	       pvt_data->datetime.month,
-	       pvt_data->datetime.day);
-	printf("Time (UTC):        %02u:%02u:%02u.%03u\n",
-	       pvt_data->datetime.hour,
-	       pvt_data->datetime.minute,
-	       pvt_data->datetime.seconds,
-	       pvt_data->datetime.ms);
-	printf("PDOP:              %.01f\n", (double)pvt_data->pdop);
-	printf("HDOP:              %.01f\n", (double)pvt_data->hdop);
-	printf("VDOP:              %.01f\n", (double)pvt_data->vdop);
-	printf("TDOP:              %.01f\n", (double)pvt_data->tdop);
+	switch (status) {
+	case 0: return "not registered";
+	case 1: return "registered (home)";
+	case 2: return "searching";
+	case 3: return "registration denied";
+	case 4: return "unknown (no coverage)";
+	case 5: return "registered (roaming)";
+	default: return "?";
+	}
+}
+
+/* Print a one-line LTE status from AT%XMONITOR. Response fields:
+ * %XMONITOR: <reg>,[<fullname>],[<shortname>],[<plmn>],[<tac>],<AcT>,
+ *            <band>,<cell_id>,<phys_cell>,<earfcn>,<rsrp>,<snr>,...
+ * rsrp is an index: dBm = rsrp - 140. snr is an index: dB = snr - 24.
+ */
+static void print_lte_status(void)
+{
+	char resp[256];
+	int reg = -1;
+	int band = 0, rsrp = 255, snr = 127;
+	char op[32] = "";
+	char cell[16] = "";
+	int err;
+
+	err = nrf_modem_at_cmd(resp, sizeof(resp), "AT%%XMONITOR");
+	if (err) {
+		printf("LTE: XMONITOR failed (err %d)\n", err);
+		return;
+	}
+
+	/* reg status is the first numeric field after the colon. */
+	char *p = strchr(resp, ':');
+	if (p) {
+		reg = atoi(p + 1);
+	}
+
+	/* Best-effort parse of the quoted operator name and key numeric fields. */
+	(void)sscanf(resp,
+		"%%XMONITOR: %*d,\"%31[^\"]\",%*[^,],%*[^,],%*[^,],%*d,%d,\"%15[^\"]\",%*d,%*d,%d,%d",
+		op, &band, cell, &rsrp, &snr);
+
+	printf("LTE:  %s", reg_status_str(reg));
+	if (op[0]) {
+		printf(" | op %s", op);
+	}
+	if (band) {
+		printf(" | band %d", band);
+	}
+	if (cell[0]) {
+		printf(" | cell %s", cell);
+	}
+	if (rsrp != 255) {
+		printf(" | RSRP %d dBm", rsrp - 140);
+	}
+	if (snr != 127) {
+		printf(" | SNR %d dB", snr - 24);
+	}
+	printf("\n");
 }
 
 int main(void)
 {
 	int err;
-	uint8_t cnt = 0;
 	struct nrf_modem_gnss_nmea_data_frame *nmea_data;
 
 	LOG_INF("Starting GNSS sample");
@@ -758,41 +794,50 @@ int main(void)
 					print_distance_from_reference(&last_pvt);
 				}
 			} else {
-				/* PVT and NMEA output mode. */
-
+				/* Combined GNSS + LTE status block.
+				 * PVT events arrive ~1 Hz; throttle the block so the
+				 * console stays readable and we don't hammer the modem
+				 * with AT commands. No screen clearing -- output scrolls
+				 * so it works over a plain serial capture.
+				 */
 				if (output_paused()) {
 					goto handle_nmea;
 				}
 
-				printf("\033[1;1H");
-				printf("\033[2J");
-				print_satellite_stats(&last_pvt);
-				print_flags(&last_pvt);
-				printf("-----------------------------------\n");
-
 				if (last_pvt.flags & NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID) {
 					fix_timestamp = k_uptime_get();
-					print_fix_data(&last_pvt);
-					print_distance_from_reference(&last_pvt);
-				} else {
-					printf("Seconds since last fix: %d\n",
-					       (uint32_t)((k_uptime_get() - fix_timestamp) / 1000));
-					cnt++;
-					printf("Searching [%c]\n", update_indicator[cnt%4]);
 				}
 
-				printf("\nNMEA strings:\n\n");
+				if (k_uptime_get() - last_status_print < STATUS_PRINT_INTERVAL_MS) {
+					goto handle_nmea;
+				}
+				last_status_print = k_uptime_get();
+
+				printf("===== status @ %us =====\n",
+				       (uint32_t)(k_uptime_get() / 1000));
+				print_lte_status();
+				print_satellite_stats(&last_pvt);
+				print_flags(&last_pvt);
+
+				if (last_pvt.flags & NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID) {
+					printf("GNSS: FIX  %.06f, %.06f  alt %.01fm  acc %.01fm\n",
+					       last_pvt.latitude, last_pvt.longitude,
+					       (double)last_pvt.altitude,
+					       (double)last_pvt.accuracy);
+					print_distance_from_reference(&last_pvt);
+				} else {
+					printf("GNSS: searching, %us since last fix\n",
+					       (uint32_t)((k_uptime_get() - fix_timestamp) / 1000));
+				}
 			}
 		}
 
 handle_nmea:
+		/* Drain the NMEA queue so it doesn't fill and stall GNSS events.
+		 * We summarize GNSS in the status block, so don't print raw NMEA.
+		 */
 		if (events[1].state == K_POLL_STATE_MSGQ_DATA_AVAILABLE &&
 		    k_msgq_get(events[1].msgq, &nmea_data, K_NO_WAIT) == 0) {
-			/* New NMEA data available */
-
-			if (!output_paused()) {
-				printf("%s", nmea_data->nmea_str);
-			}
 			k_free(nmea_data);
 		}
 
