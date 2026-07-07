@@ -1,0 +1,6 @@
+/*
+ * No MCUboot/bootloader -- TF-M boots directly. These dtsi files set up
+ * the partition layout and SRAM regions accordingly.
+ */
+#include <samples/cellular/nrf91_no_bootloader_partitions.dtsi>
+#include <samples/cellular/nrf91_sram_partitions.dtsi>
