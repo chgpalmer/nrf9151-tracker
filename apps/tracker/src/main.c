@@ -38,6 +38,7 @@ static K_SEM_DEFINE(pvt_sem, 0, 1);
 static enum lte_lc_nw_reg_status lte_status = LTE_LC_NW_REG_NOT_REGISTERED;
 static bool lte_connected;
 
+
 /* ── GNSS ─────────────────────────────────────────────────────────  */
 static void gnss_handler(int event)
 {
@@ -207,24 +208,81 @@ static void print_status(const struct nrf_modem_gnss_pvt_data_frame *p,
 
 	LOG_INF("===== status @ %llds =====", (long long)(uptime_ms / 1000));
 
-	/* LTE status from lte_lc event + AT%XMONITOR for radio details */
+	/* LTE status: combine lte_lc registration state with AT%XMONITOR
+	 * radio details (operator, band, cell, RSRP, SNR).
+	 * XMONITOR response (space after colon, fields comma-separated):
+	 *   %XMONITOR: <reg>,"<long>","<short>","<plmn>","<tac>",<AcT>,
+	 *              <band>,"<cell_id>",<phys_cell_id>,<EARFCN>,<rsrp>,<snr>,...
+	 */
 	if (nrf_modem_at_cmd(at_resp, sizeof(at_resp), "AT%%XMONITOR") == 0) {
-		int band = 0, rsrp = 255, snr = 127;
-		char op[32] = "";
-		char cell[16] = "";
+		int  band = 0, rsrp = 255, snr = 127;
+		char op[32] = "", cell[16] = "";
 
-		sscanf(at_resp,
-		       "%%XMONITOR: %*d,\"%31[^\"]\",%*[^,],%*[^,],%*[^,],%*d,%d,"
-		       "\"%15[^\"]\",%*d,%*d,%d,%d",
-		       op, &band, cell, &rsrp, &snr);
+		/* Skip prefix, then parse field by field using strtok on a copy. */
+		char buf[256];
+		strncpy(buf, at_resp, sizeof(buf) - 1);
+		buf[sizeof(buf) - 1] = '\0';
 
-		LOG_INF("LTE:  %s%s%s%s%s",
-			lte_status_str(),
-			op[0]   ? " | op "   : "", op,
-			band    ? " | band " : "", band ? "" : "");
+		char *p = strchr(buf, ':');
+		if (p) {
+			p++; /* skip ':' */
+			/* field 1: reg (skip) */
+			strtok(p, ",");
+			/* field 2: long name (quoted) */
+			char *f = strtok(NULL, ",");
+			if (f && f[0] == '"') {
+				/* strip quotes */
+				f++;
+				char *e = strchr(f, '"');
+				if (e) {
+					*e = '\0';
+				}
+				strncpy(op, f, sizeof(op) - 1);
+			}
+			/* fields 3,4,5: short name, plmn, tac */
+			strtok(NULL, ",");
+			strtok(NULL, ",");
+			strtok(NULL, ",");
+			/* field 6: AcT (skip) */
+			strtok(NULL, ",");
+			/* field 7: band */
+			f = strtok(NULL, ",");
+			if (f) {
+				band = atoi(f);
+			}
+			/* field 8: cell id (quoted) */
+			f = strtok(NULL, ",");
+			if (f && f[0] == '"') {
+				f++;
+				char *e = strchr(f, '"');
+				if (e) {
+					*e = '\0';
+				}
+				strncpy(cell, f, sizeof(cell) - 1);
+			}
+			/* fields 9,10: phys cell, EARFCN */
+			strtok(NULL, ",");
+			strtok(NULL, ",");
+			/* field 11: rsrp */
+			f = strtok(NULL, ",");
+			if (f) {
+				rsrp = atoi(f);
+			}
+			/* field 12: snr */
+			f = strtok(NULL, ",\r\n");
+			if (f) {
+				snr = atoi(f);
+			}
+		}
+
 		if (band) {
-			LOG_INF("      band %d  cell %s  RSRP %d dBm  SNR %d dB",
-				band, cell, rsrp - 140, snr - 24);
+			LOG_INF("LTE:  %s | op %s | band %d | cell %s | RSRP %d dBm | SNR %d dB",
+				lte_status_str(), op, band, cell,
+				rsrp - 140, snr - 24);
+		} else {
+			LOG_INF("LTE:  %s%s%s",
+				lte_status_str(),
+				op[0] ? " | op " : "", op);
 		}
 	} else {
 		LOG_INF("LTE:  %s", lte_status_str());
