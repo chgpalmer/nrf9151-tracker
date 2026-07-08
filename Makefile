@@ -23,7 +23,7 @@
 
 .RECIPEPREFIX := >
 .DEFAULT_GOAL := help
-.PHONY: help setup-zephyr setup-tools setup-host windows-usb-passthrough build flash recover uart gdb clean sim run-sim broker ingest server
+.PHONY: help setup-zephyr setup-tools setup-host windows-usb-passthrough build flash recover uart gdb clean sim run-sim broker ingest server stop
 
 APP    ?= hello
 BOARD  ?= nrf9151dk/nrf9151
@@ -67,8 +67,9 @@ help:
 > @echo "  make sim                      build tracker as native Linux process (no DK needed)"
 > @echo "  make run-sim                  run the sim binary (connects to localhost mosquitto)"
 > @echo "  make broker                   start mosquitto (background) — required for ingest/sim"
-> @echo "  make ingest                   start MQTT→SQLite ingest (server/location.db)"
+> @echo "  make ingest                   start MQTT→SQLite ingest (server/tracker.db)"
 > @echo "  make server                   start FastAPI map server (http://localhost:8080)"
+> @echo "  make stop                     stop broker + server (free ports 1883, 8080)"
 > @echo ""
 > @echo "Current: APP=$(APP)  BOARD=$(BOARD)  PORT=$(PORT)  BAUD=$(BAUD)  RUNNER=$(RUNNER)"
 > @echo "Apps available: $$(ls apps 2>/dev/null | tr '\n' ' ')"
@@ -140,7 +141,7 @@ BROKER_HOST   ?= localhost
 MQTT_PORT     ?= 1883
 MQTT_TOPIC    ?= trackers/\#
 SIM_DEVICE_ID ?= sim-dev-1
-SERVER_VENV   := $(WS)/.venv
+HTTP_PORT     ?= 8080
 
 sim:
 > $(WEST) build -p auto -b native_sim/native/64 apps/tracker -d $(SIM_BUILD) \
@@ -152,9 +153,12 @@ run-sim:
 > @test -f $(SIM_BUILD)/tracker/zephyr/zephyr.exe || { echo "Run 'make sim' first"; exit 1; }
 > TRACKER_DEVICE_ID=$(SIM_DEVICE_ID) $(SIM_BUILD)/tracker/zephyr/zephyr.exe
 
+# Any distro mosquitto.service auto-started by apt would squat port 1883;
+# stop it so our own instance owns the port deterministically.
 broker:
 > @which mosquitto >/dev/null 2>&1 || { echo "Run: make setup-host"; exit 1; }
-> @pkill -x mosquitto 2>/dev/null || true
+> @sudo systemctl stop mosquitto 2>/dev/null || true
+> @fuser -k $(MQTT_PORT)/tcp 2>/dev/null || true
 > @mosquitto -p $(MQTT_PORT) -d
 > @echo "mosquitto started on port $(MQTT_PORT)"
 
@@ -163,4 +167,15 @@ ingest:
 >   --host $(BROKER_HOST) --port $(MQTT_PORT) --topic '$(MQTT_TOPIC)'
 
 server:
-> $(VENV)/bin/uvicorn app:app --host 0.0.0.0 --port 8080 --reload --app-dir server
+> $(VENV)/bin/uvicorn app:app --host 0.0.0.0 --port $(HTTP_PORT) --app-dir server
+
+# Stop everything the sim workflow starts: server (8080) and broker (1883)
+# by port, plus any backgrounded sim binaries. The '[z]ephyr.exe' pattern is
+# a standard trick: it matches real "zephyr.exe" processes but not pkill's
+# own command line (which literally contains "[z]ephyr.exe"), so the recipe
+# never kills its own shell.
+stop:
+> @fuser -k $(HTTP_PORT)/tcp 2>/dev/null && echo "stopped server (port $(HTTP_PORT))" || true
+> @fuser -k $(MQTT_PORT)/tcp  2>/dev/null && echo "stopped broker (port $(MQTT_PORT))" || true
+> @pkill -f '[z]ephyr.exe' 2>/dev/null && echo "stopped sim(s)" || true
+> @echo "cleanup done"
