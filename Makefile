@@ -1,45 +1,27 @@
-# nRF9151-DK application workflow -- Linux-native (run INSIDE WSL).
-# Build + flash + debug all use native Linux tools. USB reaches WSL via usbipd
-# (see `make windows-usb-passthrough`). Flash/debug go through `west`, which
-# dispatches to Nordic's nrfutil runner; serial console uses `tio`.
+# nRF9151-DK tracker — top-level Makefile.
 #
-#   make                        show this help
-#   make setup-zephyr           create venv, west update (pull SDK deps), install toolchain
-#   make setup-tools            install native host tools (nrfutil, usbip, tio)
-#   make windows-usb-passthrough  bind+attach the J-Link into WSL via usbipd (Windows)
-#   make build                  build APP for BOARD
-#   make flash                  program the board (west -> nrfutil)
-#   make recover                unlock a readback-protected chip
-#   make uart                   stream the serial console (tio)
-#   make gdb                    west debugserver + arm-zephyr-eabi-gdb
-#   make clean                  remove this app's build dir
+# Split across:
+#   mk/fw.mk      firmware: build/flash/debug on the DK + host toolchain setup
+#   mk/server.mk  server + native_sim: broker, ingest, web map, sim
 #
-# Variables (override on the command line):
-#   APP=hello                 app under apps/  (hello, gnss, ...)
-#   BOARD=nrf9151dk/nrf9151   board target; use nrf9151dk/nrf9151/ns for modem/GNSS
-#   PORT=/dev/ttyACM0         serial port for `make uart`
-#   BAUD=115200               serial baud
-#   RUNNER=nrfutil            west flash/debug runner (nrfutil|nrfjprog|openocd)
+# Main targets:
+#   make setup        one-time firmware setup (SDK + host build tools)
+#   make build        build APP for BOARD  (default APP=hello)
+#   make flash        flash APP to the DK
+#   make setup-host   one-time server setup (mosquitto + Python deps)
+#   make demo         localhost end-to-end: broker + ingest + web + sim
+#   make serve        real server: broker + ingest + web (no sim)
 
+# Use bash everywhere: recipes rely on /dev/tcp, `trap`, and other bashisms.
+SHELL := /bin/bash
 .RECIPEPREFIX := >
 .DEFAULT_GOAL := help
-.PHONY: help setup-zephyr setup-tools setup-host windows-usb-passthrough build flash recover uart gdb clean sim run-sim broker ingest server stop
 
-APP    ?= hello
-BOARD  ?= nrf9151dk/nrf9151
-PORT   ?= /dev/ttyACM0
-BAUD   ?= 115200
-RUNNER ?= nrfutil
-
-APP_DIR := apps/$(APP)
-BUILD   := build/$(APP)
-
+# ── shared paths (used by both included makefiles) ────────────────────────────
 REPO := $(CURDIR)
 WS   := $(abspath $(CURDIR)/..)
 VENV := $(WS)/.venv
 WEST := $(VENV)/bin/west
-SDK  := $(HOME)/zephyr-sdk-1.0.1
-GDB  := $(SDK)/gnu/arm-zephyr-eabi/bin/arm-zephyr-eabi-gdb
 
 # nrfutil lives in ~/.local/bin; add it to PATH for all targets
 export PATH := $(HOME)/.local/bin:$(PATH)
@@ -50,132 +32,42 @@ export REQUESTS_CA_BUNDLE := $(CA)
 export SSL_CERT_FILE := $(CA)
 export CURL_CA_BUNDLE := $(CA)
 
+include mk/fw.mk
+include mk/server.mk
+
+.PHONY: help
 help:
-> @echo "nRF9151-DK workflow (Linux-native, run inside WSL)"
+> @echo "nRF9151-DK tracker (Linux-native, run inside WSL)"
 > @echo ""
+> @echo "MAIN"
+> @echo "  make setup                    one-time firmware setup (SDK + host tools)"
+> @echo "  make build [APP=] [BOARD=]    build firmware app"
+> @echo "  make flash [APP=]             flash firmware to the DK"
+> @echo "  make setup-host               one-time server setup (mosquitto + py deps)"
+> @echo "  make demo                     localhost end-to-end: broker+ingest+web+sim"
+> @echo "  make serve                    real server: broker+ingest+web (no sim)"
+> @echo ""
+> @echo "FIRMWARE (mk/fw.mk)"
 > @echo "  make setup-zephyr             venv + west update + install toolchain"
 > @echo "  make setup-tools              install host tools (nrfutil, usbip, tio)"
 > @echo "  make windows-usb-passthrough  attach the J-Link into WSL (usbipd)"
-> @echo "  make build                    build APP for BOARD"
-> @echo "  make flash                    flash via west ($(RUNNER))"
 > @echo "  make recover                  unlock a readback-protected chip"
-> @echo "  make uart                     stream serial console (tio)"
+> @echo "  make uart [PORT=]             stream serial console (tio)"
 > @echo "  make gdb                      west debugserver + arm-gdb"
 > @echo "  make clean                    remove build dir for APP"
 > @echo ""
-> @echo "  make setup-host               install mosquitto + server Python deps"
-> @echo "  make sim                      build tracker as native Linux process (no DK needed)"
-> @echo "  make run-sim                  run the sim binary (connects to localhost mosquitto)"
-> @echo "  make broker                   start mosquitto (background) — required for ingest/sim"
+> @echo "SERVER + SIM (mk/server.mk)"
+> @echo "  make sim                      build tracker as native Linux process (no DK)"
+> @echo "  make run-sim [SIM_DEVICE_ID=] run the sim binary (foreground)"
+> @echo "  make broker                   start mosquitto (background)"
 > @echo "  make ingest                   start MQTT→SQLite ingest (server/tracker.db)"
-> @echo "  make server                   start FastAPI map server (http://localhost:8080)"
-> @echo "  make stop                     stop broker + server (free ports 1883, 8080)"
+> @echo "  make server                   start FastAPI map (http://localhost:8080)"
+> @echo "  make stop                     stop broker + server + sims (free ports)"
 > @echo ""
-> @echo "Current: APP=$(APP)  BOARD=$(BOARD)  PORT=$(PORT)  BAUD=$(BAUD)  RUNNER=$(RUNNER)"
+> @echo "Current: APP=$(APP)  BOARD=$(BOARD)  PORT=$(PORT)  RUNNER=$(RUNNER)"
 > @echo "Apps available: $$(ls apps 2>/dev/null | tr '\n' ' ')"
 > @echo ""
-> @echo "Examples:"
-> @echo "  make build APP=gnss BOARD=nrf9151dk/nrf9151/ns"
-> @echo "  make flash APP=gnss BOARD=nrf9151dk/nrf9151/ns"
-> @echo "  make uart PORT=/dev/ttyACM0"
-> @echo "  make sim && make run-sim      hardware-free test loop"
-
-setup-zephyr:
-> @mkdir -p $(HOME)/.cache/ztmp
-> @test -d $(VENV) || python3 -m venv $(VENV)
-> $(VENV)/bin/pip install --quiet --upgrade pip west
-> @test -d $(WS)/.west || $(WEST) init -l $(REPO)
-> cd $(WS) && $(WEST) update --narrow -o=--depth=1
-> @test -d $(SDK) || (cd $(WS) && TMPDIR=$(HOME)/.cache/ztmp $(WEST) sdk install -t arm-zephyr-eabi --install-base $(HOME))
-> @echo "setup complete."
-
-setup-tools:
-> @bash scripts/setup-tools.sh
-
-setup-host:
-> sudo apt-get install -y mosquitto mosquitto-clients
-> $(VENV)/bin/pip install --quiet -r server/requirements.txt
-> @echo "Host tools ready."
-
-windows-usb-passthrough:
-> @powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$$(wslpath -w scripts/windows/passthrough.ps1)"
-> @echo "If /dev/ttyACM* still missing, install usbipd on Windows (admin): winget install usbipd"
-
-build:
-> @test -d $(APP_DIR) || { echo "No app '$(APP)' in apps/ ($$(ls apps 2>/dev/null | tr '\n' ' '))"; exit 1; }
-> $(WEST) build -p auto -b $(BOARD) $(APP_DIR) -d $(BUILD)
-> @echo "built $(APP) for $(BOARD)"
-
-flash:
-> $(WEST) flash -d $(BUILD) --runner $(RUNNER)
-
-recover:
-> $(WEST) flash -d $(BUILD) --runner $(RUNNER) --recover
-
-uart:
-> stty -F $(PORT) $(BAUD) raw -echo -echoe -echok -echoctl -echoke
-> cat $(PORT)
-
-gdb:
-> @elf=$$(find $(BUILD) -name zephyr.elf 2>/dev/null | head -1); \
->  test -n "$$elf" || { echo "build first"; exit 1; }; \
->  echo "starting west debugserver ($(RUNNER)) on :3333..."; \
->  $(WEST) debugserver -d $(BUILD) --runner $(RUNNER) & \
->  sleep 2; \
->  $(GDB) "$$elf" -ex "target extended-remote :3333" -ex "monitor reset halt"
-
-clean:
-> rm -rf $(BUILD)
-
-# ── native_sim targets ────────────────────────────────────────────────────────
-# Uses NSOS (offloaded sockets) — no TAP, no root, no net-setup.
-# The sim binary connects directly to the host's network stack via localhost.
-# Nordic modem/GNSS stubs in src/lib/nrf_modem_mock/ fill all missing symbols.
-#
-# Workflow:
-#   make broker      # start mosquitto + python subscriber (background)
-#   make sim         # build (once)
-#   make run-sim     # run — publishes to localhost:1883 every 10s
-SIM_BUILD     := build/tracker-sim
-BROKER_HOST   ?= localhost
-MQTT_PORT     ?= 1883
-MQTT_TOPIC    ?= trackers/\#
-SIM_DEVICE_ID ?= sim-dev-1
-HTTP_PORT     ?= 8080
-
-sim:
-> $(WEST) build -p auto -b native_sim/native/64 apps/tracker -d $(SIM_BUILD) \
->   -DCONFIG_TRACKER_MQTT_BROKER_HOST=\"$(BROKER_HOST)\"
-> @echo "Sim built: $(SIM_BUILD)/tracker/zephyr/zephyr.exe"
-> @echo "Run: make run-sim  (override device: make run-sim SIM_DEVICE_ID=sim-dev-2)"
-
-run-sim:
-> @test -f $(SIM_BUILD)/tracker/zephyr/zephyr.exe || { echo "Run 'make sim' first"; exit 1; }
-> TRACKER_DEVICE_ID=$(SIM_DEVICE_ID) $(SIM_BUILD)/tracker/zephyr/zephyr.exe
-
-# Any distro mosquitto.service auto-started by apt would squat port 1883;
-# stop it so our own instance owns the port deterministically.
-broker:
-> @which mosquitto >/dev/null 2>&1 || { echo "Run: make setup-host"; exit 1; }
-> @sudo systemctl stop mosquitto 2>/dev/null || true
-> @fuser -k $(MQTT_PORT)/tcp 2>/dev/null || true
-> @mosquitto -p $(MQTT_PORT) -d
-> @echo "mosquitto started on port $(MQTT_PORT)"
-
-ingest:
-> $(VENV)/bin/python3 server/ingest.py \
->   --host $(BROKER_HOST) --port $(MQTT_PORT) --topic '$(MQTT_TOPIC)'
-
-server:
-> $(VENV)/bin/uvicorn app:app --host 0.0.0.0 --port $(HTTP_PORT) --app-dir server
-
-# Stop everything the sim workflow starts: server (8080) and broker (1883)
-# by port, plus any backgrounded sim binaries. The '[z]ephyr.exe' pattern is
-# a standard trick: it matches real "zephyr.exe" processes but not pkill's
-# own command line (which literally contains "[z]ephyr.exe"), so the recipe
-# never kills its own shell.
-stop:
-> @fuser -k $(HTTP_PORT)/tcp 2>/dev/null && echo "stopped server (port $(HTTP_PORT))" || true
-> @fuser -k $(MQTT_PORT)/tcp  2>/dev/null && echo "stopped broker (port $(MQTT_PORT))" || true
-> @pkill -f '[z]ephyr.exe' 2>/dev/null && echo "stopped sim(s)" || true
-> @echo "cleanup done"
+> @echo "Typical use:"
+> @echo "  make setup setup-host         # once"
+> @echo "  make demo                     # local end-to-end, open http://localhost:8080"
+> @echo "  make build flash              # to the real DK"

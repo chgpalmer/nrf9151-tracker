@@ -24,19 +24,14 @@ static nrf_modem_gnss_event_handler_type_t gnss_evt_handler;
 static struct nrf_modem_gnss_pvt_data_frame fake_pvt = {
 	.latitude   = 51.507400,
 	.longitude  = -0.127800,
-	.altitude   = 42.0f,
-	.accuracy   = 3.5f,
-	.speed      = 1.4f,
-	.heading    = 90.0f,
+	.altitude   = 15.0f,
+	.accuracy   = 4.0f,
+	.speed      = 1.3f,
+	.heading    = 55.0f,   /* NE, matches the lat/lon drift below */
 	.flags      = NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID |
 		      NRF_MODEM_GNSS_PVT_FLAG_VELOCITY_VALID,
 	.datetime = {
-		.year    = 2026,
-		.month   = 7,
-		.day     = 8,
-		.hour    = 12,
-		.minute  = 0,
-		.seconds = 0,
+		.year = 2026, .month = 7, .day = 8, .hour = 12,
 	},
 	.sv = {
 		[0] = { .sv = 10, .flags = NRF_MODEM_GNSS_SV_FLAG_USED_IN_FIX },
@@ -48,14 +43,12 @@ static struct nrf_modem_gnss_pvt_data_frame fake_pvt = {
 	},
 };
 
-static uint32_t tick_count;
-
 static void gnss_timer_fn(struct k_timer *t)
 {
 	ARG_UNUSED(t);
 
-	/* Deterministic walk: drift NE by ~1.1m/s so the track visibly moves. */
-	tick_count++;
+	/* Straight NE walk: +1e-5° lat (~1.1m) + 1e-5° lon (~0.7m) per second,
+	 * so the track drifts at roughly walking pace and is visibly moving. */
 	fake_pvt.latitude  += 0.00001;
 	fake_pvt.longitude += 0.00001;
 

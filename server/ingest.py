@@ -96,7 +96,18 @@ def main():
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
     client.on_connect = on_connect
     client.on_message = on_message
-    client.connect(args.host, args.port, keepalive=60)
+
+    # Broker may not be up yet (e.g. started moments earlier). Retry briefly.
+    for attempt in range(30):
+        try:
+            client.connect(args.host, args.port, keepalive=60)
+            break
+        except (ConnectionRefusedError, OSError) as e:
+            if attempt == 29:
+                print(f"[ingest] cannot reach broker {args.host}:{args.port}: {e}",
+                      file=sys.stderr)
+                return
+            time.sleep(0.5)
 
     try:
         client.loop_forever()
