@@ -71,6 +71,28 @@ Example:
 make build flash APP=gnss BOARD=nrf9151dk/nrf9151/ns
 ```
 
+## Serving the web map publicly
+
+`make serve` runs the full stack behind [Caddy](https://caddyserver.com/) as a
+reverse proxy. The FastAPI app binds `127.0.0.1` only; Caddy (a systemd service)
+is the sole public face. First run installs Caddy and opens the firewall
+(80/443/1883) automatically.
+
+```sh
+make serve                      # public HTTP by IP (works before DNS is set up)
+make serve CADDY_DOMAIN=noil.uk # public HTTPS: Caddy gets a Let's Encrypt cert
+```
+
+- **HTTP by IP** (default, `CADDY_DOMAIN` unset): reach the map at
+  `http://<public-ip>/`. Use this while DNS is still propagating.
+- **HTTPS by domain**: set `CADDY_DOMAIN` once the domain's A record points at
+  this host. Caddy fetches + auto-renews the cert; no manual certificate steps.
+
+Caddy runs as a persistent service, so HTTPS stays up across `Ctrl-C` and reboots
+(`Ctrl-C` on `make serve` only stops the app + broker + ingest). Requirements:
+the domain must resolve to this host, and OCI/cloud security lists must allow
+**80** (HTTP + ACME), **443** (HTTPS), and **1883** (MQTT for real devices).
+
 ## Apps
 
 - `apps/hello` — secure `printk` loop. Verified working.
