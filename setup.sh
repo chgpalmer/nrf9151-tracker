@@ -1,50 +1,46 @@
 #!/usr/bin/env bash
-# nrf9151-fw bootstrap. Creates the workspace directory, clones the repo, and
+# nrf9151-tracker bootstrap. Creates the workspace directory, clones the repo, and
 # pulls all SDK deps. Run from anywhere -- no need to mkdir first:
 #
-#   curl -fsSL https://raw.githubusercontent.com/chgpalmer/nrf9151-fw/main/setup.sh | bash
-#   cd nrf9151-fw && make build
+#   curl -fsSL https://raw.githubusercontent.com/chgpalmer/nrf9151-tracker/main/setup.sh | bash
+#   cd nrf9151-tracker-ws/nrf9151-tracker && make setup setup-host
 #
-# Or clone an existing workspace name:
+# Or override the workspace location:
 #   WS=~/my-ws bash <(curl -fsSL ...)
 #
 # Idempotent: re-running in an existing workspace just brings it up to date.
 set -eu
 
-REPO_URL="${REPO_URL:-https://github.com/chgpalmer/nrf9151-fw}"
+REPO_URL="${REPO_URL:-https://github.com/chgpalmer/nrf9151-tracker}"
 MANIFEST="${MANIFEST:-west.yml}"
-WS="${WS:-$HOME/nrf9151-ws}"
-VENV="$WS/.venv"
+WS="${WS:-$HOME/nrf9151-tracker-ws}"
+REPO_DIR="$WS/nrf9151-tracker"
 
-echo "== nrf9151-fw bootstrap -> $WS =="
+echo "== nrf9151-tracker bootstrap -> $WS =="
 mkdir -p "$WS"
 
-# 1. Python venv + west
-if [ ! -d "$VENV" ]; then
-  echo "-- creating venv"
-  python3 -m venv "$VENV"
-fi
-"$VENV/bin/pip" install --quiet --upgrade pip west
-
-WEST="$VENV/bin/west"
-
-# 2. west init (clones nrf9151-fw as the manifest repo) + pull deps
+# 1. west init (clones nrf9151-tracker as the manifest repo) if not already done
 if [ ! -d "$WS/.west" ]; then
+  echo "-- creating venv for west"
+  python3 -m venv "$WS/.venv"
+  "$WS/.venv/bin/pip" install --quiet --upgrade pip west
+
   echo "-- west init -m $REPO_URL"
-  "$WEST" init -m "$REPO_URL" --mf "$MANIFEST" "$WS"
+  "$WS/.venv/bin/west" init -m "$REPO_URL" --mf "$MANIFEST" "$WS"
+else
+  echo "-- workspace already initialized"
 fi
 
-# 3. Delegate the heavy lifting (west update + SDK) to the in-repo target.
-echo "-- make setup-zephyr"
-make -C "$WS/nrf9151-fw" setup-zephyr
+# 2. Delegate all setup to the Makefile (venv creation, west update, SDK, etc.)
+echo "-- make setup-zephyr (SDK + firmware toolchain)"
+make -C "$REPO_DIR" setup-zephyr
 
 cat <<EOF
 
 == bootstrap complete ==
-  cd $WS/nrf9151-fw
+  cd $REPO_DIR
   make setup-tools               # host tools: nrfutil, usbip, tio
-  make build                     # build the default app (hello)
-  make windows-usb-passthrough   # attach the J-Link into WSL (usbipd)
-  make flash
-  make uart
+  make setup-host                # server tools: mosquitto, Python deps
+  make build                     # build firmware
+  make demo                      # run local server + sim
 EOF

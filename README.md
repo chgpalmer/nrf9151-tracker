@@ -1,6 +1,6 @@
-# nrf9151-fw
+# nrf9151-tracker
 
-Firmware for the [Nordic nRF9151-DK](https://www.nordicsemi.com/Products/Development-hardware/nRF9151-DK)
+Firmware and server for the [Nordic nRF9151-DK](https://www.nordicsemi.com/Products/Development-hardware/nRF9151-DK)
 (nRF9151 SiP, Arm Cortex-M33, LTE-M / NB-IoT / GNSS). A freestanding, multi-app
 Zephyr/[NCS](https://github.com/nrfconnect/sdk-nrf) **west manifest repo** — the repo
 *is* the manifest, so contributors clone one thing and pull a trimmed subset of the SDK
@@ -14,18 +14,20 @@ board's USB is brought across the WSL2 boundary once with
 ## Quick start
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/chgpalmer/nrf9151-fw/main/setup.sh | bash
-cd ~/nrf9151-ws/nrf9151-fw
+curl -fsSL https://raw.githubusercontent.com/chgpalmer/nrf9151-tracker/main/setup.sh | bash
+cd ~/nrf9151-tracker-ws/nrf9151-tracker
 make setup-tools               # host tools: nrfutil, usbip, tio
+make setup-host                # server tools: mosquitto, Python deps
 make build                     # build the default app (hello), secure
 make windows-usb-passthrough   # attach the J-Link into WSL (usbipd)
 make flash
 make uart                      # -> "Hello from nRF9151-DK!"
+make demo                      # run local MQTT broker + server + sim
 ```
 
-`setup.sh` creates `~/nrf9151-ws/`, sets up a venv, runs `west init -m <this repo>`, then
+`setup.sh` creates `~/nrf9151-tracker-ws/`, sets up a venv, runs `west init -m <this repo>`, then
 `make setup-zephyr` (west update + minimal Zephyr SDK). The workspace dir is
-`$WS` (default `~/nrf9151-ws`) — override with `WS=~/my-path bash <(curl ...)`. Idempotent.
+`$WS` (default `~/nrf9151-tracker-ws`) — override with `WS=~/my-path bash <(curl ...)`. Idempotent.
 
 ## USB passthrough (one-time)
 
@@ -77,11 +79,15 @@ make build flash APP=gnss BOARD=nrf9151dk/nrf9151/ns
 ## Layout
 
 ```
-nrf9151-fw/
+nrf9151-tracker/
   west.yml            self-manifest; imports sdk-nrf v3.4.0 (trimmed allowlist)
   Makefile            the workflow (run inside WSL)
   setup.sh            one-line bootstrap (curl | bash)
+  mk/
+    fw.mk             firmware targets (build, flash, debug)
+    server.mk         server targets (broker, ingest, web, sim)
   apps/<name>/        CMakeLists.txt, prj.conf, src/main.c
+  server/             Python MQTT ingest, FastAPI web map
   scripts/
     setup-tools.sh    installs nrfutil / usbip / tio
     windows/

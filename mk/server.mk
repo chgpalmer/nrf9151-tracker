@@ -20,14 +20,25 @@ INGEST := $(VENV)/bin/python3 server/ingest.py --host $(BROKER_HOST) --port $(MQ
 WEB    := $(VENV)/bin/uvicorn app:app --host 0.0.0.0 --port $(HTTP_PORT) --app-dir server
 SIM    := TRACKER_DEVICE_ID=$(SIM_DEVICE_ID) $(SIM_BUILD)/tracker/zephyr/zephyr.exe
 
-.PHONY: setup-host sim run-sim broker ingest server serve demo stop
+.PHONY: setup-venv setup-west setup-host sim run-sim broker ingest server serve demo stop
 
-setup-host:
+# Create the Python venv if it doesn't exist. Just the venv, nothing else.
+setup-venv:
+> @if [ ! -d "$(VENV)" ]; then \
+>   echo "Creating venv at $(VENV)"; \
+>   python3 -m venv $(VENV); \
+>   $(VENV)/bin/pip install --quiet --upgrade pip; \
+> else \
+>   echo "venv exists at $(VENV)"; \
+> fi
+
+
+setup-host: setup-venv
 > sudo apt-get install -y mosquitto mosquitto-clients
 > $(VENV)/bin/pip install --quiet -r server/requirements.txt
 > @echo "Host tools ready."
 
-sim:
+sim: setup-zephyr
 > $(WEST) build -p auto -b native_sim/native/64 apps/tracker -d $(SIM_BUILD) \
 >   -DCONFIG_TRACKER_MQTT_BROKER_HOST=\"$(BROKER_HOST)\"
 > @echo "Sim built: $(SIM_BUILD)/tracker/zephyr/zephyr.exe"
@@ -40,7 +51,7 @@ run-sim:
 # Start mosquitto in the background and wait until the port accepts a TCP
 # connection before returning. Any distro mosquitto.service auto-started by
 # apt would squat 1883, so stop it and reclaim the port first.
-broker:
+broker: setup-host
 > @which mosquitto >/dev/null 2>&1 || { echo "Run: make setup-host"; exit 1; }
 > @sudo systemctl stop mosquitto 2>/dev/null || true
 > @fuser -k $(MQTT_PORT)/tcp 2>/dev/null || true
@@ -54,10 +65,10 @@ broker:
 >    exec 3>&-; echo "mosquitto started on port $(MQTT_PORT)"; \
 >  else echo "mosquitto failed — see /tmp/mosquitto-$(MQTT_PORT).log"; exit 1; fi
 
-ingest:
+ingest: setup-host
 > $(INGEST)
 
-server:
+server: setup-host
 > $(WEB)
 
 # Real-server stack: broker + ingest (background) + web (foreground).

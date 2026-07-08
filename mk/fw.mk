@@ -21,21 +21,39 @@ BUILD   := build/$(APP)
 SDK := $(HOME)/zephyr-sdk-1.0.1
 GDB := $(SDK)/gnu/arm-zephyr-eabi/bin/arm-zephyr-eabi-gdb
 
-.PHONY: setup setup-zephyr setup-tools windows-usb-passthrough \
+.PHONY: setup setup-system setup-zephyr setup-tools windows-usb-passthrough \
         build flash recover uart gdb clean
 
 # One-time firmware setup: pull SDK/deps + install host build tools.
 setup: setup-zephyr setup-tools
 > @echo "Firmware setup complete."
 
-setup-zephyr:
+# Install system packages needed for Zephyr (from official docs)
+# Idempotent: checks for cmake as a canary before running apt-get
+setup-system:
+> @if ! command -v cmake >/dev/null 2>&1; then \
+>   echo "Installing system build dependencies..."; \
+>   sudo apt-get update -qq && \
+>   sudo apt-get install --no-install-recommends -y git cmake ninja-build gperf \
+>     ccache dfu-util device-tree-compiler wget python3-dev python3-venv python3-tk \
+>     xz-utils file make gcc gcc-multilib g++-multilib libsdl2-dev libmagic1; \
+>   echo "System packages installed."; \
+> else \
+>   echo "System packages already installed."; \
+> fi
+
+setup-zephyr: setup-venv setup-system
 > @mkdir -p $(HOME)/.cache/ztmp
-> @test -d $(VENV) || python3 -m venv $(VENV)
-> $(VENV)/bin/pip install --quiet --upgrade pip west
-> @test -d $(WS)/.west || $(WEST) init -l $(REPO)
+> @if [ ! -d "$(WS)/.west" ]; then \
+>   $(VENV)/bin/pip install --quiet west; \
+>   $(WEST) init -l $(REPO); \
+> fi
 > cd $(WS) && $(WEST) update --narrow -o=--depth=1
+> @echo "Installing Zephyr Python dependencies..."
+> cd $(WS) && $(WEST) zephyr-export
+> cd $(WS) && $(WEST) packages pip --install
 > @test -d $(SDK) || (cd $(WS) && TMPDIR=$(HOME)/.cache/ztmp $(WEST) sdk install -t arm-zephyr-eabi --install-base $(HOME))
-> @echo "setup complete."
+> @echo "Zephyr SDK setup complete."
 
 setup-tools:
 > @bash scripts/setup-tools.sh
@@ -44,7 +62,7 @@ windows-usb-passthrough:
 > @powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$$(wslpath -w scripts/windows/passthrough.ps1)"
 > @echo "If /dev/ttyACM* still missing, install usbipd on Windows (admin): winget install usbipd"
 
-build:
+build: setup-zephyr
 > @test -d $(APP_DIR) || { echo "No app '$(APP)' in apps/ ($$(ls apps 2>/dev/null | tr '\n' ' '))"; exit 1; }
 > $(WEST) build -p auto -b $(BOARD) $(APP_DIR) -d $(BUILD)
 > @echo "built $(APP) for $(BOARD)"
