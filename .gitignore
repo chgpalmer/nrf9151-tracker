@@ -1,3 +1,6 @@
 build/
 *.hex
 .venv/
+server/location.db
+server/__pycache__/
+apps/tracker/boards/native_sim.conf
