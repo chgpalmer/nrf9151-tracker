@@ -45,7 +45,7 @@ def main():
     parser = argparse.ArgumentParser(description="nRF9151 MQTT subscriber")
     parser.add_argument("--host",  default="localhost", help="Broker host (default: localhost)")
     parser.add_argument("--port",  default=1883, type=int, help="Broker port (default: 1883)")
-    parser.add_argument("--topic", default="tracker/#", help="Topic filter (default: tracker/#)")
+    parser.add_argument("--topic", default="trackers/#", help="Topic filter (default: trackers/#)")
     args = parser.parse_args()
 
     client = mqtt.Client(

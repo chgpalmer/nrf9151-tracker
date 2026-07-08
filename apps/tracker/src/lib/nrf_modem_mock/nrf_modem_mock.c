@@ -10,10 +10,14 @@
 #include <string.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <errno.h>
 #include <zephyr/kernel.h>
 #include <nrf_modem_gnss.h>
 #include <nrf_modem_at.h>
 #include <modem/nrf_modem_lib.h>
+#include <hw_id.h>
+#include <nsi_host_trampolines.h>
 
 static nrf_modem_gnss_event_handler_type_t gnss_evt_handler;
 
@@ -22,7 +26,10 @@ static struct nrf_modem_gnss_pvt_data_frame fake_pvt = {
 	.longitude  = -0.127800,
 	.altitude   = 42.0f,
 	.accuracy   = 3.5f,
-	.flags      = NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID,
+	.speed      = 1.4f,
+	.heading    = 90.0f,
+	.flags      = NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID |
+		      NRF_MODEM_GNSS_PVT_FLAG_VELOCITY_VALID,
 	.datetime = {
 		.year    = 2026,
 		.month   = 7,
@@ -41,15 +48,51 @@ static struct nrf_modem_gnss_pvt_data_frame fake_pvt = {
 	},
 };
 
+static uint32_t tick_count;
+
 static void gnss_timer_fn(struct k_timer *t)
 {
 	ARG_UNUSED(t);
+
+	/* Deterministic walk: drift NE by ~1.1m/s so the track visibly moves. */
+	tick_count++;
+	fake_pvt.latitude  += 0.00001;
+	fake_pvt.longitude += 0.00001;
+
+	/* Advance the fake clock so successive fixes have increasing time. */
+	uint8_t s = fake_pvt.datetime.seconds + 1;
+	fake_pvt.datetime.seconds = s % 60;
+	if (s >= 60) {
+		fake_pvt.datetime.minute = (fake_pvt.datetime.minute + 1) % 60;
+	}
+
 	if (gnss_evt_handler) {
 		gnss_evt_handler(NRF_MODEM_GNSS_EVT_PVT);
 	}
 }
 
 K_TIMER_DEFINE(gnss_tick, gnss_timer_fn, NULL);
+
+/* ── hw_id (device identity) ── */
+
+int hw_id_get(char *buf, size_t buf_len)
+{
+	if (buf == NULL || buf_len == 0) {
+		return -EINVAL;
+	}
+
+	/* native_sim: read the host process env, not picolibc's empty env. */
+	const char *id = nsi_host_getenv("TRACKER_DEVICE_ID");
+	if (id == NULL || id[0] == '\0') {
+		id = CONFIG_TRACKER_SIM_DEVICE_ID;
+	}
+
+	if (strlen(id) >= buf_len) {
+		return -EINVAL;
+	}
+	strcpy(buf, id);
+	return 0;
+}
 
 /* ── nrf_modem_lib ── */
 

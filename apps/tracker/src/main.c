@@ -19,14 +19,14 @@
 #include <modem/nrf_modem_lib.h>
 #include <modem/lte_lc.h>
 #include <net/mqtt_helper.h>
+#include <hw_id.h>
 
 LOG_MODULE_REGISTER(tracker, CONFIG_TRACKER_LOG_LEVEL);
 
 /* ── configuration ──────────────────────────────────────────────── */
 #define BROKER_HOST       CONFIG_TRACKER_MQTT_BROKER_HOST
 #define BROKER_PORT       CONFIG_TRACKER_MQTT_BROKER_PORT
-#define MQTT_CLIENT_ID    CONFIG_TRACKER_MQTT_CLIENT_ID
-#define MQTT_TOPIC        CONFIG_TRACKER_MQTT_TOPIC
+#define TOPIC_PREFIX      CONFIG_TRACKER_MQTT_TOPIC_PREFIX
 
 #define GNSS_INTERVAL_S   1   /* PVT event rate */
 #define POST_INTERVAL_MS  (CONFIG_TRACKER_POST_INTERVAL_S * 1000)
@@ -39,6 +39,9 @@ static K_SEM_DEFINE(pvt_sem, 0, 1);
 static enum lte_lc_nw_reg_status lte_status = LTE_LC_NW_REG_NOT_REGISTERED;
 static bool lte_connected;
 static bool mqtt_connected;
+
+static char device_id[HW_ID_LEN];
+static char pos_topic[64];
 
 /* ── GNSS ─────────────────────────────────────────────────────────  */
 static void gnss_handler(int event)
@@ -137,7 +140,6 @@ static void on_disconnect(int result)
 static int tracker_mqtt_connect(void)
 {
 	static char broker_host[] = BROKER_HOST;
-	static char client_id[] = MQTT_CLIENT_ID;
 
 	struct mqtt_helper_cfg cfg = {
 		.cb.on_connack    = on_connack,
@@ -152,7 +154,7 @@ static int tracker_mqtt_connect(void)
 
 	struct mqtt_helper_conn_params params = {
 		.hostname  = { .ptr = broker_host, .size = strlen(broker_host) },
-		.device_id = { .ptr = client_id,   .size = strlen(client_id) },
+		.device_id = { .ptr = device_id,   .size = strlen(device_id) },
 	};
 
 	err = mqtt_helper_connect(&params);
@@ -164,36 +166,30 @@ static int tracker_mqtt_connect(void)
 
 static int mqtt_publish_fix(const struct nrf_modem_gnss_pvt_data_frame *p)
 {
-	if (p == NULL) {
-		snprintf(mqtt_payload, sizeof(mqtt_payload),
-			 "{\"dummy\":true,\"msg\":\"lte-datapath-test\"}");
-	} else {
-		uint8_t used = 0;
+	uint8_t used = 0;
 
-		for (int i = 0; i < NRF_MODEM_GNSS_MAX_SATELLITES; i++) {
-			if (p->sv[i].flags & NRF_MODEM_GNSS_SV_FLAG_USED_IN_FIX) {
-				used++;
-			}
+	for (int i = 0; i < NRF_MODEM_GNSS_MAX_SATELLITES; i++) {
+		if (p->sv[i].flags & NRF_MODEM_GNSS_SV_FLAG_USED_IN_FIX) {
+			used++;
 		}
-
-		snprintf(mqtt_payload, sizeof(mqtt_payload),
-			 "{\"lat\":%.6f,\"lon\":%.6f,"
-			 "\"alt\":%.1f,\"acc\":%.1f,"
-			 "\"sats_used\":%u,"
-			 "\"ts\":\"%04u-%02u-%02uT%02u:%02u:%02uZ\"}",
-			 p->latitude, p->longitude,
-			 (double)p->altitude, (double)p->accuracy,
-			 used,
-			 p->datetime.year, p->datetime.month, p->datetime.day,
-			 p->datetime.hour, p->datetime.minute, p->datetime.seconds);
 	}
 
-	static const char topic[] = MQTT_TOPIC;
+	bool vel = (p->flags & NRF_MODEM_GNSS_PVT_FLAG_VELOCITY_VALID);
+
+	snprintf(mqtt_payload, sizeof(mqtt_payload),
+		 "{\"lat\":%.6f,\"lon\":%.6f,"
+		 "\"alt\":%.1f,\"acc\":%.1f,"
+		 "\"spd\":%.1f,\"hdg\":%.1f,\"sats\":%u}",
+		 p->latitude, p->longitude,
+		 (double)p->altitude, (double)p->accuracy,
+		 vel ? (double)p->speed : 0.0,
+		 vel ? (double)p->heading : 0.0,
+		 used);
 
 	struct mqtt_publish_param msg = {
 		.message.topic.qos            = MQTT_QOS_0_AT_MOST_ONCE,
-		.message.topic.topic.utf8     = (uint8_t *)topic,
-		.message.topic.topic.size     = strlen(topic),
+		.message.topic.topic.utf8     = (uint8_t *)pos_topic,
+		.message.topic.topic.size     = strlen(pos_topic),
 		.message.payload.data         = (uint8_t *)mqtt_payload,
 		.message.payload.len          = strlen(mqtt_payload),
 		.message_id                   = mqtt_helper_msg_id_get(),
@@ -207,7 +203,7 @@ static int mqtt_publish_fix(const struct nrf_modem_gnss_pvt_data_frame *p)
 		return err;
 	}
 
-	LOG_INF("MQTT → %s (%zu bytes)", topic, strlen(mqtt_payload));
+	LOG_INF("MQTT → %s (%zu bytes)", pos_topic, strlen(mqtt_payload));
 	return 0;
 }
 
@@ -337,6 +333,17 @@ int main(void)
 		return err;
 	}
 
+	/* Device identity: IMEI on hardware, env/Kconfig on native_sim */
+	err = hw_id_get(device_id, sizeof(device_id));
+	if (err) {
+		LOG_ERR("hw_id_get: %d", err);
+		return err;
+	}
+	snprintf(pos_topic, sizeof(pos_topic), "%s/%s/position",
+		 TOPIC_PREFIX, device_id);
+	LOG_INF("device id: %s", device_id);
+	LOG_INF("position topic: %s", pos_topic);
+
 	/* Start LTE async — don't block, status loop shows progress */
 	LOG_INF("starting LTE (async)...");
 	err = lte_lc_connect_async(lte_handler);
@@ -386,13 +393,12 @@ int main(void)
 			print_status(&pvt, now);
 		}
 
-		/* Publish every POST_INTERVAL_MS once MQTT is connected.
-		 * Send real fix payload when available, dummy when not. */
-		if (now - last_post_ms >= POST_INTERVAL_MS && mqtt_connected) {
+		/* Publish position every POST_INTERVAL_MS once MQTT is
+		 * connected AND we have a valid fix. */
+		if (now - last_post_ms >= POST_INTERVAL_MS && mqtt_connected &&
+		    has_fix) {
 			last_post_ms = now;
-			LOG_INF("publishing %s payload to %s",
-				has_fix ? "fix" : "dummy", MQTT_TOPIC);
-			err = mqtt_publish_fix(has_fix ? &pvt : NULL);
+			err = mqtt_publish_fix(&pvt);
 			if (err) {
 				LOG_WRN("publish failed: %d (will retry)", err);
 			}

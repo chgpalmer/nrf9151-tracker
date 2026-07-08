@@ -19,13 +19,18 @@ config TRACKER_MQTT_BROKER_PORT
 	default 1883
 	range 1 65535
 
-config TRACKER_MQTT_CLIENT_ID
-	string "MQTT client ID"
-	default "nrf9151-tracker"
+config TRACKER_MQTT_TOPIC_PREFIX
+	string "MQTT topic prefix"
+	default "trackers"
+	help
+	  Topics are built at runtime as <prefix>/<device_id>/position.
 
-config TRACKER_MQTT_TOPIC
-	string "MQTT publish topic"
-	default "tracker/location"
+config TRACKER_SIM_DEVICE_ID
+	string "native_sim fallback device ID"
+	default "sim-dev-1"
+	help
+	  Used by the native_sim hw_id_get() stub when the TRACKER_DEVICE_ID
+	  environment variable is unset. Ignored on hardware (IMEI is used).
 
 endmenu
 

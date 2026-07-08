@@ -135,21 +135,22 @@ clean:
 #   make broker      # start mosquitto + python subscriber (background)
 #   make sim         # build (once)
 #   make run-sim     # run — publishes to localhost:1883 every 10s
-SIM_BUILD   := build/tracker-sim
-BROKER_HOST ?= localhost
-MQTT_PORT   ?= 1883
-MQTT_TOPIC  ?= tracker/\#
-SERVER_VENV := $(WS)/.venv
+SIM_BUILD     := build/tracker-sim
+BROKER_HOST   ?= localhost
+MQTT_PORT     ?= 1883
+MQTT_TOPIC    ?= trackers/\#
+SIM_DEVICE_ID ?= sim-dev-1
+SERVER_VENV   := $(WS)/.venv
 
 sim:
 > $(WEST) build -p auto -b native_sim/native/64 apps/tracker -d $(SIM_BUILD) \
 >   -DCONFIG_TRACKER_MQTT_BROKER_HOST=\"$(BROKER_HOST)\"
 > @echo "Sim built: $(SIM_BUILD)/tracker/zephyr/zephyr.exe"
-> @echo "Run: make run-sim"
+> @echo "Run: make run-sim  (override device: make run-sim SIM_DEVICE_ID=sim-dev-2)"
 
 run-sim:
 > @test -f $(SIM_BUILD)/tracker/zephyr/zephyr.exe || { echo "Run 'make sim' first"; exit 1; }
-> $(SIM_BUILD)/tracker/zephyr/zephyr.exe
+> TRACKER_DEVICE_ID=$(SIM_DEVICE_ID) $(SIM_BUILD)/tracker/zephyr/zephyr.exe
 
 broker:
 > @which mosquitto >/dev/null 2>&1 || { echo "Run: make setup-host"; exit 1; }
@@ -159,8 +160,7 @@ broker:
 
 ingest:
 > $(VENV)/bin/python3 server/ingest.py \
->   --host $(BROKER_HOST) --port $(MQTT_PORT) --topic '$(MQTT_TOPIC)' \
->   --db server/location.db
+>   --host $(BROKER_HOST) --port $(MQTT_PORT) --topic '$(MQTT_TOPIC)'
 
 server:
 > $(VENV)/bin/uvicorn app:app --host 0.0.0.0 --port 8080 --reload --app-dir server
