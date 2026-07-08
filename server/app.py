@@ -45,57 +45,91 @@ MAP_HTML = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <style>
-  body { margin: 0; font-family: sans-serif; }
-  #map { height: 100vh; }
-  #hud {
-    position: absolute; top: 10px; right: 10px; z-index: 1000;
-    background: rgba(255,255,255,0.94); padding: 12px 14px;
-    border-radius: 6px; font-size: 13px; min-width: 220px;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, sans-serif; }
+  #app { display: flex; height: 100vh; }
+  #map { flex: 1; height: 100%; }
+  #side {
+    width: 340px; height: 100%; overflow-y: auto;
+    border-left: 1px solid #ddd; background: #fafafa;
+    padding: 12px 14px; font-size: 13px;
   }
-  #hud h3 { margin: 0 0 8px; font-size: 15px; }
-  #hud p  { margin: 3px 0; }
-  #hud label { font-size: 11px; color: #666; display: block; margin: 6px 0 2px; }
-  #hud select { width: 100%; padding: 3px; }
+  #side h1 { font-size: 16px; margin: 0 0 10px; }
+  label { font-size: 11px; color: #666; display: block; margin: 10px 0 3px; }
+  select { width: 100%; padding: 4px; }
+  .badge {
+    display: flex; align-items: center; gap: 8px;
+    padding: 10px 12px; border-radius: 8px; margin: 10px 0;
+    font-size: 15px; font-weight: 600;
+  }
+  .badge .sub { font-size: 11px; font-weight: 400; color: #444; }
+  .badge.online  { background: #dcfce7; color: #166534; }
+  .badge.stale   { background: #fef9c3; color: #854d0e; }
+  .badge.offline { background: #fee2e2; color: #991b1b; }
+  .badge.none    { background: #eee;    color: #666; }
   .win { display: flex; gap: 4px; margin-top: 4px; flex-wrap: wrap; }
   .win button {
     flex: 1; padding: 4px 0; font-size: 11px; cursor: pointer;
-    border: 1px solid #ccc; background: #f5f5f5; border-radius: 4px;
+    border: 1px solid #ccc; background: #fff; border-radius: 4px;
   }
   .win button.active { background: #2563eb; color: #fff; border-color: #2563eb; }
+  .chart-box { margin-top: 12px; height: 120px; position: relative; }
+  table { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 12px; }
+  th, td { text-align: left; padding: 3px 5px; border-bottom: 1px solid #eee; }
+  th { color: #666; font-weight: 600; position: sticky; top: 0; background: #fafafa; }
+  #tbl-wrap { max-height: 260px; overflow-y: auto; margin-top: 4px;
+              border: 1px solid #eee; border-radius: 4px; }
+  tbody tr { cursor: pointer; }
+  tbody tr:hover { background: #eef4ff; }
+  tbody tr.sel { background: #dbeafe; }
   .muted { color: #666; font-size: 11px; }
+  .leaflet-popup-content { font-size: 12px; line-height: 1.5; }
 </style>
 </head>
 <body>
-<div id="map"></div>
-<div id="hud">
-  <h3>nRF9151 Tracker</h3>
-  <label>Device</label>
-  <select id="device"></select>
-  <label>Time window</label>
-  <div class="win" id="windows"></div>
-  <p id="status" class="muted">loading...</p>
-  <p id="coords"></p>
-  <p id="vel" class="muted"></p>
-  <p id="meta" class="muted"></p>
+<div id="app">
+  <div id="map"></div>
+  <div id="side">
+    <h1>nRF9151 Tracker</h1>
+    <label>Device</label>
+    <select id="device"></select>
+    <div id="badge" class="badge none">— <span class="sub"></span></div>
+    <label>Time window</label>
+    <div class="win" id="windows"></div>
+    <label>Speed (km/h)</label>
+    <div class="chart-box"><canvas id="speedChart"></canvas></div>
+    <label>Accuracy (m)</label>
+    <div class="chart-box"><canvas id="accChart"></canvas></div>
+    <label>History (<span id="count">0</span>)</label>
+    <div id="tbl-wrap">
+      <table>
+        <thead><tr><th>Time</th><th>km/h</th><th>Acc</th><th>Sats</th></tr></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+  </div>
 </div>
 <script>
+const COLOR = '#2563eb';
 const map = L.map('map').setView([51.5074, -0.1278], 13);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   attribution: '© OpenStreetMap contributors'
 }).addTo(map);
 
-let marker = null;
-let path = L.polyline([], {color: '#2563eb', weight: 3}).addTo(map);
+const track = L.polyline([], {color: COLOR, weight: 2, opacity: 0.6}).addTo(map);
+const layer = L.layerGroup().addTo(map);   // markers + accuracy circles
+let markersById = {};                       // fix id -> marker
 let centered = false;
+let lastDevice = null;
 
+// ── time window ──
 const WINDOWS = [
   {label: '15m', min: 15}, {label: '1h', min: 60}, {label: '6h', min: 360},
   {label: '24h', min: 1440}, {label: 'all', min: 0},
 ];
-let sinceMin = 60;  // default 1h
-
+let sinceMin = 60;
 const winDiv = document.getElementById('windows');
 WINDOWS.forEach(w => {
   const b = document.createElement('button');
@@ -113,6 +147,116 @@ WINDOWS.forEach(w => {
 
 const deviceSel = document.getElementById('device');
 deviceSel.onchange = () => { centered = false; poll(); };
+
+// ── charts ──
+const chartOpts = {
+  responsive: true, maintainAspectRatio: false, animation: false,
+  scales: { x: { display: false }, y: { beginAtZero: true } },
+  plugins: { legend: { display: false } },
+  elements: { point: { radius: 0 } },
+};
+const speedChart = new Chart(document.getElementById('speedChart'), {
+  type: 'line',
+  data: { labels: [], datasets: [{ data: [], borderColor: COLOR, borderWidth: 1.5, tension: 0.2 }] },
+  options: chartOpts,
+});
+const accChart = new Chart(document.getElementById('accChart'), {
+  type: 'line',
+  data: { labels: [], datasets: [{ data: [], borderColor: '#dc2626', borderWidth: 1.5, tension: 0.2 }] },
+  options: chartOpts,
+});
+
+// ── helpers ──
+const kmh = mps => (mps ?? 0) * 3.6;
+function fmtTime(ts) {
+  return new Date(ts * 1000).toLocaleTimeString();
+}
+function fmtAge(sec) {
+  if (sec < 60) return sec + 's ago';
+  if (sec < 3600) return Math.floor(sec / 60) + 'm ago';
+  if (sec < 86400) return Math.floor(sec / 3600) + 'h ago';
+  return Math.floor(sec / 86400) + 'd ago';
+}
+function popupHtml(p) {
+  const age = Math.round(Date.now()/1000 - p.received_ts);
+  return `<b>${new Date(p.received_ts*1000).toLocaleString()}</b><br>`
+    + `Lat ${p.lat.toFixed(6)} &nbsp; Lon ${p.lon.toFixed(6)}<br>`
+    + `Alt ${p.alt?.toFixed(1) ?? '?'} m<br>`
+    + `Accuracy ${p.acc?.toFixed(1) ?? '?'} m &nbsp; `
+    + `Speed ${kmh(p.spd).toFixed(1)} km/h<br>`
+    + `Heading ${p.hdg?.toFixed(0) ?? '?'}° &nbsp; Sats ${p.sats ?? '?'}<br>`
+    + `Age ${fmtAge(age)}`;
+}
+
+function setBadge(pts) {
+  const el = document.getElementById('badge');
+  if (!pts.length) { el.className = 'badge none'; el.innerHTML = '— <span class="sub"></span>'; return; }
+  const newest = pts[pts.length - 1].received_ts;
+  const age = Math.round(Date.now()/1000 - newest);
+  let cls, txt;
+  if (age < 30)      { cls = 'online';  txt = '🟢 Online'; }
+  else if (age < 300){ cls = 'stale';   txt = '🟡 Stale'; }
+  else               { cls = 'offline'; txt = '🔴 Offline'; }
+  el.className = 'badge ' + cls;
+  el.innerHTML = `${txt} <span class="sub">last seen ${fmtAge(age)}</span>`;
+}
+
+function focusFix(p) {
+  map.setView([p.lat, p.lon], Math.max(map.getZoom(), 17));
+  const m = markersById[p.id];
+  if (m) m.openPopup();
+  document.querySelectorAll('#tbody tr').forEach(tr =>
+    tr.classList.toggle('sel', Number(tr.dataset.id) === p.id));
+}
+
+function rebuildMap(pts) {
+  layer.clearLayers();
+  markersById = {};
+  track.setLatLngs(pts.map(p => [p.lat, p.lon]));
+  pts.forEach((p, i) => {
+    const isLast = i === pts.length - 1;
+    if (p.acc) {
+      L.circle([p.lat, p.lon], {
+        radius: p.acc, color: COLOR, weight: 1, opacity: 0.3,
+        fillColor: COLOR, fillOpacity: 0.07,
+      }).addTo(layer);
+    }
+    const m = L.circleMarker([p.lat, p.lon], {
+      radius: isLast ? 7 : 4,
+      color: COLOR, weight: isLast ? 3 : 1,
+      fillColor: isLast ? '#60a5fa' : '#fff', fillOpacity: 0.9,
+    }).bindPopup(popupHtml(p)).addTo(layer);
+    markersById[p.id] = m;
+  });
+}
+
+function rebuildCharts(pts) {
+  const labels = pts.map(p => fmtTime(p.received_ts));
+  speedChart.data.labels = labels;
+  speedChart.data.datasets[0].data = pts.map(p => +kmh(p.spd).toFixed(1));
+  speedChart.update();
+  accChart.data.labels = labels;
+  accChart.data.datasets[0].data = pts.map(p => p.acc ?? null);
+  accChart.update();
+}
+
+function rebuildTable(pts) {
+  document.getElementById('count').textContent = pts.length;
+  const tb = document.getElementById('tbody');
+  tb.innerHTML = '';
+  // newest first
+  for (let i = pts.length - 1; i >= 0; i--) {
+    const p = pts[i];
+    const tr = document.createElement('tr');
+    tr.dataset.id = p.id;
+    tr.innerHTML = `<td>${fmtTime(p.received_ts)}</td>`
+      + `<td>${kmh(p.spd).toFixed(1)}</td>`
+      + `<td>${p.acc?.toFixed(1) ?? '?'}</td>`
+      + `<td>${p.sats ?? '?'}</td>`;
+    tr.onclick = () => focusFix(p);
+    tb.appendChild(tr);
+  }
+}
 
 async function loadDevices() {
   try {
@@ -133,41 +277,26 @@ async function loadDevices() {
 
 async function poll() {
   const device = deviceSel.value;
-  if (!device) {
-    document.getElementById('status').textContent = 'no devices yet';
-    return;
-  }
+  if (device !== lastDevice) { centered = false; lastDevice = device; }
+  if (!device) { setBadge([]); return; }
   try {
     const q = new URLSearchParams({device, limit: 500});
     if (sinceMin > 0) q.set('since', sinceMin);
     const r = await fetch('/api/positions?' + q);
     const pts = await r.json();
-    if (!pts.length) {
-      document.getElementById('status').textContent = 'no fixes in window';
-      path.setLatLngs([]);
-      return;
+
+    setBadge(pts);
+    rebuildMap(pts);
+    rebuildCharts(pts);
+    rebuildTable(pts);
+
+    if (pts.length && !centered) {
+      const last = pts[pts.length - 1];
+      map.setView([last.lat, last.lon], 16);
+      centered = true;
     }
-
-    path.setLatLngs(pts.map(p => [p.lat, p.lon]));
-
-    const last = pts[pts.length - 1];
-    const ll = [last.lat, last.lon];
-    if (!marker) {
-      marker = L.circleMarker(ll, {radius: 8, color: '#2563eb', fillColor: '#60a5fa', fillOpacity: 0.9}).addTo(map);
-    } else {
-      marker.setLatLng(ll);
-    }
-    if (!centered) { map.setView(ll, 16); centered = true; }
-
-    document.getElementById('status').textContent = `${pts.length} fix(es)`;
-    document.getElementById('coords').textContent = `${last.lat.toFixed(6)}, ${last.lon.toFixed(6)}`;
-    document.getElementById('vel').textContent =
-      `spd ${last.spd?.toFixed(1) ?? '?'} m/s   hdg ${last.hdg?.toFixed(0) ?? '?'}°`;
-    const age = Math.round(Date.now()/1000 - last.received_ts);
-    document.getElementById('meta').textContent =
-      `acc ±${last.acc ?? '?'}m   sats ${last.sats ?? '?'}   ${age}s ago`;
   } catch(e) {
-    document.getElementById('status').textContent = 'error: ' + e.message;
+    document.getElementById('badge').innerHTML = 'error: ' + e.message;
   }
 }
 
@@ -199,7 +328,7 @@ async def devices():
 async def positions(device: str, since: int = 0, limit: int = 500):
     db = app.state.db
     params = [device]
-    sql = ("SELECT lat, lon, alt, acc, spd, hdg, sats, received_ts "
+    sql = ("SELECT id, lat, lon, alt, acc, spd, hdg, sats, received_ts "
            "FROM positions WHERE device_id = ?")
     if since > 0:
         sql += " AND received_ts >= ?"
