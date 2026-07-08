@@ -3,33 +3,30 @@
  *
  * Loop:
  *   - sample GNSS every second (1 Hz PVT events)
- *   - POST latest fix to HTTP server every 10 seconds
+ *   - MQTT publish latest fix every 10 seconds
  *
  * LTE is brought up once at boot and kept connected. GNSS runs
  * concurrently via the modem's LTE-M+GPS timeslotting.
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
-#include <zephyr/posix/netinet/in.h>
-#include <zephyr/posix/sys/socket.h>
-#include <zephyr/posix/arpa/inet.h>
-#include <zephyr/posix/unistd.h>
-#include <zephyr/net/socket.h>
-#include <zephyr/net/http/client.h>
 #include <nrf_modem_gnss.h>
 #include <nrf_modem_at.h>
 #include <modem/nrf_modem_lib.h>
 #include <modem/lte_lc.h>
+#include <net/mqtt_helper.h>
 
 LOG_MODULE_REGISTER(tracker, CONFIG_TRACKER_LOG_LEVEL);
 
 /* ── configuration ──────────────────────────────────────────────── */
-#define POST_SERVER_HOST  CONFIG_TRACKER_SERVER_HOST
-#define POST_SERVER_PORT  CONFIG_TRACKER_SERVER_PORT
-#define POST_PATH         CONFIG_TRACKER_SERVER_PATH
+#define BROKER_HOST       CONFIG_TRACKER_MQTT_BROKER_HOST
+#define BROKER_PORT       CONFIG_TRACKER_MQTT_BROKER_PORT
+#define MQTT_CLIENT_ID    CONFIG_TRACKER_MQTT_CLIENT_ID
+#define MQTT_TOPIC        CONFIG_TRACKER_MQTT_TOPIC
 
 #define GNSS_INTERVAL_S   1   /* PVT event rate */
 #define POST_INTERVAL_MS  (CONFIG_TRACKER_POST_INTERVAL_S * 1000)
@@ -41,7 +38,7 @@ static K_SEM_DEFINE(pvt_sem, 0, 1);
 
 static enum lte_lc_nw_reg_status lte_status = LTE_LC_NW_REG_NOT_REGISTERED;
 static bool lte_connected;
-
+static bool mqtt_connected;
 
 /* ── GNSS ─────────────────────────────────────────────────────────  */
 static void gnss_handler(int event)
@@ -118,30 +115,57 @@ static const char *lte_status_str(void)
 	}
 }
 
-/* ── HTTP POST ────────────────────────────────────────────────────  */
-static uint8_t http_recv_buf[512];
-static char    http_payload[256];
-static char    http_host[64];
+/* ── MQTT ─────────────────────────────────────────────────────────  */
+static char mqtt_payload[256];
 
-static int http_response_cb(struct http_response *rsp,
-			    enum http_final_call final_data,
-			    void *user_data)
+static void on_connack(enum mqtt_conn_return_code rc, bool session_present)
 {
-	if (final_data == HTTP_DATA_FINAL) {
-		LOG_INF("HTTP %d %s", rsp->http_status_code,
-			rsp->http_status);
+	if (rc == MQTT_CONNECTION_ACCEPTED) {
+		LOG_INF("MQTT connected to %s:%d", BROKER_HOST, BROKER_PORT);
+		mqtt_connected = true;
+	} else {
+		LOG_WRN("MQTT connack refused: %d", rc);
 	}
-	return 0;
 }
 
-/* Pass NULL for p to send a dummy payload (LTE data-path test only). */
-static int http_post_fix(const struct nrf_modem_gnss_pvt_data_frame *p)
+static void on_disconnect(int result)
 {
-	struct sockaddr_in server = {0};
-	int sock, err;
+	LOG_INF("MQTT disconnected: %d", result);
+	mqtt_connected = false;
+}
 
+static int tracker_mqtt_connect(void)
+{
+	static char broker_host[] = BROKER_HOST;
+	static char client_id[] = MQTT_CLIENT_ID;
+
+	struct mqtt_helper_cfg cfg = {
+		.cb.on_connack    = on_connack,
+		.cb.on_disconnect = on_disconnect,
+	};
+
+	int err = mqtt_helper_init(&cfg);
+	if (err) {
+		LOG_ERR("mqtt_helper_init: %d", err);
+		return err;
+	}
+
+	struct mqtt_helper_conn_params params = {
+		.hostname  = { .ptr = broker_host, .size = strlen(broker_host) },
+		.device_id = { .ptr = client_id,   .size = strlen(client_id) },
+	};
+
+	err = mqtt_helper_connect(&params);
+	if (err) {
+		LOG_ERR("mqtt_helper_connect: %d", err);
+	}
+	return err;
+}
+
+static int mqtt_publish_fix(const struct nrf_modem_gnss_pvt_data_frame *p)
+{
 	if (p == NULL) {
-		snprintf(http_payload, sizeof(http_payload),
+		snprintf(mqtt_payload, sizeof(mqtt_payload),
 			 "{\"dummy\":true,\"msg\":\"lte-datapath-test\"}");
 	} else {
 		uint8_t used = 0;
@@ -152,7 +176,7 @@ static int http_post_fix(const struct nrf_modem_gnss_pvt_data_frame *p)
 			}
 		}
 
-		snprintf(http_payload, sizeof(http_payload),
+		snprintf(mqtt_payload, sizeof(mqtt_payload),
 			 "{\"lat\":%.6f,\"lon\":%.6f,"
 			 "\"alt\":%.1f,\"acc\":%.1f,"
 			 "\"sats_used\":%u,"
@@ -164,50 +188,26 @@ static int http_post_fix(const struct nrf_modem_gnss_pvt_data_frame *p)
 			 p->datetime.hour, p->datetime.minute, p->datetime.seconds);
 	}
 
-	sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-	if (sock < 0) {
-		LOG_ERR("socket: %d", errno);
-		return -errno;
-	}
+	static const char topic[] = MQTT_TOPIC;
 
-	server.sin_family = AF_INET;
-	server.sin_port = htons(POST_SERVER_PORT);
-	inet_pton(AF_INET, POST_SERVER_HOST, &server.sin_addr);
-
-	err = connect(sock, (struct sockaddr *)&server, sizeof(server));
-	if (err) {
-		LOG_ERR("connect to %s:%d failed: %d", POST_SERVER_HOST,
-			POST_SERVER_PORT, errno);
-		close(sock);
-		return -errno;
-	}
-
-	snprintf(http_host, sizeof(http_host), "%s:%d",
-		 POST_SERVER_HOST, POST_SERVER_PORT);
-
-	struct http_request req = {
-		.method             = HTTP_POST,
-		.url                = POST_PATH,
-		.host               = http_host,
-		.protocol           = "HTTP/1.1",
-		.payload            = http_payload,
-		.payload_len        = strlen(http_payload),
-		.content_type_value = "application/json",
-		.response           = http_response_cb,
-		.recv_buf           = http_recv_buf,
-		.recv_buf_len       = sizeof(http_recv_buf),
+	struct mqtt_publish_param msg = {
+		.message.topic.qos            = MQTT_QOS_0_AT_MOST_ONCE,
+		.message.topic.topic.utf8     = (uint8_t *)topic,
+		.message.topic.topic.size     = strlen(topic),
+		.message.payload.data         = (uint8_t *)mqtt_payload,
+		.message.payload.len          = strlen(mqtt_payload),
+		.message_id                   = mqtt_helper_msg_id_get(),
+		.dup_flag                     = 0,
+		.retain_flag                  = 0,
 	};
 
-	err = http_client_req(sock, &req, 5000, NULL);
-	close(sock);
-
-	if (err < 0) {
-		LOG_ERR("http_client_req: %d", err);
+	int err = mqtt_helper_publish(&msg);
+	if (err) {
+		LOG_ERR("mqtt_helper_publish: %d", err);
 		return err;
 	}
 
-	LOG_INF("POST %s:%d%s -> %d bytes",
-		POST_SERVER_HOST, POST_SERVER_PORT, POST_PATH, err);
+	LOG_INF("MQTT → %s (%zu bytes)", topic, strlen(mqtt_payload));
 	return 0;
 }
 
@@ -244,15 +244,14 @@ static void print_status(const struct nrf_modem_gnss_pvt_data_frame *p,
 		strncpy(buf, at_resp, sizeof(buf) - 1);
 		buf[sizeof(buf) - 1] = '\0';
 
-		char *p = strchr(buf, ':');
-		if (p) {
-			p++; /* skip ':' */
+		char *cp = strchr(buf, ':');
+		if (cp) {
+			cp++; /* skip ':' */
 			/* field 1: reg (skip) */
-			strtok(p, ",");
+			strtok(cp, ",");
 			/* field 2: long name (quoted) */
 			char *f = strtok(NULL, ",");
 			if (f && f[0] == '"') {
-				/* strip quotes */
 				f++;
 				char *e = strchr(f, '"');
 				if (e) {
@@ -321,6 +320,8 @@ static void print_status(const struct nrf_modem_gnss_pvt_data_frame *p,
 			LOG_WRN("GNSS: blocked by LTE");
 		}
 	}
+
+	LOG_INF("MQTT: %s", mqtt_connected ? "connected" : "disconnected");
 }
 
 /* ── main ─────────────────────────────────────────────────────────  */
@@ -355,6 +356,7 @@ int main(void)
 	int64_t last_post_ms   = 0;
 	int64_t last_status_ms = 0;
 	bool    has_fix        = false;
+	bool    mqtt_init_done = false;
 
 	for (;;) {
 		/* Wait for next PVT event (1 Hz) with a 2s timeout so the
@@ -365,26 +367,36 @@ int main(void)
 
 		int64_t now = k_uptime_get();
 
+		/* Connect MQTT once LTE is up */
+		if (lte_connected && !mqtt_init_done) {
+			mqtt_init_done = true;
+			LOG_INF("LTE up — connecting MQTT to %s:%d...",
+				BROKER_HOST, BROKER_PORT);
+			err = tracker_mqtt_connect();
+			if (err) {
+				LOG_WRN("MQTT connect failed: %d (will retry on next LTE attach)",
+					err);
+				mqtt_init_done = false;
+			}
+		}
+
 		/* Status block every STATUS_INTERVAL_MS */
 		if (now - last_status_ms >= STATUS_INTERVAL_MS) {
 			last_status_ms = now;
 			print_status(&pvt, now);
 		}
 
-		/* POST every POST_INTERVAL_MS as soon as LTE is up.
-		 * Send real fix payload when available, dummy when not --
-		 * this tests the data path independently of GNSS. */
-		if (now - last_post_ms >= POST_INTERVAL_MS && lte_connected) {
+		/* Publish every POST_INTERVAL_MS once MQTT is connected.
+		 * Send real fix payload when available, dummy when not. */
+		if (now - last_post_ms >= POST_INTERVAL_MS && mqtt_connected) {
 			last_post_ms = now;
-			LOG_INF("sending %s payload to %s:%d%s",
-				has_fix ? "fix" : "dummy",
-				POST_SERVER_HOST, POST_SERVER_PORT, POST_PATH);
-			err = http_post_fix(has_fix ? &pvt : NULL);
+			LOG_INF("publishing %s payload to %s",
+				has_fix ? "fix" : "dummy", MQTT_TOPIC);
+			err = mqtt_publish_fix(has_fix ? &pvt : NULL);
 			if (err) {
-				LOG_WRN("post failed: %d (will retry)", err);
+				LOG_WRN("publish failed: %d (will retry)", err);
 			}
-		} else if (!lte_connected) {
-			LOG_DBG("post waiting for LTE");
+		} else if (!mqtt_connected) {
 			last_post_ms = now - POST_INTERVAL_MS + 3000;
 		}
 	}

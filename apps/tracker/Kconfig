@@ -6,22 +6,26 @@ config TRACKER_LOG_LEVEL
 	range 0 4
 
 config TRACKER_POST_INTERVAL_S
-	int "HTTP POST interval in seconds"
+	int "MQTT publish interval in seconds"
 	default 10
 	range 1 3600
 
-config TRACKER_SERVER_HOST
-	string "HTTP server IP address (DNS not yet wired up, use IP)"
-	default "3.219.145.192"
+config TRACKER_MQTT_BROKER_HOST
+	string "MQTT broker hostname or IP"
+	default "test.mosquitto.org"
 
-config TRACKER_SERVER_PORT
-	int "HTTP server port"
-	default 80
+config TRACKER_MQTT_BROKER_PORT
+	int "MQTT broker port"
+	default 1883
 	range 1 65535
 
-config TRACKER_SERVER_PATH
-	string "HTTP POST path"
-	default "/post"
+config TRACKER_MQTT_CLIENT_ID
+	string "MQTT client ID"
+	default "nrf9151-tracker"
+
+config TRACKER_MQTT_TOPIC
+	string "MQTT publish topic"
+	default "tracker/location"
 
 endmenu
 

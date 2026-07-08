@@ -23,7 +23,7 @@
 
 .RECIPEPREFIX := >
 .DEFAULT_GOAL := help
-.PHONY: help setup-zephyr setup-tools windows-usb-passthrough build flash recover uart gdb clean
+.PHONY: help setup-zephyr setup-tools setup-host windows-usb-passthrough build flash recover uart gdb clean sim run-sim broker
 
 APP    ?= hello
 BOARD  ?= nrf9151dk/nrf9151
@@ -63,6 +63,11 @@ help:
 > @echo "  make gdb                      west debugserver + arm-gdb"
 > @echo "  make clean                    remove build dir for APP"
 > @echo ""
+> @echo "  make setup-host               install mosquitto + paho-mqtt (for sim workflow)"
+> @echo "  make sim                      build tracker as native Linux process (no DK needed)"
+> @echo "  make run-sim                  run the sim binary (connects to localhost mosquitto)"
+> @echo "  make broker                   start mosquitto + python subscriber"
+> @echo ""
 > @echo "Current: APP=$(APP)  BOARD=$(BOARD)  PORT=$(PORT)  BAUD=$(BAUD)  RUNNER=$(RUNNER)"
 > @echo "Apps available: $$(ls apps 2>/dev/null | tr '\n' ' ')"
 > @echo ""
@@ -70,6 +75,7 @@ help:
 > @echo "  make build APP=gnss BOARD=nrf9151dk/nrf9151/ns"
 > @echo "  make flash APP=gnss BOARD=nrf9151dk/nrf9151/ns"
 > @echo "  make uart PORT=/dev/ttyACM0"
+> @echo "  make sim && make run-sim      hardware-free test loop"
 
 setup-zephyr:
 > @mkdir -p $(HOME)/.cache/ztmp
@@ -82,6 +88,11 @@ setup-zephyr:
 
 setup-tools:
 > @bash scripts/setup-tools.sh
+
+setup-host:
+> sudo apt-get install -y mosquitto mosquitto-clients
+> $(VENV)/bin/pip install --quiet paho-mqtt
+> @echo "Host tools ready: mosquitto broker + paho-mqtt subscriber"
 
 windows-usb-passthrough:
 > @powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$$(wslpath -w scripts/windows/passthrough.ps1)"
@@ -112,3 +123,37 @@ gdb:
 
 clean:
 > rm -rf $(BUILD)
+
+# ── native_sim targets ────────────────────────────────────────────────────────
+# Uses NSOS (offloaded sockets) — no TAP, no root, no net-setup.
+# The sim binary connects directly to the host's network stack via localhost.
+# Nordic modem/GNSS stubs in src/lib/nrf_modem_mock/ fill all missing symbols.
+#
+# Workflow:
+#   make broker      # start mosquitto + python subscriber (background)
+#   make sim         # build (once)
+#   make run-sim     # run — publishes to localhost:1883 every 10s
+SIM_BUILD   := build/tracker-sim
+BROKER_HOST ?= localhost
+MQTT_PORT   ?= 1883
+MQTT_TOPIC  ?= tracker/#
+SERVER_VENV := $(WS)/.venv
+
+sim:
+> $(WEST) build -p auto -b native_sim/native/64 apps/tracker -d $(SIM_BUILD) \
+>   -DCONFIG_TRACKER_MQTT_BROKER_HOST=\"$(BROKER_HOST)\"
+> @echo "Sim built: $(SIM_BUILD)/tracker/zephyr/zephyr.exe"
+> @echo "Run: make run-sim"
+
+run-sim:
+> @test -f $(SIM_BUILD)/tracker/zephyr/zephyr.exe || { echo "Run 'make sim' first"; exit 1; }
+> $(SIM_BUILD)/tracker/zephyr/zephyr.exe
+
+broker:
+> @which mosquitto >/dev/null 2>&1 || { echo "Install mosquitto: sudo apt install mosquitto"; exit 1; }
+> @pip install --quiet paho-mqtt 2>/dev/null || $(SERVER_VENV)/bin/pip install --quiet paho-mqtt
+> @echo "Starting mosquitto on port $(MQTT_PORT)..."
+> @mosquitto -p $(MQTT_PORT) &
+> @sleep 1
+> @echo "Starting subscriber on topic '$(MQTT_TOPIC)'..."
+> python3 server/broker.py --host $(BROKER_HOST) --port $(MQTT_PORT) --topic "$(MQTT_TOPIC)"
