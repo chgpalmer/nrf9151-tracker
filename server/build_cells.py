@@ -7,7 +7,9 @@ OpenCelliD per-MCC files (e.g. 234.csv.gz for the UK) are headerless CSV:
   changeable, created, updated, averageSignal
 
 We keep the columns needed to resolve a serving cell (mcc, net=mnc,
-area=tac, cell=cid) to a coordinate + range (accuracy in metres).
+area=tac, cell=cid) to a coordinate + range (accuracy in metres), plus radio,
+which gates the eNB-level fallback in ingest.resolve_cell (an LTE cell id is
+eNB<<8|sector; that decomposition is meaningless for GSM/UMTS).
 
 Usage:
   python3 server/build_cells.py [--db server/cells.db] FILE.csv.gz [FILE ...]
@@ -34,8 +36,14 @@ def init_db(path: Path) -> sqlite3.Connection:
             lat   REAL    NOT NULL,
             lon   REAL    NOT NULL,
             range INTEGER,
+            radio TEXT,
             PRIMARY KEY (mcc, net, area, cell)
         ) WITHOUT ROWID
+    """)
+    # Serves the eNB fallback, which scans a cell-id range within an operator.
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS cells_enb
+        ON cells (mcc, net, cell) WHERE radio = 'LTE'
     """)
     conn.commit()
     return conn
@@ -55,18 +63,19 @@ def import_file(conn: sqlite3.Connection, path: Path) -> int:
                     int(row[1]), int(row[2]), int(row[3]), int(row[4]),
                     float(row[7]), float(row[6]),   # lat, lon (CSV is lon,lat)
                     int(row[8]) if row[8] else None,
+                    row[0],                          # radio: GSM | UMTS | LTE | NR
                 )
             except ValueError:
                 continue  # skip malformed / header-ish lines
             batch.append(rec)
             if len(batch) >= 5000:
                 conn.executemany(
-                    "INSERT OR REPLACE INTO cells VALUES (?,?,?,?,?,?,?)", batch)
+                    "INSERT OR REPLACE INTO cells VALUES (?,?,?,?,?,?,?,?)", batch)
                 n += len(batch)
                 batch.clear()
         if batch:
             conn.executemany(
-                "INSERT OR REPLACE INTO cells VALUES (?,?,?,?,?,?,?)", batch)
+                "INSERT OR REPLACE INTO cells VALUES (?,?,?,?,?,?,?,?)", batch)
             n += len(batch)
     conn.commit()
     return n

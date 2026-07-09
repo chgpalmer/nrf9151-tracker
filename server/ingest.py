@@ -12,6 +12,7 @@ Usage:
 
 import argparse
 import json
+import math
 import sqlite3
 import sys
 import time
@@ -74,23 +75,66 @@ def handle_position(conn: sqlite3.Connection, device_id: str, payload: str) -> N
 
 
 def resolve_cell(payload: dict, cells: sqlite3.Connection | None):
-    """Resolve a serving cell to (lat, lon, accuracy) via the local OpenCelliD
-    DB. Returns None on miss or if no DB is loaded. Neighbor cells are not used
-    (OpenCelliD keys on full mcc/net/area/cell identity, which neighbors lack)."""
+    """Resolve a serving cell to (lat, lon, accuracy, how) via the local
+    OpenCelliD DB. Returns None on miss or if no DB is loaded. Neighbor cells
+    are not used (OpenCelliD keys on full mcc/net/area/cell identity, which
+    neighbors lack).
+
+    Two strategies, in order:
+
+    'exact'  the full mcc/net/area/cell 4-tuple. Best, but OpenCelliD is
+             crowdsourced and sparse: a given sector is often absent, and
+             operators re-plan tracking areas, so a live TAC may not match the
+             recorded one even when the tower itself is well surveyed.
+
+    'enb'    LTE only. An LTE cell id is (eNB << 8) | sector, so we drop the
+             sector and the TAC and average the sectors we do have for that
+             eNB. Accuracy becomes the sector spread, since we know the tower,
+             not which face of it is serving us.
+    """
     if cells is None:
         return None
+    mcc, mnc = payload.get("mcc"), payload.get("mnc")
+    tac, cid = payload.get("tac"), payload.get("cid")
+
     row = cells.execute(
         "SELECT lat, lon, range FROM cells "
         "WHERE mcc=? AND net=? AND area=? AND cell=?",
-        (payload.get("mcc"), payload.get("mnc"),
-         payload.get("tac"), payload.get("cid")),
+        (mcc, mnc, tac, cid),
     ).fetchone()
-    if row is None:
+    if row is not None:
+        lat, lon, rng = row
+        # OpenCelliD 'range' is a coverage radius estimate; use it as accuracy,
+        # falling back to a coarse default when absent.
+        return lat, lon, float(rng) if rng else 2000.0, "exact"
+
+    if cid is None or mcc is None or mnc is None:
         return None
-    lat, lon, rng = row
-    # OpenCelliD 'range' is a coverage radius estimate; use it as accuracy,
-    # falling back to a coarse default when absent.
-    return lat, lon, float(rng) if rng else 2000.0
+    enb = cid >> 8
+    rows = cells.execute(
+        "SELECT lat, lon, range FROM cells "
+        "WHERE mcc=? AND net=? AND cell BETWEEN ? AND ? AND radio='LTE'",
+        (mcc, mnc, enb << 8, (enb << 8) | 0xFF),
+    ).fetchall()
+    if not rows:
+        return None
+
+    lat = sum(r[0] for r in rows) / len(rows)
+    lon = sum(r[1] for r in rows) / len(rows)
+    # Accuracy: far enough out to cover every sector we averaged, but never
+    # tighter than the towers' own claimed coverage radius.
+    spread = max(_haversine_m(lat, lon, r[0], r[1]) for r in rows)
+    rng = max((r[2] or 0) for r in rows)
+    return lat, lon, max(spread, rng, 2000.0), f"enb {enb}, {len(rows)} sectors"
+
+
+def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance in metres."""
+    r = 6371000.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp, dl = p2 - p1, math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(math.sqrt(a))
 
 
 def handle_cell(conn: sqlite3.Connection, device_id: str, payload: str,
@@ -109,7 +153,7 @@ def handle_cell(conn: sqlite3.Connection, device_id: str, payload: str,
               f"tac={d.get('tac')} cid={d.get('cid')})")
         return
 
-    lat, lon, acc = fix
+    lat, lon, acc, how = fix
     conn.execute(
         """INSERT INTO positions
            (device_id, received_ts, source, lat, lon, alt, acc, spd, hdg, sats)
@@ -117,7 +161,7 @@ def handle_cell(conn: sqlite3.Connection, device_id: str, payload: str,
         (device_id, received_ts, lat, lon, acc),
     )
     conn.commit()
-    print(f"[ingest] {device_id} cell  {lat:.6f}, {lon:.6f}  acc {acc}m")
+    print(f"[ingest] {device_id} cell  {lat:.6f}, {lon:.6f}  acc {acc:.0f}m ({how})")
 
 
 def main():
