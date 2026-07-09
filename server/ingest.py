@@ -21,6 +21,9 @@ import paho.mqtt.client as mqtt
 
 DB_DEFAULT = Path(__file__).parent / "tracker.db"
 
+# Local OpenCelliD lookup DB (built by build_cells.py from *.csv.gz exports).
+CELLS_DB_DEFAULT = Path(__file__).parent / "cells.db"
+
 
 def init_db(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path), check_same_thread=False)
@@ -29,6 +32,7 @@ def init_db(path: Path) -> sqlite3.Connection:
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             device_id   TEXT    NOT NULL,
             received_ts INTEGER NOT NULL,
+            source      TEXT    NOT NULL DEFAULT 'gps',
             lat REAL, lon REAL, alt REAL, acc REAL,
             spd REAL, hdg REAL, sats INTEGER
         )
@@ -37,6 +41,11 @@ def init_db(path: Path) -> sqlite3.Connection:
         CREATE INDEX IF NOT EXISTS idx_pos_dev_time
         ON positions(device_id, received_ts)
     """)
+    # Migrate older DBs created before the source column existed.
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(positions)")}
+    if "source" not in cols:
+        conn.execute(
+            "ALTER TABLE positions ADD COLUMN source TEXT NOT NULL DEFAULT 'gps'")
     conn.commit()
     return conn
 
@@ -51,8 +60,8 @@ def handle_position(conn: sqlite3.Connection, device_id: str, payload: str) -> N
 
     conn.execute(
         """INSERT INTO positions
-           (device_id, received_ts, lat, lon, alt, acc, spd, hdg, sats)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           (device_id, received_ts, source, lat, lon, alt, acc, spd, hdg, sats)
+           VALUES (?, ?, 'gps', ?, ?, ?, ?, ?, ?, ?)""",
         (
             device_id, received_ts,
             d.get("lat"), d.get("lon"), d.get("alt"), d.get("acc"),
@@ -60,8 +69,55 @@ def handle_position(conn: sqlite3.Connection, device_id: str, payload: str) -> N
         ),
     )
     conn.commit()
-    print(f"[ingest] {device_id}  {d.get('lat'):.6f}, {d.get('lon'):.6f}  "
+    print(f"[ingest] {device_id} gps  {d.get('lat'):.6f}, {d.get('lon'):.6f}  "
           f"spd {d.get('spd')}m/s  hdg {d.get('hdg')}°")
+
+
+def resolve_cell(payload: dict, cells: sqlite3.Connection | None):
+    """Resolve a serving cell to (lat, lon, accuracy) via the local OpenCelliD
+    DB. Returns None on miss or if no DB is loaded. Neighbor cells are not used
+    (OpenCelliD keys on full mcc/net/area/cell identity, which neighbors lack)."""
+    if cells is None:
+        return None
+    row = cells.execute(
+        "SELECT lat, lon, range FROM cells "
+        "WHERE mcc=? AND net=? AND area=? AND cell=?",
+        (payload.get("mcc"), payload.get("mnc"),
+         payload.get("tac"), payload.get("cid")),
+    ).fetchone()
+    if row is None:
+        return None
+    lat, lon, rng = row
+    # OpenCelliD 'range' is a coverage radius estimate; use it as accuracy,
+    # falling back to a coarse default when absent.
+    return lat, lon, float(rng) if rng else 2000.0
+
+
+def handle_cell(conn: sqlite3.Connection, device_id: str, payload: str,
+                cells: sqlite3.Connection | None) -> None:
+    received_ts = int(time.time())
+    try:
+        d = json.loads(payload)
+    except json.JSONDecodeError:
+        print(f"[ingest] bad cell JSON on {device_id}: {payload!r}", file=sys.stderr)
+        return
+
+    fix = resolve_cell(d, cells)
+    if fix is None:
+        print(f"[ingest] {device_id} cell  unresolved "
+              f"(mcc={d.get('mcc')} mnc={d.get('mnc')} "
+              f"tac={d.get('tac')} cid={d.get('cid')})")
+        return
+
+    lat, lon, acc = fix
+    conn.execute(
+        """INSERT INTO positions
+           (device_id, received_ts, source, lat, lon, alt, acc, spd, hdg, sats)
+           VALUES (?, ?, 'cell', ?, ?, NULL, ?, NULL, NULL, NULL)""",
+        (device_id, received_ts, lat, lon, acc),
+    )
+    conn.commit()
+    print(f"[ingest] {device_id} cell  {lat:.6f}, {lon:.6f}  acc {acc}m")
 
 
 def main():
@@ -70,10 +126,22 @@ def main():
     parser.add_argument("--port",  default=1883, type=int)
     parser.add_argument("--topic", default="trackers/#")
     parser.add_argument("--db",    default=str(DB_DEFAULT))
+    parser.add_argument("--cells-db", default=str(CELLS_DB_DEFAULT),
+                        help="OpenCelliD lookup DB (build with build_cells.py)")
     args = parser.parse_args()
 
     conn = init_db(Path(args.db))
     print(f"[ingest] db: {args.db}")
+
+    cells = None
+    if Path(args.cells_db).exists():
+        cells = sqlite3.connect(f"file:{args.cells_db}?mode=ro", uri=True,
+                                check_same_thread=False)
+        n = cells.execute("SELECT COUNT(*) FROM cells").fetchone()[0]
+        print(f"[ingest] cell DB: {args.cells_db} ({n} cells)")
+    else:
+        print(f"[ingest] no cell DB at {args.cells_db} — cell fixes won't resolve "
+              f"(run: make cells)")
 
     def on_connect(client, userdata, flags, reason_code, properties):
         if reason_code == 0:
@@ -89,8 +157,11 @@ def main():
         if len(parts) != 3:
             return
         _, device_id, kind = parts
+        payload = msg.payload.decode("utf-8", errors="replace")
         if kind == "position":
-            handle_position(conn, device_id, msg.payload.decode("utf-8", errors="replace"))
+            handle_position(conn, device_id, payload)
+        elif kind == "cell":
+            handle_cell(conn, device_id, payload, cells)
         # status/event reserved for later
 
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)

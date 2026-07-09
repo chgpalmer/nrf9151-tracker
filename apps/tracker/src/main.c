@@ -31,10 +31,22 @@ LOG_MODULE_REGISTER(tracker, CONFIG_TRACKER_LOG_LEVEL);
 #define GNSS_INTERVAL_S   1   /* PVT event rate */
 #define POST_INTERVAL_MS  (CONFIG_TRACKER_POST_INTERVAL_S * 1000)
 #define STATUS_INTERVAL_MS 5000
+#define GPS_FALLBACK_MS   (CONFIG_TRACKER_GPS_FALLBACK_S * 1000)
+
+#define MAX_NBR_CELLS     5   /* neighbors included in the cell payload */
+
+/* RSRP index → dBm (same formula as modem_info.h RSRP_IDX_TO_DBM). */
+#define RSRP_IDX_TO_DBM(idx) ((idx) < 0 ? (idx) - 140 : (idx) - 141)
 
 /* ── state ───────────────────────────────────────────────────────── */
 static struct nrf_modem_gnss_pvt_data_frame pvt;
 static K_SEM_DEFINE(pvt_sem, 0, 1);
+
+/* Neighbor-cell measurement result, filled from the lte_lc event. */
+static struct lte_lc_cell   cell_current;
+static struct lte_lc_ncell  cell_neighbors[MAX_NBR_CELLS];
+static uint8_t              cell_nbr_count;
+static K_SEM_DEFINE(cell_sem, 0, 1);
 
 static enum lte_lc_nw_reg_status lte_status = LTE_LC_NW_REG_NOT_REGISTERED;
 static bool lte_connected;
@@ -42,6 +54,7 @@ static bool mqtt_connected;
 
 static char device_id[HW_ID_LEN];
 static char pos_topic[64];
+static char cell_topic[64];
 
 /* ── GNSS ─────────────────────────────────────────────────────────  */
 static void gnss_handler(int event)
@@ -100,6 +113,21 @@ static void lte_handler(const struct lte_lc_evt *const evt)
 		LOG_DBG("PSM: TAU %d s, active %d s",
 			evt->psm_cfg.tau, evt->psm_cfg.active_time);
 		break;
+	case LTE_LC_EVT_NEIGHBOR_CELL_MEAS: {
+		const struct lte_lc_cells_info *ci = &evt->cells_info;
+
+		cell_current = ci->current_cell;
+		cell_nbr_count = 0;
+		if (ci->neighbor_cells) {
+			uint8_t n = MIN(ci->ncells_count, MAX_NBR_CELLS);
+
+			for (uint8_t i = 0; i < n; i++) {
+				cell_neighbors[cell_nbr_count++] = ci->neighbor_cells[i];
+			}
+		}
+		k_sem_give(&cell_sem);
+		break;
+	}
 	default:
 		break;
 	}
@@ -205,6 +233,82 @@ static int mqtt_publish_fix(const struct nrf_modem_gnss_pvt_data_frame *p)
 
 	LOG_INF("MQTT → %s (%zu bytes)", pos_topic, strlen(mqtt_payload));
 	return 0;
+}
+
+/* ── cell fallback ────────────────────────────────────────────────  */
+static int publish_json(const char *topic)
+{
+	struct mqtt_publish_param msg = {
+		.message.topic.qos        = MQTT_QOS_0_AT_MOST_ONCE,
+		.message.topic.topic.utf8 = (uint8_t *)topic,
+		.message.topic.topic.size = strlen(topic),
+		.message.payload.data     = (uint8_t *)mqtt_payload,
+		.message.payload.len      = strlen(mqtt_payload),
+		.message_id               = mqtt_helper_msg_id_get(),
+		.dup_flag                 = 0,
+		.retain_flag              = 0,
+	};
+
+	int err = mqtt_helper_publish(&msg);
+	if (err) {
+		LOG_ERR("mqtt_helper_publish: %d", err);
+		return err;
+	}
+	LOG_INF("MQTT → %s (%zu bytes)", topic, strlen(mqtt_payload));
+	return 0;
+}
+
+/* Trigger a neighbor-cell measurement and wait for the result. */
+static int measure_cells(void)
+{
+	struct lte_lc_ncellmeas_params params = {
+		.search_type = LTE_LC_NEIGHBOR_SEARCH_TYPE_DEFAULT,
+	};
+
+	k_sem_reset(&cell_sem);
+	int err = lte_lc_neighbor_cell_measurement(&params);
+	if (err) {
+		LOG_ERR("ncellmeas request: %d", err);
+		return err;
+	}
+
+	/* Scans can take several seconds; wait generously. */
+	if (k_sem_take(&cell_sem, K_SECONDS(60)) != 0) {
+		LOG_WRN("ncellmeas timed out");
+		return -ETIMEDOUT;
+	}
+	return 0;
+}
+
+static int mqtt_publish_cell(void)
+{
+	if (cell_current.id == LTE_LC_CELL_EUTRAN_ID_INVALID) {
+		LOG_WRN("no serving cell — skipping cell publish");
+		return -ENODATA;
+	}
+
+	int n = snprintf(mqtt_payload, sizeof(mqtt_payload),
+		"{\"mcc\":%d,\"mnc\":%d,\"tac\":%u,\"cid\":%u,\"pci\":%u,\"rsrp\":%d,\"nbr\":[",
+		cell_current.mcc, cell_current.mnc, cell_current.tac,
+		cell_current.id, cell_current.phys_cell_id,
+		RSRP_IDX_TO_DBM(cell_current.rsrp));
+
+	for (uint8_t i = 0; i < cell_nbr_count && n > 0; i++) {
+		n += snprintf(mqtt_payload + n, sizeof(mqtt_payload) - n,
+			"%s{\"pci\":%u,\"rsrp\":%d}",
+			i ? "," : "",
+			cell_neighbors[i].phys_cell_id,
+			RSRP_IDX_TO_DBM(cell_neighbors[i].rsrp));
+	}
+	if (n > 0 && n < (int)sizeof(mqtt_payload)) {
+		n += snprintf(mqtt_payload + n, sizeof(mqtt_payload) - n, "]}");
+	}
+	if (n <= 0 || n >= (int)sizeof(mqtt_payload)) {
+		LOG_ERR("cell payload overflow");
+		return -ENOMEM;
+	}
+
+	return publish_json(cell_topic);
 }
 
 /* ── status block ─────────────────────────────────────────────────  */
@@ -341,8 +445,11 @@ int main(void)
 	}
 	snprintf(pos_topic, sizeof(pos_topic), "%s/%s/position",
 		 TOPIC_PREFIX, device_id);
+	snprintf(cell_topic, sizeof(cell_topic), "%s/%s/cell",
+		 TOPIC_PREFIX, device_id);
 	LOG_INF("device id: %s", device_id);
 	LOG_INF("position topic: %s", pos_topic);
+	LOG_INF("cell topic: %s", cell_topic);
 
 	/* Start LTE async — don't block, status loop shows progress */
 	LOG_INF("starting LTE (async)...");
@@ -362,6 +469,7 @@ int main(void)
 
 	int64_t last_post_ms   = 0;
 	int64_t last_status_ms = 0;
+	int64_t last_fix_ms    = k_uptime_get(); /* start the fallback clock */
 	bool    has_fix        = false;
 	bool    mqtt_init_done = false;
 
@@ -370,6 +478,9 @@ int main(void)
 		 * status block still prints even if GNSS is blocked by LTE. */
 		if (k_sem_take(&pvt_sem, K_SECONDS(2)) == 0) {
 			has_fix = (pvt.flags & NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID);
+			if (has_fix) {
+				last_fix_ms = k_uptime_get();
+			}
 		}
 
 		int64_t now = k_uptime_get();
@@ -393,14 +504,26 @@ int main(void)
 			print_status(&pvt, now);
 		}
 
-		/* Publish position every POST_INTERVAL_MS once MQTT is
-		 * connected AND we have a valid fix. */
-		if (now - last_post_ms >= POST_INTERVAL_MS && mqtt_connected &&
-		    has_fix) {
-			last_post_ms = now;
-			err = mqtt_publish_fix(&pvt);
-			if (err) {
-				LOG_WRN("publish failed: %d (will retry)", err);
+		/* Publish once per interval when MQTT is up. Prefer a GPS fix;
+		 * fall back to a cell measurement when GPS has been dry for
+		 * longer than the fallback window (e.g. indoors). */
+		if (now - last_post_ms >= POST_INTERVAL_MS && mqtt_connected) {
+			if (has_fix) {
+				last_post_ms = now;
+				err = mqtt_publish_fix(&pvt);
+				if (err) {
+					LOG_WRN("publish failed: %d (will retry)", err);
+				}
+			} else if (now - last_fix_ms >= GPS_FALLBACK_MS) {
+				last_post_ms = now;
+				LOG_INF("no GPS fix for %llds — cell fallback",
+					(long long)((now - last_fix_ms) / 1000));
+				if (measure_cells() == 0) {
+					err = mqtt_publish_cell();
+					if (err) {
+						LOG_WRN("cell publish failed: %d", err);
+					}
+				}
 			}
 		} else if (!mqtt_connected) {
 			last_post_ms = now - POST_INTERVAL_MS + 3000;

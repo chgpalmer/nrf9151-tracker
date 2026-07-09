@@ -105,7 +105,7 @@ MAP_HTML = """<!DOCTYPE html>
     <label>History (<span id="count">0</span>)</label>
     <div id="tbl-wrap">
       <table>
-        <thead><tr><th>Time</th><th>km/h</th><th>Acc</th><th>Sats</th></tr></thead>
+        <thead><tr><th>Time</th><th>Src</th><th>km/h</th><th>Acc</th><th>Sats</th></tr></thead>
         <tbody id="tbody"></tbody>
       </table>
     </div>
@@ -179,12 +179,15 @@ function fmtAge(sec) {
 }
 function popupHtml(p) {
   const age = Math.round(Date.now()/1000 - p.received_ts);
+  const cell = p.source === 'cell';
   return `<b>${new Date(p.received_ts*1000).toLocaleString()}</b><br>`
+    + `Source <b>${cell ? 'CELL (approx)' : 'GPS'}</b><br>`
     + `Lat ${p.lat.toFixed(6)} &nbsp; Lon ${p.lon.toFixed(6)}<br>`
-    + `Alt ${p.alt?.toFixed(1) ?? '?'} m<br>`
-    + `Accuracy ${p.acc?.toFixed(1) ?? '?'} m &nbsp; `
-    + `Speed ${kmh(p.spd).toFixed(1)} km/h<br>`
-    + `Heading ${p.hdg?.toFixed(0) ?? '?'}° &nbsp; Sats ${p.sats ?? '?'}<br>`
+    + (cell ? '' : `Alt ${p.alt?.toFixed(1) ?? '?'} m<br>`)
+    + `Accuracy ${p.acc?.toFixed(1) ?? '?'} m`
+    + (cell ? '' : ` &nbsp; Speed ${kmh(p.spd).toFixed(1)} km/h`)
+    + `<br>`
+    + (cell ? '' : `Heading ${p.hdg?.toFixed(0) ?? '?'}° &nbsp; Sats ${p.sats ?? '?'}<br>`)
     + `Age ${fmtAge(age)}`;
 }
 
@@ -209,22 +212,27 @@ function focusFix(p) {
     tr.classList.toggle('sel', Number(tr.dataset.id) === p.id));
 }
 
+const CELL_COLOR = '#d97706';  // amber for coarse cell-based fixes
+
 function rebuildMap(pts) {
   layer.clearLayers();
   markersById = {};
   track.setLatLngs(pts.map(p => [p.lat, p.lon]));
   pts.forEach((p, i) => {
     const isLast = i === pts.length - 1;
+    const cell = p.source === 'cell';
+    const c = cell ? CELL_COLOR : COLOR;
     if (p.acc) {
       L.circle([p.lat, p.lon], {
-        radius: p.acc, color: COLOR, weight: 1, opacity: 0.3,
-        fillColor: COLOR, fillOpacity: 0.07,
+        radius: p.acc, color: c, weight: 1, opacity: 0.3,
+        fillColor: c, fillOpacity: 0.07,
       }).addTo(layer);
     }
     const m = L.circleMarker([p.lat, p.lon], {
       radius: isLast ? 7 : 4,
-      color: COLOR, weight: isLast ? 3 : 1,
-      fillColor: isLast ? '#60a5fa' : '#fff', fillOpacity: 0.9,
+      color: c, weight: isLast ? 3 : 1,
+      fillColor: isLast ? (cell ? '#fbbf24' : '#60a5fa') : '#fff',
+      fillOpacity: 0.9,
     }).bindPopup(popupHtml(p)).addTo(layer);
     markersById[p.id] = m;
   });
@@ -249,10 +257,12 @@ function rebuildTable(pts) {
     const p = pts[i];
     const tr = document.createElement('tr');
     tr.dataset.id = p.id;
+    const cell = p.source === 'cell';
     tr.innerHTML = `<td>${fmtTime(p.received_ts)}</td>`
-      + `<td>${kmh(p.spd).toFixed(1)}</td>`
-      + `<td>${p.acc?.toFixed(1) ?? '?'}</td>`
-      + `<td>${p.sats ?? '?'}</td>`;
+      + `<td style="color:${cell ? '#d97706' : '#2563eb'}">${cell ? 'cell' : 'gps'}</td>`
+      + `<td>${cell ? '—' : kmh(p.spd).toFixed(1)}</td>`
+      + `<td>${p.acc?.toFixed(0) ?? '?'}</td>`
+      + `<td>${cell ? '—' : (p.sats ?? '?')}</td>`;
     tr.onclick = () => focusFix(p);
     tb.appendChild(tr);
   }
@@ -328,7 +338,7 @@ async def devices():
 async def positions(device: str, since: int = 0, limit: int = 500):
     db = app.state.db
     params = [device]
-    sql = ("SELECT id, lat, lon, alt, acc, spd, hdg, sats, received_ts "
+    sql = ("SELECT id, source, lat, lon, alt, acc, spd, hdg, sats, received_ts "
            "FROM positions WHERE device_id = ?")
     if since > 0:
         sql += " AND received_ts >= ?"

@@ -143,6 +143,14 @@ int32_t nrf_modem_gnss_stop(void)
 	return 0;
 }
 
+/* When TRACKER_SIM_NO_GPS is set in the host env, report PVT events with no
+ * valid fix so the firmware exercises its cell-location fallback. */
+static bool no_gps(void)
+{
+	const char *v = nsi_host_getenv("TRACKER_SIM_NO_GPS");
+	return v != NULL && v[0] != '\0' && v[0] != '0';
+}
+
 int32_t nrf_modem_gnss_read(void *buf, int32_t buf_len, int type)
 {
 	ARG_UNUSED(type);
@@ -150,6 +158,10 @@ int32_t nrf_modem_gnss_read(void *buf, int32_t buf_len, int type)
 		return -1;
 	}
 	memcpy(buf, &fake_pvt, sizeof(fake_pvt));
+	if (no_gps()) {
+		((struct nrf_modem_gnss_pvt_data_frame *)buf)->flags &=
+			~NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID;
+	}
 	return 0;
 }
 

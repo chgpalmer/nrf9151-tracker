@@ -18,12 +18,20 @@ MQTT_TOPIC ?= trackers/\#
 HTTP_PORT  ?= 8080
 CADDYFILE  := /etc/caddy/Caddyfile
 
+# OpenCelliD cell-tower DB for GPS-less location fallback.
+# CELL_MCC: MCC files to download (space-separated). Default = UK (234,730,748).
+# OPENCELLID_TOKEN: your opencellid.org API token (put in .env), needed only for
+# `make update-cells`. `make cells` just builds from CSVs already in CELL_CSV_DIR.
+CELL_CSV_DIR     ?= server/opencellid
+CELL_MCC         ?= 234 730 748
+OPENCELLID_TOKEN ?=
+
 INGEST := $(VENV)/bin/python3 server/ingest.py --host $(BROKER_HOST) --port $(MQTT_PORT) --topic '$(MQTT_TOPIC)'
 # Bind the app to localhost only — Caddy is the sole public face.
 WEB    := $(VENV)/bin/uvicorn app:app --host 127.0.0.1 --port $(HTTP_PORT) --app-dir server
 
 .PHONY: setup-host setup-caddy open-ports caddy \
-        broker ingest server serve stop
+        broker ingest server serve stop cells update-cells
 
 # One-time server setup. Idempotent: skips apt when mosquitto is already on
 # PATH (like setup-system does), so re-running is cheap and prompts no sudo.
@@ -34,6 +42,31 @@ setup-host: setup-venv
 >  else echo "mosquitto already installed"; fi
 > $(VENV)/bin/pip install --quiet -r server/requirements.txt
 > @echo "Host tools ready."
+
+# Build the local cell-tower DB (server/cells.db) from OpenCelliD CSVs already
+# present in CELL_CSV_DIR. No token needed — offline. Drop *.csv.gz there (or
+# run `make update-cells` to fetch them) first.
+cells: setup-venv
+> @shopt -s nullglob; files=($(CELL_CSV_DIR)/*.csv.gz $(CELL_CSV_DIR)/*.csv); \
+>  if [ $${#files[@]} -eq 0 ]; then \
+>    echo "No CSVs in $(CELL_CSV_DIR)/. Add *.csv.gz or run: make update-cells"; \
+>    exit 1; \
+>  fi; \
+>  $(VENV)/bin/python3 server/build_cells.py --db server/cells.db "$${files[@]}"
+
+# Download the configured MCC files from OpenCelliD (needs OPENCELLID_TOKEN in
+# your environment/.env), then build cells.db. Separated from `cells` so the
+# token is only ever needed for the fetch, not the build.
+update-cells: setup-venv
+> @test -n "$(OPENCELLID_TOKEN)" || { echo "Set OPENCELLID_TOKEN (get one at opencellid.org)"; exit 1; }
+> @mkdir -p $(CELL_CSV_DIR)
+> @for mcc in $(CELL_MCC); do \
+>    echo "Downloading MCC $$mcc..."; \
+>    curl -fsSL -o $(CELL_CSV_DIR)/$$mcc.csv.gz \
+>      "https://opencellid.org/ocid/downloads?token=$(OPENCELLID_TOKEN)&type=mcc&file=$$mcc.csv.gz" \
+>      || { echo "download failed for MCC $$mcc"; exit 1; }; \
+>  done
+> @$(MAKE) --no-print-directory cells
 
 # Install Caddy from its official apt repo. The package ships a systemd unit
 # (runs as user 'caddy', reads $(CADDYFILE), has CAP_NET_BIND_SERVICE for
