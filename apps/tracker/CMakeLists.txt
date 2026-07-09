@@ -2,7 +2,8 @@ cmake_minimum_required(VERSION 3.20.0)
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(tracker)
 
-target_sources(app PRIVATE src/main.c)
+target_sources(app PRIVATE src/main.c src/loc/loc_fsm.c)
+target_include_directories(app PRIVATE src/loc)
 
 if(NOT CONFIG_NRF_MODEM_LIB)
   # Nordic headers are not on the include path when NRF_MODEM_LIB=n.

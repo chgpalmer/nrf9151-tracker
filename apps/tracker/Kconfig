@@ -30,6 +30,44 @@ config TRACKER_MQTT_TOPIC_PREFIX
 	help
 	  Topics are built at runtime as <prefix>/<device_id>/position.
 
+config TRACKER_LOC_CN0_MIN_DBHZ
+	int "C/N0 floor for a satellite to count as usable (dB-Hz)"
+	default 27
+	range 15 45
+	help
+	  Below roughly 27 dB-Hz a satellite can be tracked but its navigation
+	  message cannot be demodulated, so it never yields an ephemeris. Used to
+	  decide whether the sky is worth taking the radio away from LTE for.
+
+config TRACKER_LOC_BOOT_CELL_S
+	int "Give up waiting for the boot cell report after this long"
+	default 120
+	range 0 600
+	help
+	  A cold GNSS start takes minutes, so at boot we publish a serving-cell
+	  position first (coarse now, precise later) and only then hand the radio to
+	  GNSS. Normally we leave that state the moment the cell report is sent;
+	  this is only the backstop for a modem that never attaches, where waiting
+	  longer buys nothing.
+
+config TRACKER_LOC_ACQUIRE_TIMEOUT_S
+	int "Give up a quiet GNSS acquisition window after this long"
+	default 300
+	range 60 1800
+
+config TRACKER_LOC_CELL_RETRY_S
+	int "Minimum seconds in CELL_ONLY before retrying GNSS acquisition"
+	default 300
+	range 30 3600
+
+config TRACKER_LOC_EPHE_REFRESH_MIN
+	int "Refresh ephemeris when the soonest expiry is under this many minutes"
+	default 15
+	range 1 120
+	help
+	  Broadcast ephemeris is good for about two hours. Refreshing before it
+	  lapses costs one quiet window and avoids a full cold start later.
+
 config TRACKER_SIM_DEVICE_ID
 	string "native_sim fallback device ID"
 	default "sim-dev-1"

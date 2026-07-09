@@ -131,6 +131,27 @@ int32_t nrf_modem_gnss_use_case_set(uint8_t use_case)
 	return 0;
 }
 
+/* The sim's fake PVT is always a valid fix, so pretend GNSS is warm: report
+ * ephemeris for enough satellites, well short of expiry. Otherwise loc_fsm
+ * would read zeroes and keep re-entering ACQUIRE, and the sim would never
+ * publish. Expiry is in minutes; broadcast ephemeris lasts about two hours. */
+int32_t nrf_modem_gnss_agnss_expiry_get(struct nrf_modem_gnss_agnss_expiry *agnss_expiry)
+{
+	if (agnss_expiry == NULL) {
+		return -1;
+	}
+	memset(agnss_expiry, 0, sizeof(*agnss_expiry));
+
+	agnss_expiry->data_flags = 0; /* GPS system time is known */
+	agnss_expiry->sv_count = 6;
+	for (int i = 0; i < agnss_expiry->sv_count; i++) {
+		agnss_expiry->sv[i].sv_id = i + 1;
+		agnss_expiry->sv[i].ephe_expiry = 120;
+		agnss_expiry->sv[i].alm_expiry = 10080;
+	}
+	return 0;
+}
+
 int32_t nrf_modem_gnss_start(void)
 {
 	k_timer_start(&gnss_tick, K_SECONDS(1), K_SECONDS(1));

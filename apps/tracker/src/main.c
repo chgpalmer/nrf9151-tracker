@@ -21,6 +21,8 @@
 #include <net/mqtt_helper.h>
 #include <hw_id.h>
 
+#include "loc_fsm.h"
+
 LOG_MODULE_REGISTER(tracker, CONFIG_TRACKER_LOG_LEVEL);
 
 /* ── configuration ──────────────────────────────────────────────── */
@@ -31,7 +33,7 @@ LOG_MODULE_REGISTER(tracker, CONFIG_TRACKER_LOG_LEVEL);
 #define GNSS_INTERVAL_S   1   /* PVT event rate */
 #define POST_INTERVAL_MS  (CONFIG_TRACKER_POST_INTERVAL_S * 1000)
 #define STATUS_INTERVAL_MS 5000
-#define GPS_STALE_MS      (CONFIG_TRACKER_GPS_STALE_S * 1000)
+/* GPS staleness now lives in loc_fsm, which owns the fix bookkeeping. */
 #define MQTT_RETRY_MS     10000  /* between reconnect attempts */
 
 /* RSRP index → dBm (same formula as modem_info.h RSRP_IDX_TO_DBM). */
@@ -60,6 +62,13 @@ static enum lte_lc_nw_reg_status lte_status = LTE_LC_NW_REG_NOT_REGISTERED;
 static volatile bool lte_connected;
 static volatile bool mqtt_connected;
 
+/* GNSS only runs when LTE leaves the radio alone, so the two facts that explain
+ * a starved GNSS are whether we are stuck in RRC connected and whether the
+ * network actually granted PSM. Both are set from the LTE callback thread. */
+static volatile bool rrc_connected;
+static volatile int  psm_tau_s    = -1;
+static volatile int  psm_active_s = -1; /* -1 = PSM not granted */
+
 static char device_id[HW_ID_LEN];
 static char pos_topic[64];
 static char cell_topic[64];
@@ -75,7 +84,8 @@ static void gnss_handler(int event)
 	}
 }
 
-static int gnss_start(void)
+/* Set up GNSS without starting it: loc_fsm decides when it may run. */
+static int gnss_configure(void)
 {
 	int err;
 
@@ -94,7 +104,13 @@ static int gnss_start(void)
 	uint8_t use_case = NRF_MODEM_GNSS_USE_CASE_MULTIPLE_HOT_START;
 	nrf_modem_gnss_use_case_set(use_case);
 
-	err = nrf_modem_gnss_start();
+	return 0;
+}
+
+static int gnss_start(void)
+{
+	int err = nrf_modem_gnss_start();
+
 	if (err) {
 		LOG_ERR("gnss start: %d", err);
 	}
@@ -118,8 +134,22 @@ static void lte_handler(const struct lte_lc_evt *const evt)
 		}
 		break;
 	case LTE_LC_EVT_PSM_UPDATE:
-		LOG_DBG("PSM: TAU %d s, active %d s",
-			evt->psm_cfg.tau, evt->psm_cfg.active_time);
+		/* active_time == -1 means the network refused PSM. Roaming networks
+		 * often do. Without PSM the modem keeps monitoring pagings and GNSS
+		 * never gets a long enough window for a cold start. Log at INF: this
+		 * was LOG_DBG and therefore invisible at CONFIG_TRACKER_LOG_LEVEL=3. */
+		psm_tau_s    = evt->psm_cfg.tau;
+		psm_active_s = evt->psm_cfg.active_time;
+		if (psm_active_s < 0) {
+			LOG_WRN("PSM: NOT granted by network (TAU %d)", psm_tau_s);
+		} else {
+			LOG_INF("PSM: granted — TAU %d s, active %d s",
+				psm_tau_s, psm_active_s);
+		}
+		break;
+	case LTE_LC_EVT_RRC_UPDATE:
+		rrc_connected = (evt->rrc_mode == LTE_LC_RRC_MODE_CONNECTED);
+		LOG_INF("RRC: %s", rrc_connected ? "connected (GNSS blocked)" : "idle");
 		break;
 	default:
 		break;
@@ -337,19 +367,8 @@ static int mqtt_publish_cell(const struct serving_cell *sc)
 
 /* ── status block ─────────────────────────────────────────────────  */
 static void print_status(const struct nrf_modem_gnss_pvt_data_frame *p,
-			 int64_t uptime_ms)
+			 const struct loc_status *loc, int64_t uptime_ms)
 {
-	uint8_t tracked = 0, used = 0;
-
-	for (int i = 0; i < NRF_MODEM_GNSS_MAX_SATELLITES; i++) {
-		if (p->sv[i].sv > 0) {
-			tracked++;
-			if (p->sv[i].flags & NRF_MODEM_GNSS_SV_FLAG_USED_IN_FIX) {
-				used++;
-			}
-		}
-	}
-
 	LOG_INF("===== status @ %llds =====", (long long)(uptime_ms / 1000));
 
 	/* LTE status: registration state + serving-cell details (same cached
@@ -368,12 +387,31 @@ static void print_status(const struct nrf_modem_gnss_pvt_data_frame *p,
 		LOG_INF("GNSS: FIX  %.6f, %.6f  alt %.1fm  acc %.1fm  sats %u/%u",
 			p->latitude, p->longitude,
 			(double)p->altitude, (double)p->accuracy,
-			used, tracked);
+			loc->used, loc->tracked);
 	} else {
-		LOG_INF("GNSS: searching  tracked %u  used %u", tracked, used);
+		LOG_INF("GNSS: searching  flags 0x%02x", p->flags);
+		/* These two mean different things and want different fixes:
+		 *   DEADLINE_MISSED        no window at all since the last PVT — LTE
+		 *                          is transmitting; only backing off LTE helps.
+		 *   NOT_ENOUGH_WINDOW_TIME windows exist but are too short — the case
+		 *                          nrf_modem_gnss_prio_mode_enable() is for.
+		 * The old code tested only the first, so the two looked identical. */
 		if (p->flags & NRF_MODEM_GNSS_PVT_FLAG_DEADLINE_MISSED) {
-			LOG_WRN("GNSS: blocked by LTE");
+			LOG_WRN("GNSS: no window since last PVT (LTE active)");
 		}
+		if (p->flags & NRF_MODEM_GNSS_PVT_FLAG_NOT_ENOUGH_WINDOW_TIME) {
+			LOG_WRN("GNSS: windows too short (no PSM/eDRX?)");
+		}
+	}
+	loc_fsm_log(loc, p);
+
+	if (psm_active_s < 0) {
+		LOG_INF("LTE:  RRC %s | PSM not granted",
+			rrc_connected ? "connected" : "idle");
+	} else {
+		LOG_INF("LTE:  RRC %s | PSM TAU %ds active %ds",
+			rrc_connected ? "connected" : "idle",
+			psm_tau_s, psm_active_s);
 	}
 
 	LOG_INF("MQTT: %s", mqtt_connected ? "connected" : "disconnected");
@@ -414,32 +452,60 @@ int main(void)
 		return err;
 	}
 
-	/* Start GNSS immediately — timeslots with LTE automatically */
-	LOG_INF("starting GNSS...");
-	err = gnss_start();
+	/* Configure GNSS but do NOT start it yet. An unregistered modem runs a
+	 * continuous cell search; GNSS running against that starves the search and
+	 * gains nothing itself. loc_fsm starts it once LTE has registered. */
+	err = gnss_configure();
 	if (err) {
-		LOG_ERR("gnss start: %d", err);
+		LOG_ERR("gnss configure: %d", err);
 		return err;
 	}
+	bool gnss_running = false;
 
 	int64_t last_post_ms   = 0;
 	int64_t last_status_ms = 0;
-	/* Start "stale" so the first report at boot is a cell fix (like Google
-	 * Maps: coarse location immediately, upgrade to GPS once it locks). */
-	int64_t last_fix_ms    = k_uptime_get() - GPS_STALE_MS;
 	int64_t next_mqtt_ms   = 0;
+	struct loc_status loc;
+
+	loc_fsm_init(k_uptime_get());
 
 	for (;;) {
 		/* Wait for next PVT event (1 Hz) with a 2s timeout so the
 		 * status block still prints even if GNSS is blocked by LTE. */
-		if (k_sem_take(&pvt_sem, K_SECONDS(2)) == 0) {
-			if (pvt.flags & NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID) {
-				last_fix_ms = k_uptime_get();
-			}
-		}
+		k_sem_take(&pvt_sem, K_SECONDS(2));
 
 		int64_t now = k_uptime_get();
-		bool gps_current = (now - last_fix_ms < GPS_STALE_MS);
+
+		/* Policy first: it owns the fix-staleness and ephemeris bookkeeping. */
+		loc_fsm_update(&pvt, now, lte_connected, &loc);
+		bool gps_current = loc.gps_current;
+
+		/* Run GNSS only when the FSM says so. While the modem is searching
+		 * for a network the search owns the radio, and GNSS alongside it just
+		 * flip-flops between a few tracked satellites and none. */
+		if (loc.gnss_wanted && !gnss_running) {
+			LOG_INF("LTE registered — starting GNSS");
+			if (gnss_start() == 0) {
+				gnss_running = true;
+			}
+		} else if (!loc.gnss_wanted && gnss_running) {
+			LOG_INF("LTE lost — stopping GNSS until re-registered");
+			(void)nrf_modem_gnss_stop();
+			gnss_running = false;
+		}
+
+		/* A cold start needs ~30 s of uninterrupted GNSS. Publishing, and the
+		 * 60 s MQTT keepalive, both wake the radio and cut the window short.
+		 * So while the FSM wants silence, take MQTT down entirely — PSM then
+		 * puts LTE to sleep and GNSS gets the whole radio. */
+		if (loc.radio_quiet_wanted) {
+			if (mqtt_connected) {
+				LOG_INF("loc: ACQUIRE — dropping MQTT to free the radio");
+				(void)mqtt_helper_disconnect();
+			}
+			/* Don't let the reconnect below fire the moment we leave. */
+			next_mqtt_ms = now + MQTT_RETRY_MS;
+		}
 
 		/* (Re)connect MQTT whenever LTE is up and the broker isn't. This
 		 * covers the first connect at boot and every later drop — a broker
@@ -448,7 +514,8 @@ int main(void)
 		 * tracker_mqtt_connect() is safe to call again after a disconnect.
 		 * -EOPNOTSUPP just means an attempt is still in flight (no connack
 		 * yet); back off and let it settle rather than logging a failure. */
-		if (lte_connected && !mqtt_connected && now >= next_mqtt_ms) {
+		if (!loc.radio_quiet_wanted &&
+		    lte_connected && !mqtt_connected && now >= next_mqtt_ms) {
 			next_mqtt_ms = now + MQTT_RETRY_MS;
 			LOG_INF("connecting MQTT to %s:%d...", BROKER_HOST, BROKER_PORT);
 			err = tracker_mqtt_connect();
@@ -461,7 +528,7 @@ int main(void)
 		/* Status block every STATUS_INTERVAL_MS */
 		if (now - last_status_ms >= STATUS_INTERVAL_MS) {
 			last_status_ms = now;
-			print_status(&pvt, now);
+			print_status(&pvt, &loc, now);
 		}
 
 		/* Publish once per interval when MQTT is up. Prefer a current
@@ -482,6 +549,10 @@ int main(void)
 					err = mqtt_publish_cell(&sc);
 					if (err) {
 						LOG_WRN("cell publish failed: %d", err);
+					} else {
+						/* Coarse position is on the map; the FSM
+						 * may now take the radio for GNSS. */
+						loc_fsm_note_cell_sent();
 					}
 				} else {
 					LOG_WRN("serving cell unavailable");
