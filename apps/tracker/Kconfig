@@ -10,9 +10,9 @@ config TRACKER_POST_INTERVAL_S
 	default 10
 	range 1 3600
 
-config TRACKER_GPS_FALLBACK_S
-	int "Seconds without a GPS fix before falling back to cell location"
-	default 120
+config TRACKER_GPS_STALE_S
+	int "Seconds since last GPS fix before it's considered stale (use cell)"
+	default 30
 	range 10 3600
 
 config TRACKER_MQTT_BROKER_HOST

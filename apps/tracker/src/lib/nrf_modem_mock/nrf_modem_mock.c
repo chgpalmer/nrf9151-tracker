@@ -170,10 +170,12 @@ int32_t nrf_modem_gnss_read(void *buf, int32_t buf_len, int type)
 int nrf_modem_at_cmd(void *buf, size_t len, const char *fmt, ...)
 {
 	ARG_UNUSED(fmt);
-	/* Canned %XMONITOR response: registered roaming, band 20, fake cell */
+	/* Canned %XMONITOR: registered roaming, band 20, a real central-London
+	 * cell so the local OpenCelliD lookup resolves it. PLMN 23410 (MCC 234
+	 * MNC 10), TAC 0x10E0 (4320), cell-id 0x8233072 (136523890). */
 	static const char xmonitor[] =
-		"%XMONITOR: 5,\"Vodafone UK\",\"Voda UK\",\"23415\","
-		"\"1234\",9,20,\"DEADBEEF\",100,6400,45,50\r\nOK\r\n";
+		"%XMONITOR: 5,\"EE\",\"EE\",\"23410\","
+		"\"10E0\",9,20,\"08233072\",402,6400,45,50\r\nOK\r\n";
 
 	if (len < sizeof(xmonitor)) {
 		return -1;

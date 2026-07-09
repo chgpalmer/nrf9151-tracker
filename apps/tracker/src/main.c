@@ -31,22 +31,27 @@ LOG_MODULE_REGISTER(tracker, CONFIG_TRACKER_LOG_LEVEL);
 #define GNSS_INTERVAL_S   1   /* PVT event rate */
 #define POST_INTERVAL_MS  (CONFIG_TRACKER_POST_INTERVAL_S * 1000)
 #define STATUS_INTERVAL_MS 5000
-#define GPS_FALLBACK_MS   (CONFIG_TRACKER_GPS_FALLBACK_S * 1000)
-
-#define MAX_NBR_CELLS     5   /* neighbors included in the cell payload */
+#define GPS_STALE_MS      (CONFIG_TRACKER_GPS_STALE_S * 1000)
 
 /* RSRP index → dBm (same formula as modem_info.h RSRP_IDX_TO_DBM). */
 #define RSRP_IDX_TO_DBM(idx) ((idx) < 0 ? (idx) - 140 : (idx) - 141)
 
+/* Serving-cell identity, parsed from AT%XMONITOR (cached registration data —
+ * no radio scan). Enough for an OpenCelliD single-cell lookup. */
+struct serving_cell {
+	int      mcc;
+	int      mnc;
+	uint32_t tac;
+	uint32_t cid;
+	int      rsrp_dbm;
+	int      band;
+	char     op[32];
+	bool     valid;
+};
+
 /* ── state ───────────────────────────────────────────────────────── */
 static struct nrf_modem_gnss_pvt_data_frame pvt;
 static K_SEM_DEFINE(pvt_sem, 0, 1);
-
-/* Neighbor-cell measurement result, filled from the lte_lc event. */
-static struct lte_lc_cell   cell_current;
-static struct lte_lc_ncell  cell_neighbors[MAX_NBR_CELLS];
-static uint8_t              cell_nbr_count;
-static K_SEM_DEFINE(cell_sem, 0, 1);
 
 static enum lte_lc_nw_reg_status lte_status = LTE_LC_NW_REG_NOT_REGISTERED;
 static bool lte_connected;
@@ -113,21 +118,6 @@ static void lte_handler(const struct lte_lc_evt *const evt)
 		LOG_DBG("PSM: TAU %d s, active %d s",
 			evt->psm_cfg.tau, evt->psm_cfg.active_time);
 		break;
-	case LTE_LC_EVT_NEIGHBOR_CELL_MEAS: {
-		const struct lte_lc_cells_info *ci = &evt->cells_info;
-
-		cell_current = ci->current_cell;
-		cell_nbr_count = 0;
-		if (ci->neighbor_cells) {
-			uint8_t n = MIN(ci->ncells_count, MAX_NBR_CELLS);
-
-			for (uint8_t i = 0; i < n; i++) {
-				cell_neighbors[cell_nbr_count++] = ci->neighbor_cells[i];
-			}
-		}
-		k_sem_give(&cell_sem);
-		break;
-	}
 	default:
 		break;
 	}
@@ -258,55 +248,86 @@ static int publish_json(const char *topic)
 	return 0;
 }
 
-/* Trigger a neighbor-cell measurement and wait for the result. */
-static int measure_cells(void)
+/* Helper: extract the next comma-delimited XMONITOR field, stripping the
+ * surrounding quotes if present. Returns the token or NULL. Uses strtok state. */
+static char *xmon_field(char *first)
 {
-	struct lte_lc_ncellmeas_params params = {
-		.search_type = LTE_LC_NEIGHBOR_SEARCH_TYPE_DEFAULT,
-	};
+	char *f = strtok(first, ",");
 
-	k_sem_reset(&cell_sem);
-	int err = lte_lc_neighbor_cell_measurement(&params);
-	if (err) {
-		LOG_ERR("ncellmeas request: %d", err);
-		return err;
+	if (f && f[0] == '"') {
+		f++;
+		char *e = strchr(f, '"');
+
+		if (e) {
+			*e = '\0';
+		}
+	}
+	return f;
+}
+
+/* Read the serving cell from AT%XMONITOR (cached — no radio scan). Fills sc.
+ * XMONITOR: <reg>,"<long>","<short>","<plmn>","<tac>",<AcT>,<band>,
+ *           "<cell_id>",<phys_cell_id>,<EARFCN>,<rsrp>,<snr>,...
+ * PLMN is "MCCMNC" (MCC=first 3 digits); TAC and cell-id are hex strings. */
+static int read_serving_cell(struct serving_cell *sc)
+{
+	char at_resp[256];
+
+	memset(sc, 0, sizeof(*sc));
+
+	if (nrf_modem_at_cmd(at_resp, sizeof(at_resp), "AT%%XMONITOR") != 0) {
+		return -EIO;
 	}
 
-	/* Scans can take several seconds; wait generously. */
-	if (k_sem_take(&cell_sem, K_SECONDS(60)) != 0) {
-		LOG_WRN("ncellmeas timed out");
-		return -ETIMEDOUT;
+	char *cp = strchr(at_resp, ':');
+
+	if (!cp) {
+		return -EINVAL;
 	}
+	cp++;
+
+	xmon_field(cp);                    /* 1: reg status */
+	char *longn = xmon_field(NULL);    /* 2: long name  */
+	xmon_field(NULL);                  /* 3: short name */
+	char *plmn = xmon_field(NULL);     /* 4: plmn "MCCMNC" */
+	char *tac  = xmon_field(NULL);     /* 5: tac (hex)  */
+	xmon_field(NULL);                  /* 6: AcT        */
+	char *band = xmon_field(NULL);     /* 7: band       */
+	char *cid  = xmon_field(NULL);     /* 8: cell id (hex) */
+	xmon_field(NULL);                  /* 9: phys cell  */
+	xmon_field(NULL);                  /* 10: EARFCN    */
+	char *rsrp = strtok(NULL, ",\r\n");/* 11: rsrp idx  */
+
+	if (!plmn || strlen(plmn) < 5 || !tac || !cid) {
+		return -ENODATA;
+	}
+
+	/* Split PLMN: MCC = first 3 chars, MNC = the rest (2 or 3 digits). */
+	char mcc_buf[4] = { plmn[0], plmn[1], plmn[2], '\0' };
+
+	sc->mcc = atoi(mcc_buf);
+	sc->mnc = atoi(plmn + 3);
+	sc->tac = strtoul(tac, NULL, 16);
+	sc->cid = strtoul(cid, NULL, 16);
+	sc->band = band ? atoi(band) : 0;
+	sc->rsrp_dbm = rsrp ? RSRP_IDX_TO_DBM(atoi(rsrp)) : 0;
+	if (longn) {
+		strncpy(sc->op, longn, sizeof(sc->op) - 1);
+	}
+	sc->valid = true;
 	return 0;
 }
 
-static int mqtt_publish_cell(void)
+static int mqtt_publish_cell(const struct serving_cell *sc)
 {
-	if (cell_current.id == LTE_LC_CELL_EUTRAN_ID_INVALID) {
+	if (!sc->valid) {
 		LOG_WRN("no serving cell — skipping cell publish");
 		return -ENODATA;
 	}
 
-	int n = snprintf(mqtt_payload, sizeof(mqtt_payload),
-		"{\"mcc\":%d,\"mnc\":%d,\"tac\":%u,\"cid\":%u,\"pci\":%u,\"rsrp\":%d,\"nbr\":[",
-		cell_current.mcc, cell_current.mnc, cell_current.tac,
-		cell_current.id, cell_current.phys_cell_id,
-		RSRP_IDX_TO_DBM(cell_current.rsrp));
-
-	for (uint8_t i = 0; i < cell_nbr_count && n > 0; i++) {
-		n += snprintf(mqtt_payload + n, sizeof(mqtt_payload) - n,
-			"%s{\"pci\":%u,\"rsrp\":%d}",
-			i ? "," : "",
-			cell_neighbors[i].phys_cell_id,
-			RSRP_IDX_TO_DBM(cell_neighbors[i].rsrp));
-	}
-	if (n > 0 && n < (int)sizeof(mqtt_payload)) {
-		n += snprintf(mqtt_payload + n, sizeof(mqtt_payload) - n, "]}");
-	}
-	if (n <= 0 || n >= (int)sizeof(mqtt_payload)) {
-		LOG_ERR("cell payload overflow");
-		return -ENOMEM;
-	}
+	snprintf(mqtt_payload, sizeof(mqtt_payload),
+		"{\"mcc\":%d,\"mnc\":%d,\"tac\":%u,\"cid\":%u,\"rsrp\":%d}",
+		sc->mcc, sc->mnc, sc->tac, sc->cid, sc->rsrp_dbm);
 
 	return publish_json(cell_topic);
 }
@@ -315,7 +336,6 @@ static int mqtt_publish_cell(void)
 static void print_status(const struct nrf_modem_gnss_pvt_data_frame *p,
 			 int64_t uptime_ms)
 {
-	char at_resp[256];
 	uint8_t tracked = 0, used = 0;
 
 	for (int i = 0; i < NRF_MODEM_GNSS_MAX_SATELLITES; i++) {
@@ -329,81 +349,13 @@ static void print_status(const struct nrf_modem_gnss_pvt_data_frame *p,
 
 	LOG_INF("===== status @ %llds =====", (long long)(uptime_ms / 1000));
 
-	/* LTE status: combine lte_lc registration state with AT%XMONITOR
-	 * radio details (operator, band, cell, RSRP, SNR).
-	 * XMONITOR response (space after colon, fields comma-separated):
-	 *   %XMONITOR: <reg>,"<long>","<short>","<plmn>","<tac>",<AcT>,
-	 *              <band>,"<cell_id>",<phys_cell_id>,<EARFCN>,<rsrp>,<snr>,...
-	 */
-	if (nrf_modem_at_cmd(at_resp, sizeof(at_resp), "AT%%XMONITOR") == 0) {
-		int  band = 0, rsrp = 255, snr = 127;
-		char op[32] = "", cell[16] = "";
+	/* LTE status: registration state + serving-cell details (same cached
+	 * AT%XMONITOR read used for the cell-location fallback). */
+	struct serving_cell sc;
 
-		/* Skip prefix, then parse field by field using strtok on a copy. */
-		char buf[256];
-		strncpy(buf, at_resp, sizeof(buf) - 1);
-		buf[sizeof(buf) - 1] = '\0';
-
-		char *cp = strchr(buf, ':');
-		if (cp) {
-			cp++; /* skip ':' */
-			/* field 1: reg (skip) */
-			strtok(cp, ",");
-			/* field 2: long name (quoted) */
-			char *f = strtok(NULL, ",");
-			if (f && f[0] == '"') {
-				f++;
-				char *e = strchr(f, '"');
-				if (e) {
-					*e = '\0';
-				}
-				strncpy(op, f, sizeof(op) - 1);
-			}
-			/* fields 3,4,5: short name, plmn, tac */
-			strtok(NULL, ",");
-			strtok(NULL, ",");
-			strtok(NULL, ",");
-			/* field 6: AcT (skip) */
-			strtok(NULL, ",");
-			/* field 7: band */
-			f = strtok(NULL, ",");
-			if (f) {
-				band = atoi(f);
-			}
-			/* field 8: cell id (quoted) */
-			f = strtok(NULL, ",");
-			if (f && f[0] == '"') {
-				f++;
-				char *e = strchr(f, '"');
-				if (e) {
-					*e = '\0';
-				}
-				strncpy(cell, f, sizeof(cell) - 1);
-			}
-			/* fields 9,10: phys cell, EARFCN */
-			strtok(NULL, ",");
-			strtok(NULL, ",");
-			/* field 11: rsrp */
-			f = strtok(NULL, ",");
-			if (f) {
-				rsrp = atoi(f);
-			}
-			/* field 12: snr */
-			f = strtok(NULL, ",\r\n");
-			if (f) {
-				snr = atoi(f);
-			}
-		}
-
-		if (band) {
-			LOG_INF("LTE:  %s | op %s | band %d | cell %s | RSRP %d dBm | SNR %d dB",
-				lte_status_str(), op, band, cell,
-				rsrp - 140, snr - 24);
-		} else {
-			LOG_INF("LTE:  %s%s%s",
-				lte_status_str(),
-				op[0] ? " | op " : "", op);
-		}
+	if (read_serving_cell(&sc) == 0 && sc.valid) {
+		LOG_INF("LTE:  %s | op %s | band %d | cell %u | RSRP %d dBm",
+			lte_status_str(), sc.op, sc.band, sc.cid, sc.rsrp_dbm);
 	} else {
 		LOG_INF("LTE:  %s", lte_status_str());
 	}
@@ -469,21 +421,22 @@ int main(void)
 
 	int64_t last_post_ms   = 0;
 	int64_t last_status_ms = 0;
-	int64_t last_fix_ms    = k_uptime_get(); /* start the fallback clock */
-	bool    has_fix        = false;
+	/* Start "stale" so the first report at boot is a cell fix (like Google
+	 * Maps: coarse location immediately, upgrade to GPS once it locks). */
+	int64_t last_fix_ms    = k_uptime_get() - GPS_STALE_MS;
 	bool    mqtt_init_done = false;
 
 	for (;;) {
 		/* Wait for next PVT event (1 Hz) with a 2s timeout so the
 		 * status block still prints even if GNSS is blocked by LTE. */
 		if (k_sem_take(&pvt_sem, K_SECONDS(2)) == 0) {
-			has_fix = (pvt.flags & NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID);
-			if (has_fix) {
+			if (pvt.flags & NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID) {
 				last_fix_ms = k_uptime_get();
 			}
 		}
 
 		int64_t now = k_uptime_get();
+		bool gps_current = (now - last_fix_ms < GPS_STALE_MS);
 
 		/* Connect MQTT once LTE is up */
 		if (lte_connected && !mqtt_init_done) {
@@ -504,25 +457,27 @@ int main(void)
 			print_status(&pvt, now);
 		}
 
-		/* Publish once per interval when MQTT is up. Prefer a GPS fix;
-		 * fall back to a cell measurement when GPS has been dry for
-		 * longer than the fallback window (e.g. indoors). */
+		/* Publish once per interval when MQTT is up. Prefer a current
+		 * GPS fix; otherwise report the serving cell (cheap XMONITOR
+		 * read — no radio scan). Covers boot-before-GPS and GPS loss. */
 		if (now - last_post_ms >= POST_INTERVAL_MS && mqtt_connected) {
-			if (has_fix) {
+			if (gps_current) {
 				last_post_ms = now;
 				err = mqtt_publish_fix(&pvt);
 				if (err) {
 					LOG_WRN("publish failed: %d (will retry)", err);
 				}
-			} else if (now - last_fix_ms >= GPS_FALLBACK_MS) {
+			} else if (lte_connected) {
 				last_post_ms = now;
-				LOG_INF("no GPS fix for %llds — cell fallback",
-					(long long)((now - last_fix_ms) / 1000));
-				if (measure_cells() == 0) {
-					err = mqtt_publish_cell();
+				struct serving_cell sc;
+
+				if (read_serving_cell(&sc) == 0) {
+					err = mqtt_publish_cell(&sc);
 					if (err) {
 						LOG_WRN("cell publish failed: %d", err);
 					}
+				} else {
+					LOG_WRN("serving cell unavailable");
 				}
 			}
 		} else if (!mqtt_connected) {
