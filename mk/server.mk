@@ -1,13 +1,10 @@
-# Server + native_sim: MQTT broker, SQLite ingest, web map, and the sim.
-#
-# native_sim uses NSOS (offloaded sockets) — no TAP, no root, no net-setup;
-# the sim binary connects straight to the host network stack via localhost.
+# Server/host services: MQTT broker, SQLite ingest, web map, Caddy front.
+# (The native_sim build lives in mk/fw.mk; the demo entry point in Makefile.)
 #
 # Override on the command line:
-#   BROKER_HOST=localhost     broker the sim/ingest connect to
+#   BROKER_HOST=localhost     broker the ingest connects to
 #   MQTT_PORT=1883            broker port
 #   HTTP_PORT=8080            web map port
-#   SIM_DEVICE_ID=sim-dev-1   device id the sim reports (env at runtime)
 #   CADDY_DOMAIN=noil.uk      empty -> HTTP on :80 by IP; set -> HTTPS for domain
 #
 # Public access goes through Caddy (systemd service) as a reverse proxy to the
@@ -16,33 +13,17 @@
 # your domain once it resolves to this host and Caddy gets a Let's Encrypt cert
 # automatically (HTTPS + www + auto-renew).
 
-SIM_BUILD     := build/tracker-sim
-BROKER_HOST   ?= localhost
-MQTT_PORT     ?= 1883
-MQTT_TOPIC    ?= trackers/\#
-SIM_DEVICE_ID ?= sim-dev-1
-HTTP_PORT     ?= 8080
-CADDY_DOMAIN  ?=
-CADDYFILE     := /etc/caddy/Caddyfile
+MQTT_PORT  ?= 1883
+MQTT_TOPIC ?= trackers/\#
+HTTP_PORT  ?= 8080
+CADDYFILE  := /etc/caddy/Caddyfile
 
 INGEST := $(VENV)/bin/python3 server/ingest.py --host $(BROKER_HOST) --port $(MQTT_PORT) --topic '$(MQTT_TOPIC)'
 # Bind the app to localhost only — Caddy is the sole public face.
 WEB    := $(VENV)/bin/uvicorn app:app --host 127.0.0.1 --port $(HTTP_PORT) --app-dir server
-SIM    := TRACKER_DEVICE_ID=$(SIM_DEVICE_ID) $(SIM_BUILD)/tracker/zephyr/zephyr.exe
 
-.PHONY: setup-venv setup-west setup-host setup-caddy open-ports caddy \
-        sim run-sim broker ingest server serve demo stop
-
-# Create the Python venv if it doesn't exist. Just the venv, nothing else.
-setup-venv:
-> @if [ ! -d "$(VENV)" ]; then \
->   echo "Creating venv at $(VENV)"; \
->   python3 -m venv $(VENV); \
->   $(VENV)/bin/pip install --quiet --upgrade pip; \
-> else \
->   echo "venv exists at $(VENV)"; \
-> fi
-
+.PHONY: setup-host setup-caddy open-ports caddy \
+        broker ingest server serve stop
 
 setup-host: setup-venv
 > sudo apt-get install -y mosquitto mosquitto-clients
@@ -94,16 +75,6 @@ caddy: setup-caddy
 > @sudo systemctl reload caddy 2>/dev/null || sudo systemctl restart caddy
 > @echo "caddy (re)loaded"
 
-sim: setup-zephyr
-> $(WEST) build -p auto -b native_sim/native/64 apps/tracker -d $(SIM_BUILD) \
->   -DCONFIG_TRACKER_MQTT_BROKER_HOST=\"$(BROKER_HOST)\"
-> @echo "Sim built: $(SIM_BUILD)/tracker/zephyr/zephyr.exe"
-> @echo "Run: make run-sim  (override device: make run-sim SIM_DEVICE_ID=sim-dev-2)"
-
-run-sim:
-> @test -f $(SIM_BUILD)/tracker/zephyr/zephyr.exe || { echo "Run 'make sim' first"; exit 1; }
-> $(SIM)
-
 # Start mosquitto in the background and wait until the port accepts a TCP
 # connection before returning. Any distro mosquitto.service auto-started by
 # apt would squat 1883, so stop it and reclaim the port first.
@@ -143,21 +114,13 @@ serve: open-ports broker caddy
 >  echo "app on 127.0.0.1:$(HTTP_PORT)  —  Ctrl-C to stop app (Caddy stays up)"; \
 >  $(WEB)
 
-# Full localhost end-to-end: broker + ingest + web + one sim, one command.
-# Builds the sim first if needed. Ctrl-C tears the whole stack down.
-demo: broker
-> @test -f $(SIM_BUILD)/tracker/zephyr/zephyr.exe || $(MAKE) --no-print-directory sim
-> @trap '$(MAKE) --no-print-directory stop' EXIT; \
->  $(INGEST) & echo "ingest started (pid $$!)"; \
->  $(SIM) > /dev/null 2>&1 & echo "sim '$(SIM_DEVICE_ID)' started (pid $$!)"; \
->  echo "map at http://localhost:$(HTTP_PORT)  —  Ctrl-C to stop"; \
->  $(WEB)
-
-# Stop the listeners by port (server 8080, broker 1883) and kill any
-# backgrounded sim binaries. The '[z]ephyr.exe' pattern matches real
-# zephyr.exe processes but not pkill's own argv, so it never self-kills.
+# Stop the listeners by port (server 8080, broker 1883) and kill the
+# backgrounded sim + ingest processes. ingest is an MQTT *client* with no
+# listening socket, so fuser can't find it — match it by argv instead. The
+# bracket trick ('[z]ephyr.exe') stops pkill matching its own argv.
 stop:
 > @fuser -k $(HTTP_PORT)/tcp 2>/dev/null && echo "stopped server (port $(HTTP_PORT))" || true
 > @fuser -k $(MQTT_PORT)/tcp  2>/dev/null && echo "stopped broker (port $(MQTT_PORT))" || true
 > @pkill -f '[z]ephyr.exe' 2>/dev/null && echo "stopped sim(s)" || true
+> @pkill -f '[s]erver/ingest.py' 2>/dev/null && echo "stopped ingest" || true
 > @echo "cleanup done"

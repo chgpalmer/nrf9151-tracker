@@ -3,14 +3,14 @@
 # through west -> nrfutil; serial console uses tio.
 #
 # Override on the command line:
-#   APP=hello                 app under apps/  (hello, gnss, tracker)
-#   BOARD=nrf9151dk/nrf9151   board; use nrf9151dk/nrf9151/ns for modem/GNSS
+#   APP=tracker                  app under apps/  (hello, gnss, tracker)
+#   BOARD=nrf9151dk/nrf9151/ns   board; the secure nrf9151dk/nrf9151 has no modem
 #   PORT=/dev/ttyACM0         serial port for `make uart`
 #   BAUD=115200               serial baud
 #   RUNNER=nrfutil            west flash/debug runner (nrfutil|nrfjprog|openocd)
 
-APP    ?= hello
-BOARD  ?= nrf9151dk/nrf9151
+APP    ?= tracker
+BOARD  ?= nrf9151dk/nrf9151/ns
 PORT   ?= /dev/ttyACM0
 BAUD   ?= 115200
 RUNNER ?= nrfutil
@@ -21,8 +21,20 @@ BUILD   := build/$(APP)
 SDK := $(HOME)/zephyr-sdk-1.0.1
 GDB := $(SDK)/gnu/arm-zephyr-eabi/bin/arm-zephyr-eabi-gdb
 
+# native_sim build of the tracker app (runs as a host Linux process, no DK).
+SIM_BUILD     := build/tracker-sim
+SIM_DEVICE_ID ?= sim-dev-1
+SIM           := TRACKER_DEVICE_ID=$(SIM_DEVICE_ID) $(SIM_BUILD)/tracker/zephyr/zephyr.exe
+
+# Point the physical tracker firmware at the configured broker. Only applied
+# when building the tracker app; empty (harmless) for every other app.
+ifeq ($(APP),tracker)
+BUILD_DEFINES := -DCONFIG_TRACKER_MQTT_BROKER_HOST=\"$(TRACKER_BROKER_HOST)\" \
+                 -DCONFIG_TRACKER_MQTT_BROKER_PORT=$(TRACKER_BROKER_PORT)
+endif
+
 .PHONY: setup setup-system setup-zephyr setup-tools windows-usb-passthrough \
-        build flash recover uart gdb clean
+        build flash recover uart gdb clean sim run-sim
 
 # One-time firmware setup: pull SDK/deps + install host build tools.
 setup: setup-zephyr setup-tools
@@ -64,7 +76,7 @@ windows-usb-passthrough:
 
 build: setup-zephyr
 > @test -d $(APP_DIR) || { echo "No app '$(APP)' in apps/ ($$(ls apps 2>/dev/null | tr '\n' ' '))"; exit 1; }
-> $(WEST) build -p auto -b $(BOARD) $(APP_DIR) -d $(BUILD)
+> $(WEST) build -p auto -b $(BOARD) $(APP_DIR) -d $(BUILD) $(BUILD_DEFINES)
 > @echo "built $(APP) for $(BOARD)"
 
 flash:
@@ -87,3 +99,16 @@ gdb:
 
 clean:
 > rm -rf $(BUILD)
+
+# Build the tracker for native_sim (host Linux process). The sim always talks
+# to the local broker on $(BROKER_HOST) (localhost) — that is independent of the
+# hardware TRACKER_BROKER_HOST used by `make build APP=tracker`.
+sim: setup-zephyr
+> $(WEST) build -p auto -b native_sim/native/64 apps/tracker -d $(SIM_BUILD) \
+>   -DCONFIG_TRACKER_MQTT_BROKER_HOST=\"$(BROKER_HOST)\"
+> @echo "Sim built: $(SIM_BUILD)/tracker/zephyr/zephyr.exe"
+> @echo "Run: make run-sim  (override device: make run-sim SIM_DEVICE_ID=sim-dev-2)"
+
+run-sim:
+> @test -f $(SIM_BUILD)/tracker/zephyr/zephyr.exe || { echo "Run 'make sim' first"; exit 1; }
+> $(SIM)

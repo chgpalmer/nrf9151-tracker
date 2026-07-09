@@ -18,16 +18,35 @@ curl -fsSL https://raw.githubusercontent.com/chgpalmer/nrf9151-tracker/main/setu
 cd ~/nrf9151-tracker-ws/nrf9151-tracker
 make setup-tools               # host tools: nrfutil, usbip, tio
 make setup-host                # server tools: mosquitto, Python deps
-make build                     # build the default app (hello), secure
+make build                     # build the default app (tracker), non-secure
 make windows-usb-passthrough   # attach the J-Link into WSL (usbipd)
 make flash
-make uart                      # -> "Hello from nRF9151-DK!"
+make uart                      # stream the serial console
 make demo                      # run local MQTT broker + server + sim
+./smoke.sh                     # check both flows: make build + make demo
 ```
 
 `setup.sh` creates `~/nrf9151-tracker-ws/`, sets up a venv, runs `west init -m <this repo>`, then
 `make setup-zephyr` (west update + minimal Zephyr SDK). The workspace dir is
 `$WS` (default `~/nrf9151-tracker-ws`) — override with `WS=~/my-path bash <(curl ...)`. Idempotent.
+
+## Configuration (`.env`)
+
+Host-specific values are **not** committed. Copy the template and edit:
+
+```sh
+cp env.template .env
+```
+
+| Variable | Used by | Purpose |
+|---|---|---|
+| `TRACKER_BROKER_HOST` | `make build APP=tracker` | MQTT broker the physical device connects to over LTE — set to your server's hostname/IP. Default `test.mosquitto.org`. |
+| `TRACKER_BROKER_PORT` | `make build APP=tracker` | Broker port (default `1883`). |
+| `CADDY_DOMAIN` | `make serve` | Domain for auto-HTTPS; empty serves plain HTTP by IP. |
+
+Precedence is **CLI > `.env` > built-in default**, e.g. `make build APP=tracker
+TRACKER_BROKER_HOST=noil.uk` overrides `.env` for one build. `.env` is
+git-ignored; `env.template` is the committed reference.
 
 ## USB passthrough (one-time)
 
@@ -59,8 +78,8 @@ After attaching, the DK appears in WSL as `/dev/ttyACM0` (console) and `/dev/tty
 
 | Var | Default | Notes |
 |---|---|---|
-| `APP` | `hello` | app under `apps/` (`hello`, `gnss`, …) |
-| `BOARD` | `nrf9151dk/nrf9151` | secure; use `nrf9151dk/nrf9151/ns` for modem/GNSS |
+| `APP` | `tracker` | app under `apps/` (`tracker`, `hello`, `gnss`) |
+| `BOARD` | `nrf9151dk/nrf9151/ns` | non-secure; needed for modem/GNSS. `nrf9151dk/nrf9151` is the secure target (`hello` only) |
 | `PORT` | `/dev/ttyACM0` | serial port for `make uart` |
 | `BAUD` | `115200` | serial baud |
 | `RUNNER` | `nrfutil` | west flash/debug runner (`nrfutil`\|`nrfjprog`\|`openocd`) |
@@ -103,11 +122,13 @@ the domain must resolve to this host, and OCI/cloud security lists must allow
 ```
 nrf9151-tracker/
   west.yml            self-manifest; imports sdk-nrf v3.4.0 (trimmed allowlist)
-  Makefile            the workflow (run inside WSL)
+  Makefile            shared config + cross-cutting entry points (demo, setup-venv)
   setup.sh            one-line bootstrap (curl | bash)
+  smoke.sh            smoke test: make build + make demo end-to-end
+  env.template        copy to .env for host-specific config (broker, domain)
   mk/
-    fw.mk             firmware targets (build, flash, debug)
-    server.mk         server targets (broker, ingest, web, sim)
+    fw.mk             firmware/Zephyr targets (build, flash, debug, sim)
+    server.mk         server/host services (broker, ingest, web, Caddy)
   apps/<name>/        CMakeLists.txt, prj.conf, src/main.c
   server/             Python MQTT ingest, FastAPI web map
   scripts/

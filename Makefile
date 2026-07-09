@@ -1,16 +1,20 @@
 # nRF9151-DK tracker — top-level Makefile.
 #
 # Split across:
-#   mk/fw.mk      firmware: build/flash/debug on the DK + host toolchain setup
-#   mk/server.mk  server + native_sim: broker, ingest, web map, sim
+#   mk/fw.mk      firmware: build/flash/debug on the DK + native_sim (Zephyr)
+#   mk/server.mk  server/host services: broker, ingest, web map, Caddy
+# This file owns shared config and the cross-cutting entry points (demo).
 #
 # Main targets:
 #   make setup        one-time firmware setup (SDK + host build tools)
-#   make build        build APP for BOARD  (default APP=hello)
+#   make build        build APP for BOARD  (default APP=tracker)
 #   make flash        flash APP to the DK
 #   make setup-host   one-time server setup (mosquitto + Python deps)
 #   make demo         localhost end-to-end: broker + ingest + web + sim
 #   make serve        real server: broker + ingest + web (no sim)
+#
+# Host-specific config (broker host, HTTPS domain) lives in a git-ignored .env;
+# copy env.template to .env and edit. Precedence: CLI > .env > built-in default.
 
 # Use bash everywhere: recipes rely on /dev/tcp, `trap`, and other bashisms.
 SHELL := /bin/bash
@@ -23,6 +27,22 @@ WS   := $(abspath $(CURDIR)/..)
 VENV := $(WS)/.venv
 WEST := $(VENV)/bin/west
 
+# Optional host-specific overrides. Must precede the mk/*.mk includes so the
+# values exist when fw.mk parses its APP=tracker conditional.
+-include .env
+
+# ── shared config (CLI > .env > these defaults) ───────────────────────────────
+# Keep comments on their own lines: make preserves the space before a trailing
+# `#`, so `VAR ?= value # note` yields "value " and breaks quoted -D defines.
+
+# Local plumbing: the broker that ingest and the sim talk to.
+BROKER_HOST         ?= localhost
+# Where the physical device connects over LTE.
+TRACKER_BROKER_HOST ?= test.mosquitto.org
+TRACKER_BROKER_PORT ?= 1883
+# Empty -> Caddy serves HTTP by IP; set -> HTTPS for the domain.
+CADDY_DOMAIN        ?=
+
 # nrfutil lives in ~/.local/bin; add it to PATH for all targets
 export PATH := $(HOME)/.local/bin:$(PATH)
 
@@ -34,6 +54,30 @@ export CURL_CA_BUNDLE := $(CA)
 
 include mk/fw.mk
 include mk/server.mk
+
+.PHONY: setup-venv demo
+
+# Create the Python venv if it doesn't exist. Shared by setup-zephyr (fw.mk)
+# and setup-host (server.mk). Just the venv, nothing else.
+setup-venv:
+> @if [ ! -d "$(VENV)" ]; then \
+>   echo "Creating venv at $(VENV)"; \
+>   python3 -m venv $(VENV); \
+>   $(VENV)/bin/pip install --quiet --upgrade pip; \
+> else \
+>   echo "venv exists at $(VENV)"; \
+> fi
+
+# Full localhost end-to-end: broker + ingest + web + one sim, one command.
+# Cross-cutting: builds the sim (fw.mk) if needed, then runs the server stack
+# (server.mk). Ctrl-C tears the whole stack down.
+demo: broker
+> @test -f $(SIM_BUILD)/tracker/zephyr/zephyr.exe || $(MAKE) --no-print-directory sim
+> @trap '$(MAKE) --no-print-directory stop' EXIT; \
+>  $(INGEST) & echo "ingest started (pid $$!)"; \
+>  $(SIM) > /dev/null 2>&1 & echo "sim '$(SIM_DEVICE_ID)' started (pid $$!)"; \
+>  echo "map at http://localhost:$(HTTP_PORT)  —  Ctrl-C to stop"; \
+>  $(WEB)
 
 .PHONY: help
 help:
@@ -56,10 +100,10 @@ help:
 > @echo "  make uart [PORT=]             stream serial console (tio)"
 > @echo "  make gdb                      west debugserver + arm-gdb"
 > @echo "  make clean                    remove build dir for APP"
-> @echo ""
-> @echo "SERVER + SIM (mk/server.mk)"
 > @echo "  make sim                      build tracker as native Linux process (no DK)"
 > @echo "  make run-sim [SIM_DEVICE_ID=] run the sim binary (foreground)"
+> @echo ""
+> @echo "SERVER (mk/server.mk)"
 > @echo "  make broker                   start mosquitto (background)"
 > @echo "  make ingest                   start MQTT→SQLite ingest (server/tracker.db)"
 > @echo "  make server                   start FastAPI map (127.0.0.1:8080)"
@@ -75,3 +119,4 @@ help:
 > @echo "  make setup setup-host         # once"
 > @echo "  make demo                     # local end-to-end, open http://localhost:8080"
 > @echo "  make build flash              # to the real DK"
+> @echo "  ./smoke.sh                    # check build + demo still work"
