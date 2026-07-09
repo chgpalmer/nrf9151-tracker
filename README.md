@@ -15,7 +15,7 @@ board's USB is brought across the WSL2 boundary once with
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/chgpalmer/nrf9151-tracker/main/setup.sh | bash
-cd ~/nrf9151-tracker-ws/nrf9151-tracker
+cd nrf9151-tracker-ws/nrf9151-tracker
 make setup-tools               # host tools: nrfutil, usbip, tio
 make setup-host                # server tools: mosquitto, Python deps
 make build                     # build the default app (tracker), non-secure
@@ -26,9 +26,10 @@ make demo                      # run local MQTT broker + server + sim
 ./smoke.sh                     # check both flows: make build + make demo
 ```
 
-`setup.sh` creates `~/nrf9151-tracker-ws/`, sets up a venv, runs `west init -m <this repo>`, then
-`make setup-zephyr` (west update + minimal Zephyr SDK). The workspace dir is
-`$WS` (default `~/nrf9151-tracker-ws`) — override with `WS=~/my-path bash <(curl ...)`. Idempotent.
+`setup.sh` installs the bootstrap apt packages, creates `nrf9151-tracker-ws/`, sets up a
+venv, runs `west init -m <this repo>`, then `make setup-zephyr` (system build deps +
+west update + minimal Zephyr SDK). The workspace is created **under the current
+directory** — override with `WS=~/my-path bash <(curl ...)`. Idempotent.
 
 ## Configuration (`.env`)
 
@@ -120,20 +121,25 @@ the domain must resolve to this host, and OCI/cloud security lists must allow
 ## Layout
 
 ```
-nrf9151-tracker/
-  west.yml            self-manifest; imports sdk-nrf v3.4.0 (trimmed allowlist)
-  Makefile            shared config + cross-cutting entry points (demo, setup-venv)
-  setup.sh            one-line bootstrap (curl | bash)
-  smoke.sh            smoke test: make build + make demo end-to-end
-  env.template        copy to .env for host-specific config (broker, domain)
-  mk/
-    fw.mk             firmware/Zephyr targets (build, flash, debug, sim)
-    server.mk         server/host services (broker, ingest, web, Caddy)
-  apps/<name>/        CMakeLists.txt, prj.conf, src/main.c
-  server/             Python MQTT ingest, FastAPI web map
-  scripts/
-    setup-tools.sh    installs nrfutil / usbip / tio
-    windows/
-      passthrough.ps1 usbipd bind + attach (the only Windows-side script)
-      uart.ps1        PowerShell serial fallback (not needed in the native flow)
+nrf9151-tracker-ws/          workspace root (created by setup.sh)
+  .venv/                   python venv holding west
+  .west/                   west workspace marker
+  zephyr/  nrf/  ...       SDK trees, cloned by `west update`
+  nrf9151-tracker/         this repo (== manifest.self.path in west.yml)
+    west.yml            self-manifest; imports sdk-nrf v3.4.0 (trimmed allowlist)
+    Makefile            shared config + cross-cutting entry points (demo, setup-venv)
+    setup.sh            one-line bootstrap (curl | bash)
+    smoke.sh            smoke test: make build + make demo end-to-end
+    env.template        copy to .env for host-specific config (broker, domain)
+    mk/
+      fw.mk             firmware/Zephyr targets (build, flash, debug, sim)
+      server.mk         server/host services (broker, ingest, web, Caddy)
+    apps/<name>/        CMakeLists.txt, prj.conf, src/main.c
+    server/             Python MQTT ingest, FastAPI web map
+    scripts/
+      setup-system.sh   installs the Zephyr apt build deps
+      setup-tools.sh    installs nrfutil / usbip / tio
+      windows/
+        passthrough.ps1 usbipd bind + attach (the only Windows-side script)
+        uart.ps1        PowerShell serial fallback (not needed in the native flow)
 ```

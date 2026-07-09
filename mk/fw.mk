@@ -34,27 +34,29 @@ BUILD_DEFINES := -DCONFIG_TRACKER_MQTT_BROKER_HOST=\"$(TRACKER_BROKER_HOST)\" \
 endif
 
 .PHONY: setup setup-system setup-zephyr setup-tools windows-usb-passthrough \
-        build flash recover uart gdb clean sim run-sim
+        build flash recover uart gdb clean sim run-sim check-workspace
 
 # One-time firmware setup: pull SDK/deps + install host build tools.
 setup: setup-zephyr setup-tools
 > @echo "Firmware setup complete."
 
-# Install system packages needed for Zephyr (from official docs)
-# Idempotent: checks for cmake as a canary before running apt-get
-setup-system:
-> @if ! command -v cmake >/dev/null 2>&1; then \
->   echo "Installing system build dependencies..."; \
->   sudo apt-get update -qq && \
->   sudo apt-get install --no-install-recommends -y git cmake ninja-build gperf \
->     ccache dfu-util device-tree-compiler wget python3-dev python3-venv python3-tk \
->     xz-utils file make gcc gcc-multilib g++-multilib libsdl2-dev libmagic1; \
->   echo "System packages installed."; \
-> else \
->   echo "System packages already installed."; \
-> fi
+# Fail early and legibly if the workspace isn't fully populated. Checking only
+# for .west is not enough: `west init` creates it, but `west build` is an
+# extension command that ships inside the zephyr tree, so a workspace that was
+# init'd but never `west update`d passes a .west check and then dies with an
+# opaque `unknown command "build"`.
+check-workspace:
+> @test -x $(WEST)     || { echo "No west at $(WEST) — run: make setup-zephyr"; exit 1; }
+> @test -d $(WS)/.west || { echo "No west workspace at $(WS) — run: make setup-zephyr"; exit 1; }
+> @test -d $(WS)/zephyr || { echo "Zephyr not cloned into $(WS) — run: make setup-zephyr"; exit 1; }
 
-setup-zephyr: setup-venv setup-system
+# Install system packages needed for Zephyr (from official docs)
+setup-system:
+> @bash scripts/setup-system.sh
+
+# setup-system MUST precede setup-venv: the venv needs python3-venv, which
+# setup-system is what installs. (Prerequisites run left to right.)
+setup-zephyr: setup-system setup-venv
 > @mkdir -p $(HOME)/.cache/ztmp
 > @if [ ! -d "$(WS)/.west" ]; then \
 >   $(VENV)/bin/pip install --quiet west; \
@@ -74,8 +76,7 @@ windows-usb-passthrough:
 > @powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$$(wslpath -w scripts/windows/passthrough.ps1)"
 > @echo "If /dev/ttyACM* still missing, install usbipd on Windows (admin): winget install usbipd"
 
-build:
-> @test -x $(WEST) && test -d $(WS)/.west || { echo "Run: make setup-zephyr"; exit 1; }
+build: | check-workspace
 > @test -d $(APP_DIR) || { echo "No app '$(APP)' in apps/ ($$(ls apps 2>/dev/null | tr '\n' ' '))"; exit 1; }
 > $(WEST) build -p auto -b $(BOARD) $(APP_DIR) -d $(BUILD) $(BUILD_DEFINES)
 > @echo "built $(APP) for $(BOARD)"
@@ -104,8 +105,7 @@ clean:
 # Build the tracker for native_sim (host Linux process). The sim always talks
 # to the local broker on $(BROKER_HOST) (localhost) — that is independent of the
 # hardware TRACKER_BROKER_HOST used by `make build APP=tracker`.
-sim:
-> @test -x $(WEST) && test -d $(WS)/.west || { echo "Run: make setup-zephyr"; exit 1; }
+sim: | check-workspace
 > $(WEST) build -p auto -b native_sim/native/64 apps/tracker -d $(SIM_BUILD) \
 >   -DCONFIG_TRACKER_MQTT_BROKER_HOST=\"$(BROKER_HOST)\"
 > @echo "Sim built: $(SIM_BUILD)/tracker/zephyr/zephyr.exe"

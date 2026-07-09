@@ -3,7 +3,9 @@
 # via name-allowlist so contributors don't pull the whole SDK.
 manifest:
   self:
-    path: nrf9151-fw
+    # west clones the manifest repo here, under the workspace root. setup.sh
+    # derives its REPO_DIR from this path -- keep the two in step.
+    path: nrf9151-tracker
 
   remotes:
     - name: ncs
