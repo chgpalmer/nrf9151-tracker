@@ -74,7 +74,8 @@ windows-usb-passthrough:
 > @powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$$(wslpath -w scripts/windows/passthrough.ps1)"
 > @echo "If /dev/ttyACM* still missing, install usbipd on Windows (admin): winget install usbipd"
 
-build: setup-zephyr
+build:
+> @test -x $(WEST) && test -d $(WS)/.west || { echo "Run: make setup-zephyr"; exit 1; }
 > @test -d $(APP_DIR) || { echo "No app '$(APP)' in apps/ ($$(ls apps 2>/dev/null | tr '\n' ' '))"; exit 1; }
 > $(WEST) build -p auto -b $(BOARD) $(APP_DIR) -d $(BUILD) $(BUILD_DEFINES)
 > @echo "built $(APP) for $(BOARD)"
@@ -103,7 +104,8 @@ clean:
 # Build the tracker for native_sim (host Linux process). The sim always talks
 # to the local broker on $(BROKER_HOST) (localhost) — that is independent of the
 # hardware TRACKER_BROKER_HOST used by `make build APP=tracker`.
-sim: setup-zephyr
+sim:
+> @test -x $(WEST) && test -d $(WS)/.west || { echo "Run: make setup-zephyr"; exit 1; }
 > $(WEST) build -p auto -b native_sim/native/64 apps/tracker -d $(SIM_BUILD) \
 >   -DCONFIG_TRACKER_MQTT_BROKER_HOST=\"$(BROKER_HOST)\"
 > @echo "Sim built: $(SIM_BUILD)/tracker/zephyr/zephyr.exe"

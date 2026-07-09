@@ -25,8 +25,13 @@ WEB    := $(VENV)/bin/uvicorn app:app --host 127.0.0.1 --port $(HTTP_PORT) --app
 .PHONY: setup-host setup-caddy open-ports caddy \
         broker ingest server serve stop
 
+# One-time server setup. Idempotent: skips apt when mosquitto is already on
+# PATH (like setup-system does), so re-running is cheap and prompts no sudo.
 setup-host: setup-venv
-> sudo apt-get install -y mosquitto mosquitto-clients
+> @if ! command -v mosquitto >/dev/null 2>&1; then \
+>    echo "Installing mosquitto..."; \
+>    sudo apt-get install -y mosquitto mosquitto-clients; \
+>  else echo "mosquitto already installed"; fi
 > $(VENV)/bin/pip install --quiet -r server/requirements.txt
 > @echo "Host tools ready."
 
@@ -78,7 +83,7 @@ caddy: setup-caddy
 # Start mosquitto in the background and wait until the port accepts a TCP
 # connection before returning. Any distro mosquitto.service auto-started by
 # apt would squat 1883, so stop it and reclaim the port first.
-broker: setup-host
+broker:
 > @which mosquitto >/dev/null 2>&1 || { echo "Run: make setup-host"; exit 1; }
 > @sudo systemctl stop mosquitto 2>/dev/null || true
 > @fuser -k $(MQTT_PORT)/tcp 2>/dev/null || true
@@ -92,10 +97,12 @@ broker: setup-host
 >    exec 3>&-; echo "mosquitto started on port $(MQTT_PORT)"; \
 >  else echo "mosquitto failed — see /tmp/mosquitto-$(MQTT_PORT).log"; exit 1; fi
 
-ingest: setup-host
+ingest:
+> @test -x $(VENV)/bin/python3 || { echo "Run: make setup-host"; exit 1; }
 > $(INGEST)
 
-server: setup-host
+server:
+> @test -x $(VENV)/bin/uvicorn || { echo "Run: make setup-host"; exit 1; }
 > $(WEB)
 
 # Real-server stack: firewall + broker + Caddy front + ingest (bg) + web (fg).
