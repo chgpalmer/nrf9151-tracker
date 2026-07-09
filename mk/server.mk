@@ -17,6 +17,11 @@ MQTT_PORT  ?= 1883
 MQTT_TOPIC ?= trackers/\#
 HTTP_PORT  ?= 8080
 CADDYFILE  := /etc/caddy/Caddyfile
+# Address mosquitto listens on. Loopback by default so `make demo` (sim on the
+# same host) never exposes a broker; `serve` overrides it to 0.0.0.0 because a
+# real device dials in from the internet. Generated config, git-ignored.
+MQTT_BIND  ?= 127.0.0.1
+MOSQ_CONF  := server/mosquitto.conf
 
 # OpenCelliD cell-tower DB for GPS-less location fallback.
 # CELL_MCC: MCC files to download (space-separated). Default = UK (234,730,748).
@@ -116,18 +121,28 @@ caddy: setup-caddy
 # Start mosquitto in the background and wait until the port accepts a TCP
 # connection before returning. Any distro mosquitto.service auto-started by
 # apt would squat 1883, so stop it and reclaim the port first.
+#
+# mosquitto 2.x run without a config file starts in "local only mode": it binds
+# 127.0.0.1 and no remote client can ever reach it. `mosquitto -p N` does NOT
+# change that -- the port is right, the bind address is not. So we always write
+# an explicit listener. MQTT_BIND stays on loopback for `make demo` (the sim is
+# a local process) and `serve` widens it to 0.0.0.0 for real devices.
+#
+# The 127.0.0.1 readiness probe below passes in either mode, which is exactly why
+# a loopback-only broker looked healthy while the DK timed out against it.
 broker:
 > @which mosquitto >/dev/null 2>&1 || { echo "Run: make setup-host"; exit 1; }
 > @sudo systemctl stop mosquitto 2>/dev/null || true
 > @fuser -k $(MQTT_PORT)/tcp 2>/dev/null || true
 > @sleep 0.3
-> @nohup mosquitto -p $(MQTT_PORT) > /tmp/mosquitto-$(MQTT_PORT).log 2>&1 &
+> @printf 'listener %s %s\nallow_anonymous true\n' '$(MQTT_PORT)' '$(MQTT_BIND)' > $(MOSQ_CONF)
+> @nohup mosquitto -c $(MOSQ_CONF) > /tmp/mosquitto-$(MQTT_PORT).log 2>&1 &
 > @for i in {1..50}; do \
 >    (exec 3<>/dev/tcp/127.0.0.1/$(MQTT_PORT)) 2>/dev/null && { exec 3>&-; break; }; \
 >    sleep 0.1; \
 >  done; \
 >  if (exec 3<>/dev/tcp/127.0.0.1/$(MQTT_PORT)) 2>/dev/null; then \
->    exec 3>&-; echo "mosquitto started on port $(MQTT_PORT)"; \
+>    exec 3>&-; echo "mosquitto started on $(MQTT_BIND):$(MQTT_PORT)"; \
 >  else echo "mosquitto failed — see /tmp/mosquitto-$(MQTT_PORT).log"; exit 1; fi
 
 ingest:
@@ -143,6 +158,9 @@ server:
 # Ctrl-C here stops the app + broker + ingest via the EXIT trap.
 #   make serve                 public HTTP by IP  (default, works without DNS)
 #   make serve CADDY_DOMAIN=noil.uk   public HTTPS once DNS points here
+# Target-specific, and GNU make passes it down to the `broker` prerequisite.
+# This is the one place the broker is meant to face the internet.
+serve: MQTT_BIND := 0.0.0.0
 serve: open-ports broker caddy
 > @trap '$(MAKE) --no-print-directory stop' EXIT; \
 >  $(INGEST) & echo "ingest started (pid $$!)"; \
