@@ -32,6 +32,7 @@ LOG_MODULE_REGISTER(tracker, CONFIG_TRACKER_LOG_LEVEL);
 #define POST_INTERVAL_MS  (CONFIG_TRACKER_POST_INTERVAL_S * 1000)
 #define STATUS_INTERVAL_MS 5000
 #define GPS_STALE_MS      (CONFIG_TRACKER_GPS_STALE_S * 1000)
+#define MQTT_RETRY_MS     10000  /* between reconnect attempts */
 
 /* RSRP index → dBm (same formula as modem_info.h RSRP_IDX_TO_DBM). */
 #define RSRP_IDX_TO_DBM(idx) ((idx) < 0 ? (idx) - 140 : (idx) - 141)
@@ -54,8 +55,10 @@ static struct nrf_modem_gnss_pvt_data_frame pvt;
 static K_SEM_DEFINE(pvt_sem, 0, 1);
 
 static enum lte_lc_nw_reg_status lte_status = LTE_LC_NW_REG_NOT_REGISTERED;
-static bool lte_connected;
-static bool mqtt_connected;
+/* Both are set from callback threads (LTE handler / mqtt_helper) and polled by
+ * the main loop, which reconnects off mqtt_connected. */
+static volatile bool lte_connected;
+static volatile bool mqtt_connected;
 
 static char device_id[HW_ID_LEN];
 static char pos_topic[64];
@@ -424,7 +427,7 @@ int main(void)
 	/* Start "stale" so the first report at boot is a cell fix (like Google
 	 * Maps: coarse location immediately, upgrade to GPS once it locks). */
 	int64_t last_fix_ms    = k_uptime_get() - GPS_STALE_MS;
-	bool    mqtt_init_done = false;
+	int64_t next_mqtt_ms   = 0;
 
 	for (;;) {
 		/* Wait for next PVT event (1 Hz) with a 2s timeout so the
@@ -438,16 +441,20 @@ int main(void)
 		int64_t now = k_uptime_get();
 		bool gps_current = (now - last_fix_ms < GPS_STALE_MS);
 
-		/* Connect MQTT once LTE is up */
-		if (lte_connected && !mqtt_init_done) {
-			mqtt_init_done = true;
-			LOG_INF("LTE up — connecting MQTT to %s:%d...",
-				BROKER_HOST, BROKER_PORT);
+		/* (Re)connect MQTT whenever LTE is up and the broker isn't. This
+		 * covers the first connect at boot and every later drop — a broker
+		 * restart, a lost PDN — without needing to power-cycle the board.
+		 * mqtt_helper_init() accepts UNINIT and DISCONNECTED alike, so
+		 * tracker_mqtt_connect() is safe to call again after a disconnect.
+		 * -EOPNOTSUPP just means an attempt is still in flight (no connack
+		 * yet); back off and let it settle rather than logging a failure. */
+		if (lte_connected && !mqtt_connected && now >= next_mqtt_ms) {
+			next_mqtt_ms = now + MQTT_RETRY_MS;
+			LOG_INF("connecting MQTT to %s:%d...", BROKER_HOST, BROKER_PORT);
 			err = tracker_mqtt_connect();
-			if (err) {
-				LOG_WRN("MQTT connect failed: %d (will retry on next LTE attach)",
-					err);
-				mqtt_init_done = false;
+			if (err && err != -EOPNOTSUPP) {
+				LOG_WRN("MQTT connect failed: %d (retry in %d s)",
+					err, MQTT_RETRY_MS / 1000);
 			}
 		}
 
