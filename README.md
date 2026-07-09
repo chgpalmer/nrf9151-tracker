@@ -60,6 +60,17 @@ winget install usbipd
 ```
 
 After attaching, the DK appears in WSL as `/dev/ttyACM0` (console) and `/dev/ttyACM1`.
+Confirm with `nrfutil device list` — it should report `Product J-Link`, `Board version PCA10171`.
+
+**If `bind` succeeds but `attach` fails** with `The VBoxUsbMon driver is not correctly
+installed`, usbipd's kernel driver never registered — usually because an unofficial CI
+build got installed instead of a tagged release. Check with `sc.exe query VBoxUsbMon`;
+if the service is absent, reinstall from the release:
+
+```powershell
+winget uninstall dorssel.usbipd-win
+winget install --id dorssel.usbipd-win -e
+```
 
 ## Make targets
 

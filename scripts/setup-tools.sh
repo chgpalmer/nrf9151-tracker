@@ -19,6 +19,8 @@ usbip_works() { usbip version >/dev/null 2>&1; }
 
 need_apt=()
 command -v tio >/dev/null 2>&1 || need_apt+=(tio)
+# usbutils: `lsusb`, which passthrough.ps1 tells you to run to confirm the attach.
+command -v lsusb >/dev/null 2>&1 || need_apt+=(usbutils)
 usbip_works || need_apt+=(linux-tools-virtual hwdata)
 
 if [ "${#need_apt[@]}" -gt 0 ]; then

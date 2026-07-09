@@ -32,6 +32,19 @@ if (-not $usbipd) {
 }
 Write-Host "usbipd: $usbipd"
 
+# --- sanity-check usbipd's kernel driver --------------------------------------
+# `attach` captures the device through usbipd's VBoxUsbMon filter driver. An
+# incomplete install -- notably an unofficial CI build rather than a tagged
+# release -- leaves the service unregistered, and attach dies with
+# "The VBoxUsbMon driver is not correctly installed". Bind still succeeds, so
+# the failure looks like a WSL problem when it is really a Windows one.
+if (-not (Get-Service -Name VBoxUsbMon -ErrorAction SilentlyContinue)) {
+  Write-Host "WARNING: usbipd's VBoxUsbMon driver is not registered; attach will likely fail."
+  Write-Host "  Repair with, in this order:"
+  Write-Host "    winget uninstall dorssel.usbipd-win"
+  Write-Host "    winget install --id dorssel.usbipd-win -e"
+}
+
 # --- find the SEGGER J-Link (VID 1366) ---------------------------------------
 Write-Host "== usbipd list =="
 & $usbipd list
