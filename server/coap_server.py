@@ -61,11 +61,12 @@ def init_db(path: Path) -> sqlite3.Connection:
     return conn
 
 
-def handle_gps(conn: sqlite3.Connection, g) -> None:
-    """Store one gps_obs (already schema-validated). Wire units are scaled
+def handle_gps(conn: sqlite3.Connection, g, ts: int) -> None:
+    """Store one GPS entry (already schema-validated). Wire units are scaled
     integers (see tracker.cddl); the DB keeps the human units the web UI
-    already expects: degrees, metres, m/s."""
-    received_ts = int(time.time())
+    already expects: degrees, metres, m/s. ts is the observation time
+    (server receive time minus the entry's age)."""
+    received_ts = ts
     # (0, 0) is the Gulf of Guinea, not this tracker: it is what an unfixed PVT
     # frame used to leak before the firmware published from a fix-valid
     # snapshot. Drop it defensively so a regression can't dirty the map again.
@@ -86,8 +87,7 @@ def handle_gps(conn: sqlite3.Connection, g) -> None:
     )
     conn.commit()
     print(f"[coap] {g.device_id_m} gps  {g.lat_e7_m / 1e7:.6f}, "
-          f"{g.lon_e7_m / 1e7:.6f}  acc {g.acc_dm_m / 10.0:.1f}m  "
-          f"fix_age {g.fix_age_s_m}s")
+          f"{g.lon_e7_m / 1e7:.6f}  acc {g.acc_dm_m / 10.0:.1f}m  @{received_ts}")
 
 
 def resolve_cell(mcc, mnc, tac, cid, cells: sqlite3.Connection | None):
@@ -147,9 +147,9 @@ def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return 2 * r * math.asin(math.sqrt(a))
 
 
-def handle_cell(conn: sqlite3.Connection, c,
+def handle_cell(conn: sqlite3.Connection, c, ts: int,
                 cells: sqlite3.Connection | None) -> None:
-    received_ts = int(time.time())
+    received_ts = ts
 
     fix = resolve_cell(c.mcc_m, c.mnc_m, c.tac_m, c.cell_id_m, cells)
     if fix is None:
@@ -169,6 +169,74 @@ def handle_cell(conn: sqlite3.Connection, c,
           f"acc {acc:.0f}m ({how})")
 
 
+def handle_batch(conn: sqlite3.Connection, b,
+                 cells: sqlite3.Connection | None) -> None:
+    """Store a v2 batch: entries carry age-at-send; absolute time is the
+    server receive stamp minus that age (worst error = uplink latency, and no
+    device clock can ever corrupt history). A repeat entry re-asserts the
+    previous GPS position at a new time; the chain seeds from the batch or,
+    for a leading repeat, from the device's last stored GPS row."""
+    now = int(time.time())
+    dev = b.device_id_m
+    prev_gps = None  # (lat, lon, alt, acc, spd, hdg, sats) in DB units
+
+    row = conn.execute(
+        "SELECT lat, lon, alt, acc, spd, hdg, sats FROM positions "
+        "WHERE device_id=? AND source='gps' ORDER BY received_ts DESC LIMIT 1",
+        (dev,)).fetchone()
+    if row:
+        prev_gps = tuple(row)
+
+    n_gps = n_rep = n_cell = 0
+    for e in b.entry_m_l.entry_m:
+        kind = e.union_choice
+        if kind == "gps_entry_m":
+            g = e.gps_entry_m
+            ts = now - g.age_s_m
+            lat, lon = g.lat_e7_m / 1e7, g.lon_e7_m / 1e7
+            if g.lat_e7_m == 0 and g.lon_e7_m == 0:
+                continue  # unfixed-frame leak; see handle_gps
+            vals = (lat, lon, g.alt_dm_m / 10.0, g.acc_dm_m / 10.0,
+                    g.spd_dms_m / 10.0, g.hdg_ddeg_m / 10.0, g.sats_m)
+            conn.execute(
+                """INSERT INTO positions
+                   (device_id, received_ts, source, lat, lon, alt, acc, spd, hdg, sats)
+                   VALUES (?, ?, 'gps', ?, ?, ?, ?, ?, ?, ?)""",
+                (dev, ts) + vals)
+            prev_gps = vals
+            n_gps += 1
+        elif kind == "repeat_entry_m":
+            ts = now - e.repeat_entry_m.age_s_m
+            if prev_gps is None:
+                print(f"[coap] {dev} repeat with no prior gps — skipped",
+                      file=sys.stderr)
+                continue
+            conn.execute(
+                """INSERT INTO positions
+                   (device_id, received_ts, source, lat, lon, alt, acc, spd, hdg, sats)
+                   VALUES (?, ?, 'gps', ?, ?, ?, ?, ?, ?, ?)""",
+                (dev, ts) + prev_gps)
+            n_rep += 1
+        else:
+            c = e.cell_entry_m
+            ts = now - c.age_s_m
+            fix = resolve_cell(c.mcc_m, c.mnc_m, c.tac_m, c.cell_id_m, cells)
+            if fix is None:
+                print(f"[coap] {dev} cell unresolved "
+                      f"(mcc={c.mcc_m} mnc={c.mnc_m} tac={c.tac_m} "
+                      f"cid={c.cell_id_m})")
+                continue
+            lat, lon, acc, how = fix
+            conn.execute(
+                """INSERT INTO positions
+                   (device_id, received_ts, source, lat, lon, alt, acc, spd, hdg, sats)
+                   VALUES (?, ?, 'cell', ?, ?, NULL, ?, NULL, NULL, NULL)""",
+                (dev, ts, lat, lon, acc))
+            n_cell += 1
+    conn.commit()
+    print(f"[coap] {dev} batch: {n_gps} gps + {n_rep} repeat + {n_cell} cell")
+
+
 class ObsResource(resource.Resource):
     def __init__(self, conn, cells, observation):
         super().__init__()
@@ -184,10 +252,13 @@ class ObsResource(resource.Resource):
                   file=sys.stderr)
             return aiocoap.Message(code=aiocoap.Code.BAD_REQUEST)
 
-        if obs.union_choice == "gps_obs_m":
-            handle_gps(self.conn, obs.gps_obs_m)
+        now = int(time.time())
+        if obs.union_choice == "batch_m":
+            handle_batch(self.conn, obs.batch_m, self.cells)
+        elif obs.union_choice == "gps_obs_m":
+            handle_gps(self.conn, obs.gps_obs_m, now)
         else:
-            handle_cell(self.conn, obs.cell_obs_m, self.cells)
+            handle_cell(self.conn, obs.cell_obs_m, now, self.cells)
 
         # Devices set No-Response, so aiocoap drops this on the floor for
         # them; it still answers curious human clients (coap-client etc).

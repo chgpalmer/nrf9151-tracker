@@ -37,6 +37,16 @@ config TRACKER_LOC_CN0_MIN_DBHZ
 	  message cannot be demodulated, so it never yields an ephemeris. Used to
 	  decide whether the sky is worth taking the radio away from LTE for.
 
+config TRACKER_FLUSH_INTERVAL_S
+	int "Observation queue flush interval in seconds"
+	default 120
+	range 10 3600
+	help
+	  Samples queue locally (free) and go out as one CBOR batch per interval,
+	  amortizing per-datagram overhead across ~12 entries. State transitions
+	  and a near-full queue flush immediately regardless, so fresh fixes and
+	  boot cell reports are never held back.
+
 config TRACKER_CELL_POST_INTERVAL_S
 	int "Cell publish interval while GNSS has no usable sky (seconds)"
 	default 30

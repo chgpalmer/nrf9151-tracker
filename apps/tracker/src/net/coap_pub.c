@@ -10,8 +10,8 @@
 
 LOG_MODULE_REGISTER(coap_pub, CONFIG_TRACKER_LOG_LEVEL);
 
-/* Header + token + options + payload. gps_obs encodes to ~50 B; leave slack. */
-#define PKT_BUF_LEN 192
+/* Header + token + options + payload. A full 24-entry batch is ~850 B. */
+#define PKT_BUF_LEN 1152 /* batches: 24 entries + envelope + CoAP framing */
 
 static int sock = -1;
 
@@ -86,7 +86,7 @@ static void rai_last_before_send(void)
 
 int coap_pub_send(const uint8_t *payload, size_t len)
 {
-	uint8_t buf[PKT_BUF_LEN];
+	static uint8_t buf[PKT_BUF_LEN]; /* 1 KB+: keep off the 4 KB main stack */
 	struct coap_packet pkt;
 	int err;
 

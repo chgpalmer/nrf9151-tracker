@@ -25,7 +25,7 @@
 
 #include "loc_fsm.h"
 #include "coap_pub.h"
-#include "tracker_encode.h"
+#include "obs_queue.h"
 
 LOG_MODULE_REGISTER(tracker, CONFIG_TRACKER_LOG_LEVEL);
 
@@ -38,6 +38,9 @@ LOG_MODULE_REGISTER(tracker, CONFIG_TRACKER_LOG_LEVEL);
 #define STATUS_INTERVAL_MS 5000
 /* GPS staleness now lives in loc_fsm, which owns the fix bookkeeping. */
 #define NET_RETRY_MS      10000  /* between socket-setup attempts */
+/* Queue flush cadence: one datagram per interval amortizes the ~47 B
+ * CoAP/UDP/IP overhead across ~12 samples. State changes flush immediately. */
+#define FLUSH_INTERVAL_MS (CONFIG_TRACKER_FLUSH_INTERVAL_S * 1000)
 
 /* RSRP index → dBm (same formula as modem_info.h RSRP_IDX_TO_DBM). */
 #define RSRP_IDX_TO_DBM(idx) ((idx) < 0 ? (idx) - 140 : (idx) - 141)
@@ -225,84 +228,7 @@ static const char *lte_status_str(void)
 	}
 }
 
-/* ── publishing (CoAP + CBOR) ─────────────────────────────────────  */
-/* Encoded observations top out around 60 B (see proto/tracker.cddl). */
-static uint8_t obs_buf[128];
-
-static int publish_fix(const struct nrf_modem_gnss_pvt_data_frame *p,
-		       uint32_t fix_age_s)
-{
-	uint8_t used = 0;
-
-	for (int i = 0; i < NRF_MODEM_GNSS_MAX_SATELLITES; i++) {
-		if (p->sv[i].flags & NRF_MODEM_GNSS_SV_FLAG_USED_IN_FIX) {
-			used++;
-		}
-	}
-
-	bool vel = (p->flags & NRF_MODEM_GNSS_PVT_FLAG_VELOCITY_VALID);
-
-	/* Scaled integers, not floats: degrees*1e7 keeps ~1 cm and costs 5 B on
-	 * the wire where a float64 costs 9 B. Units are fixed by the schema. */
-	struct gps_obs obs = {
-		.gps_obs_device_id_m = { .value = device_id,
-					 .len = strlen(device_id) },
-		.gps_obs_lat_e7_m    = (int32_t)llround(p->latitude  * 1e7),
-		.gps_obs_lon_e7_m    = (int32_t)llround(p->longitude * 1e7),
-		.gps_obs_alt_dm_m    = (int32_t)lroundf(p->altitude * 10.0f),
-		.gps_obs_acc_dm_m    = (uint32_t)lroundf(p->accuracy * 10.0f),
-		.gps_obs_spd_dms_m   = vel ? (uint32_t)lroundf(p->speed * 10.0f) : 0,
-		.gps_obs_hdg_ddeg_m  = vel ? (uint32_t)lroundf(p->heading * 10.0f) : 0,
-		.gps_obs_sats_m      = used,
-		.gps_obs_fix_age_s_m = fix_age_s,
-	};
-
-	size_t len;
-	int err = cbor_encode_gps_obs(obs_buf, sizeof(obs_buf), &obs, &len);
-	if (err) {
-		LOG_ERR("cbor_encode_gps_obs: %d", err);
-		return -EINVAL;
-	}
-
-	err = coap_pub_send(obs_buf, len);
-	if (err == 0) {
-		last_pub_ms = k_uptime_get();
-	}
-	return err;
-}
-
-/* ── cell fallback ────────────────────────────────────────────────  */
-static int publish_cell_obs(const struct serving_cell *sc)
-{
-	if (!sc->valid) {
-		LOG_WRN("no serving cell — skipping cell publish");
-		return -ENODATA;
-	}
-
-	struct cell_obs obs = {
-		.cell_obs_device_id_m = { .value = device_id,
-					  .len = strlen(device_id) },
-		.cell_obs_mcc_m      = sc->mcc,
-		.cell_obs_mnc_m      = sc->mnc,
-		.cell_obs_tac_m      = sc->tac,
-		.cell_obs_cell_id_m  = sc->cid,
-		.cell_obs_rsrp_dbm_m = sc->rsrp_dbm,
-	};
-
-	size_t len;
-	int err = cbor_encode_cell_obs(obs_buf, sizeof(obs_buf), &obs, &len);
-	if (err) {
-		LOG_ERR("cbor_encode_cell_obs: %d", err);
-		return -EINVAL;
-	}
-
-	err = coap_pub_send(obs_buf, len);
-	if (err == 0) {
-		last_pub_ms = k_uptime_get();
-	}
-	return err;
-}
-
+/* ── cell identity (AT%XMONITOR) ─────────────────────────────────  */
 /* Helper: extract the next comma-delimited XMONITOR field, stripping the
  * surrounding quotes if present. Returns the token or NULL. Uses strtok state. */
 static char *xmon_field(char *first)
@@ -449,6 +375,7 @@ int main(void)
 	}
 	LOG_INF("device id: %s", device_id);
 	LOG_INF("server: coap://%s:%d/obs", SERVER_HOST, SERVER_PORT);
+	obs_queue_init(device_id);
 
 	/* Start LTE async — don't block, status loop shows progress */
 	LOG_INF("starting LTE (async)...");
@@ -491,6 +418,8 @@ int main(void)
 	int64_t last_post_ms   = 0;
 	int64_t last_status_ms = 0;
 	int64_t next_net_ms    = 0;
+	int64_t last_flush_ms  = 0;
+	enum loc_state prev_state = LOC_LTE_ATTACH;
 	struct loc_status loc;
 
 	loc_fsm_init(k_uptime_get());
@@ -576,38 +505,47 @@ int main(void)
 			print_status(&pvt, &loc, now);
 		}
 
-		/* Publish what the FSM asks for, at the cadence it asks for.
-		 * prefer_cell covers both the boot cell report and a stale fix;
-		 * the cell read is a cached XMONITOR parse, not a radio scan. */
-		if (loc.publish_allowed && coap_pub_ready() &&
-		    now - last_post_ms >= loc.publish_interval_ms) {
+		/* SAMPLE at the FSM's cadence — free, no radio involved. GPS
+		 * samples come from the fix-valid snapshot; within ~10 m of the
+		 * previous point they queue as 4 B repeat entries. */
+		if (loc.publish_allowed && now - last_post_ms >= loc.publish_interval_ms) {
+			last_post_ms = now;
 			if (!loc.prefer_cell) {
-				last_post_ms = now;
-				err = publish_fix(&fix_pvt,
-						  (uint32_t)((now - fix_pvt_ms) / 1000));
-				if (err) {
-					LOG_WRN("publish failed: %d (will retry)", err);
-				}
+				obs_queue_add_gps(&fix_pvt, fix_pvt_ms);
 			} else if (lte_connected) {
-				last_post_ms = now;
 				struct serving_cell sc;
 
-				if (read_serving_cell(&sc) == 0) {
-					err = publish_cell_obs(&sc);
-					if (err) {
-						LOG_WRN("cell publish failed: %d", err);
-					} else {
-						/* Coarse position is on the map; the FSM
-						 * may now take the radio for GNSS. */
-						loc_fsm_note_cell_sent();
-					}
+				if (read_serving_cell(&sc) == 0 && sc.valid) {
+					obs_queue_add_cell(sc.mcc, sc.mnc, sc.tac,
+							   sc.cid, sc.rsrp_dbm, now);
 				} else {
 					LOG_WRN("serving cell unavailable");
 				}
 			}
-		} else if (!coap_pub_ready()) {
-			/* Publish shortly after the socket comes up. */
-			last_post_ms = now - loc.publish_interval_ms + 3000;
+		}
+
+		/* FLUSH the queue as one datagram. Time-based normally; immediately
+		 * on a state change (a fresh fix or a boot cell report must reach
+		 * the map now, not in two minutes) and in REPORT_CELL, whose whole
+		 * purpose is promptness. Radio use needs publish_allowed. */
+		bool state_changed = (loc.state != prev_state);
+
+		prev_state = loc.state;
+		if (obs_queue_len() > 0 && loc.publish_allowed && coap_pub_ready() &&
+		    (state_changed || loc.state == LOC_REPORT_CELL ||
+		     obs_queue_len() >= 20 ||
+		     now - last_flush_ms >= FLUSH_INTERVAL_MS)) {
+			bool had_cell = obs_queue_has_cell();
+
+			if (obs_queue_flush(now) == 0) {
+				last_flush_ms = now;
+				last_pub_ms = now; /* RRC-tail measurement */
+				if (had_cell) {
+					/* Coarse position is on the map; the FSM
+					 * may now take the radio for GNSS. */
+					loc_fsm_note_cell_sent();
+				}
+			}
 		}
 	}
 
