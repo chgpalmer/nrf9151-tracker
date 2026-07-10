@@ -66,6 +66,13 @@ def handle_gps(conn: sqlite3.Connection, g) -> None:
     integers (see tracker.cddl); the DB keeps the human units the web UI
     already expects: degrees, metres, m/s."""
     received_ts = int(time.time())
+    # (0, 0) is the Gulf of Guinea, not this tracker: it is what an unfixed PVT
+    # frame used to leak before the firmware published from a fix-valid
+    # snapshot. Drop it defensively so a regression can't dirty the map again.
+    if g.lat_e7_m == 0 and g.lon_e7_m == 0:
+        print(f"[coap] {g.device_id_m} gps  dropped (0,0) — unfixed frame?",
+              file=sys.stderr)
+        return
     conn.execute(
         """INSERT INTO positions
            (device_id, received_ts, source, lat, lon, alt, acc, spd, hdg, sats)

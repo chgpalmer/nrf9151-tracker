@@ -139,6 +139,19 @@ make proto                     # regenerate apps/tracker/src/proto/  (committed)
 
 Why this transport: a GPS report is **96 B on air with no downlink** (49 B CBOR +
 19 B CoAP + UDP/IP) vs ~161 B up + a ~40 B TCP ACK down for the old MQTT/JSON path.
+
+### Data budget (against a 10 MB/month IoT plan)
+
+| Scenario | Per day | Per 30 days |
+|---|---|---|
+| 24 h GPS reporting @ 10 s (96 B each) | 810 KB | **24.9 MB — over budget** |
+| 24 h cell reporting @ 30 s (86 B each) | 242 KB | 7.4 MB |
+| Mixed day: 20 h indoors + 4 h moving | 337 KB | **10.3 MB — at the edge** |
+
+Half of every report is per-datagram overhead (47 of 96 B), so batching ~10
+observations into one datagram cuts ~44%. The bigger lever is not re-reporting
+an unmoved position at all: a stationary tracker on a slow heartbeat spends
+10–60× less. (Carrier accounting may round per-session; treat these as floors.)
 Reports carry the RFC 7967 No-Response option, and the firmware sets `SO_RAI`
 (`RAI_LAST`) before each send — with nothing coming back, the modem releases the
 radio connection immediately after the datagram, which is also what keeps GNSS
