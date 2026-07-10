@@ -536,6 +536,12 @@ int main(void)
 	}
 	bool gnss_running = false;
 	bool gnss_blocked_prev = false;
+	/* Snapshot of the most recent PVT frame with FIX_VALID set. The live `pvt`
+	 * global only carries defined lat/lon while the flag is set, but the FSM
+	 * lets us publish for up to GPS_STALE_S after the fix lapses -- those
+	 * publishes must come from this copy, not from whatever an unfixed frame
+	 * happens to contain. (static: ~700 B, keep off the main stack) */
+	static struct nrf_modem_gnss_pvt_data_frame fix_pvt;
 
 	int64_t last_post_ms   = 0;
 	int64_t last_status_ms = 0;
@@ -550,6 +556,10 @@ int main(void)
 		k_sem_take(&pvt_sem, K_SECONDS(2));
 
 		int64_t now = k_uptime_get();
+
+		if (pvt.flags & NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID) {
+			fix_pvt = pvt;
+		}
 
 		/* Policy first: it owns the fix-staleness and ephemeris bookkeeping. */
 		loc_fsm_update(&pvt, now, lte_connected, &loc);
@@ -609,7 +619,7 @@ int main(void)
 		    now - last_post_ms >= loc.publish_interval_ms) {
 			if (!loc.prefer_cell) {
 				last_post_ms = now;
-				err = mqtt_publish_fix(&pvt);
+				err = mqtt_publish_fix(&fix_pvt);
 				if (err) {
 					LOG_WRN("publish failed: %d (will retry)", err);
 				}

@@ -28,6 +28,12 @@ LOG_MODULE_REGISTER(loc_fsm, CONFIG_TRACKER_LOG_LEVEL);
 /* Reading ephemeris state is a modem call; it does not change at 1 Hz. */
 #define EPHE_POLL_MS 5000
 
+/* "Hot start impossible" (fewer than SATS_FOR_FIX ephemeris-bearing satellites
+ * in view) must be sustained before REPORT gives up on a stale fix and takes a
+ * quiet window: the visible count jitters epoch to epoch, and one dip from 4 to
+ * 3 costs an unnecessary silence. Same treatment as every other sky judgement. */
+#define VISIBLE_LOST_MS 10000
+
 /* Indexed by enum loc_state; keep in step with it. */
 static const char *const loc_state_names[] = {
 	[LOC_LTE_ATTACH]  = "LTE_ATTACH",
@@ -45,6 +51,8 @@ static int64_t last_fix_ms;
 static int64_t last_ephe_poll_ms;
 static int64_t last_sky_ok_ms;
 static int64_t last_sky_bad_ms;
+/* Last *observed* epoch with enough ephemeris-bearing satellites in view. */
+static int64_t last_visible_ok_ms;
 static bool cell_sent;
 
 /* Cached ephemeris inventory, refreshed at most every EPHE_POLL_MS. Kept as the
@@ -70,8 +78,9 @@ static void next_state(enum loc_state next, int64_t now_ms, const char *why)
 	state = next;
 	state_entered_ms = now_ms;
 	/* Judge the new state on its own evidence, not sky history from the old. */
-	last_sky_ok_ms  = now_ms;
-	last_sky_bad_ms = now_ms;
+	last_sky_ok_ms      = now_ms;
+	last_sky_bad_ms     = now_ms;
+	last_visible_ok_ms  = now_ms;
 }
 
 void loc_fsm_init(int64_t now_ms)
@@ -207,6 +216,13 @@ void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 	}
 	bool sky_dead  = (now_ms - last_sky_ok_ms) > SKY_LOST_MS;
 	bool sky_alive = (now_ms - last_sky_bad_ms) > SKY_OK_MS;
+
+	/* Hot-start viability, debounced on observed epochs only (blanked epochs
+	 * carry the cached count and must not refresh the clock either way). */
+	if (out->tracked > 0 && out->ephemeris_visible >= SATS_FOR_FIX) {
+		last_visible_ok_ms = now_ms;
+	}
+	bool hotstart_dead = (now_ms - last_visible_ok_ms) > VISIBLE_LOST_MS;
 	int64_t in_state = now_ms - state_entered_ms;
 
 	/* Registration loss overrides everything: an unregistered modem runs a
@@ -248,7 +264,7 @@ void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 		if (!out->gps_current) {
 			if (sky_dead) {
 				next_state(LOC_CELL_LOOP, now_ms, "sky lost");
-			} else if (out->ephemeris_visible < SATS_FOR_FIX) {
+			} else if (hotstart_dead) {
 				next_state(LOC_ACQUIRE, now_ms,
 					   "fix stale, ephemeris not visible");
 			}
