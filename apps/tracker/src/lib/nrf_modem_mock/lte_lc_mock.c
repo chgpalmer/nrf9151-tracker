@@ -37,3 +37,11 @@ int lte_lc_connect_async(lte_lc_evt_handler_t handler)
 int lte_lc_offline(void)   { return 0; }
 int lte_lc_power_off(void) { return 0; }
 int lte_lc_normal(void)    { return 0; }
+
+/* GNSS_EXCLUSIVE toggles the LTE stack on hardware; the sim has no radio to
+ * share, so both directions are no-ops that report success. */
+int lte_lc_func_mode_set(enum lte_lc_func_mode mode)
+{
+	ARG_UNUSED(mode);
+	return 0;
+}

@@ -19,13 +19,12 @@ LOG_MODULE_REGISTER(loc_fsm, CONFIG_TRACKER_LOG_LEVEL);
 #define GPS_STALE_MS     (CONFIG_TRACKER_GPS_STALE_S * 1000)
 #define POST_MS          (CONFIG_TRACKER_POST_INTERVAL_S * 1000)
 #define CELL_POST_MS     (CONFIG_TRACKER_CELL_POST_INTERVAL_S * 1000)
-/* Sky judgements are debounced, never instantaneous: satellite counts jitter
- * epoch to epoch, and one unlucky sample must not discard a usable sky (nor one
- * lucky sample start an acquisition). */
-#define SKY_LOST_MS      (CONFIG_TRACKER_LOC_SKY_LOST_S * 1000)
-/* PVT epochs arrive at 1 Hz, so observed epochs ~= seconds of actual GNSS
- * observation, excluding time LTE held the radio. */
-#define SKY_OK_EPOCHS    CONFIG_TRACKER_LOC_SKY_OK_S
+/* Consecutive observed-empty epochs before declaring the sky dead. */
+#define SKY_EMPTY_EPOCHS CONFIG_TRACKER_LOC_SKY_EMPTY_EPOCHS
+/* A cold receiver shows nothing for its first tens of seconds even under a
+ * perfect sky; the empty-sky bail must not count epochs before this, or every
+ * boot would abandon its first acquisition while GNSS was still warming up. */
+#define SKY_GRACE_MS     30000
 
 /* Reading ephemeris state is a modem call; it does not change at 1 Hz. */
 #define EPHE_POLL_MS 5000
@@ -41,6 +40,7 @@ static const char *const loc_state_names[] = {
 	[LOC_LTE_ATTACH]  = "LTE_ATTACH",
 	[LOC_REPORT_CELL] = "REPORT_CELL",
 	[LOC_GNSS_ACQUIRE] = "GNSS_ACQUIRE",
+	[LOC_GNSS_EXCLUSIVE] = "GNSS_EXCLUSIVE",
 	[LOC_REPORT_GNSS] = "REPORT_GNSS",
 	[LOC_CELL_LOOP]   = "CELL_LOOP",
 };
@@ -51,10 +51,16 @@ static enum loc_state state;
 static int64_t state_entered_ms;
 static int64_t last_fix_ms;
 static int64_t last_ephe_poll_ms;
-static int64_t last_sky_ok_ms;
-/* Consecutive OBSERVED epochs with a usable sky; pauses while GNSS is blanked
- * by LTE, resets on an observed bad epoch. */
-static uint8_t sky_good_streak;
+/* Consecutive OBSERVED epochs with zero satellites. Blanked epochs (LTE held
+ * the radio; DEADLINE_MISSED set) count toward neither side. */
+static uint8_t sky_empty_streak;
+/* Consecutive epochs with NOT_ENOUGH_WINDOW_TIME: the modem's own testimony
+ * that LTE idle-mode work (DRX paging, cell reselection at the coverage edge)
+ * is slicing GNSS too thin even though the application is silent. PSM being
+ * *granted* does not mean PSM sleep is *happening* -- measured at RSRP -141:
+ * the modem never settles, and 0x10 persists for minutes in GNSS_ACQUIRE. */
+static uint8_t chopped_streak;
+#define CHOPPED_EPOCHS 10
 /* Last *observed* epoch with enough ephemeris-bearing satellites in view. */
 static int64_t last_visible_ok_ms;
 static bool cell_sent;
@@ -85,8 +91,8 @@ static void next_state(enum loc_state next, int64_t now_ms, const char *why)
 	state = next;
 	state_entered_ms = now_ms;
 	/* Judge the new state on its own evidence, not sky history from the old. */
-	last_sky_ok_ms      = now_ms;
-	sky_good_streak     = 0;
+	sky_empty_streak    = 0;
+	chopped_streak      = 0;
 	last_visible_ok_ms  = now_ms;
 }
 
@@ -96,8 +102,8 @@ void loc_fsm_init(int64_t now_ms)
 	state_entered_ms  = now_ms;
 	last_fix_ms       = now_ms - GPS_STALE_MS;
 	last_ephe_poll_ms = now_ms - EPHE_POLL_MS;
-	last_sky_ok_ms     = now_ms;
-	sky_good_streak    = 0;
+	sky_empty_streak   = 0;
+	chopped_streak     = 0;
 	last_visible_ok_ms = now_ms;
 	cell_sent = false;
 	ephe_valid = false;
@@ -215,35 +221,37 @@ void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 	read_sky(pvt, out);
 	out->gps_current = (now_ms - last_fix_ms) < GPS_STALE_MS;
 
-	/* Debounced sky quality. "Enough sky" means enough satellites above the
-	 * demodulation floor to eventually earn SATS_FOR_FIX ephemerides.
+	/* Sky evidence. CELL_LOOP's chopped windows systematically UNDERSTATE the
+	 * sky (C/N0 estimates need integration time a 20 s gap doesn't give), so
+	 * demanding fix-grade signals before granting radio silence means the
+	 * evidence can never accumulate. Ask instead the one question a chopped
+	 * window can answer -- is anything up there at all? -- and let ACQUIRE's
+	 * uninterrupted silence answer the rest.
 	 *
-	 * Judged on OBSERVED epochs only (tracked > 0): while LTE holds the radio
-	 * -- several epochs around every publish -- GNSS reports an empty frame,
-	 * and counting that as "bad sky" is the observation-of-absence fallacy.
-	 * In CELL_LOOP it made leaving nearly impossible: each 30 s publish reset
-	 * the clock, re-acquisition ate ~5 s more, and one jittery dip restarted
-	 * the rest. So the good streak PAUSES while blanked and resets only on an
-	 * observed bad epoch.
-	 *
-	 * Asymmetry is deliberate: sky_alive needs positive evidence (a streak of
-	 * observed-good epochs), while sky_dead is the sustained lack of any such
-	 * evidence -- a device in a Faraday cage observes nothing, which must
-	 * never read as "the sky came back". A wrong sky_alive is cheap anyway:
-	 * GNSS_ACQUIRE's own sky_dead debounce bounces back within SKY_LOST_S. */
+	 * Only OBSERVED epochs count. tracked > 0 is observation by definition;
+	 * an empty frame is an observation only if GNSS actually had the radio
+	 * (DEADLINE_MISSED/NOT_ENOUGH_WINDOW_TIME clear). A blanked epoch counts
+	 * toward neither side -- absence of observation is not observation of
+	 * absence, in either direction. */
+	bool observed_window = !(pvt->flags &
+		(NRF_MODEM_GNSS_PVT_FLAG_DEADLINE_MISSED |
+		 NRF_MODEM_GNSS_PVT_FLAG_NOT_ENOUGH_WINDOW_TIME));
 	if (out->tracked > 0) {
-		if (out->strong >= SATS_FOR_FIX) {
-			last_sky_ok_ms = now_ms;
-			if (sky_good_streak < UINT8_MAX) {
-				sky_good_streak++;
-			}
-		} else {
-			sky_good_streak = 0;
-		}
+		sky_empty_streak = 0;
+	} else if (observed_window && sky_empty_streak < UINT8_MAX) {
+		sky_empty_streak++;
 	}
-	out->sky_streak = sky_good_streak;
-	bool sky_dead  = (now_ms - last_sky_ok_ms) > SKY_LOST_MS;
-	bool sky_alive = sky_good_streak >= SKY_OK_EPOCHS;
+	if (pvt->flags & NRF_MODEM_GNSS_PVT_FLAG_NOT_ENOUGH_WINDOW_TIME) {
+		if (chopped_streak < UINT8_MAX) {
+			chopped_streak++;
+		}
+	} else if (observed_window) {
+		chopped_streak = 0;
+	}
+	out->sky_empty = sky_empty_streak;
+	bool sats_in_view = (out->tracked > 0);
+	bool sky_empty = sky_empty_streak >= SKY_EMPTY_EPOCHS;
+	bool lte_chops_gnss = chopped_streak >= CHOPPED_EPOCHS;
 
 	/* Hot-start viability, debounced on observed epochs only (blanked epochs
 	 * carry the cached count and must not refresh the clock either way). */
@@ -253,9 +261,11 @@ void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 	bool hotstart_dead = (now_ms - last_visible_ok_ms) > VISIBLE_LOST_MS;
 	int64_t in_state = now_ms - state_entered_ms;
 
-	/* Registration loss overrides everything: an unregistered modem runs a
-	 * continuous cell search, which both starves GNSS and is starved by it. */
-	if (!lte_registered && state != LOC_LTE_ATTACH) {
+	/* Registration loss overrides everything -- an unregistered modem runs a
+	 * continuous cell search, which both starves GNSS and is starved by it --
+	 * EXCEPT in GNSS_EXCLUSIVE, where losing registration is deliberate. */
+	if (!lte_registered && state != LOC_LTE_ATTACH &&
+	    state != LOC_GNSS_EXCLUSIVE) {
 		next_state(LOC_LTE_ATTACH, now_ms, "registration lost");
 	}
 
@@ -276,12 +286,35 @@ void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 		break;
 
 	case LOC_GNSS_ACQUIRE:
+		/* Once here, LET IT TRY: satellites in view -- however weak --
+		 * ride out the full cap, because quiet continuous tracking is
+		 * exactly what strengthens them. Give up early only on a truly
+		 * empty sky, and never inside the cold-start grace. */
+		if (fix) {
+			next_state(LOC_REPORT_GNSS, now_ms, "fix acquired");
+		} else if (lte_chops_gnss) {
+			/* Registered-but-silent isn't enough here: idle DRX or
+			 * coverage-edge reselection is slicing GNSS. Take the
+			 * radio outright; the re-attach is paid post-fix. */
+			next_state(LOC_GNSS_EXCLUSIVE, now_ms, "LTE chops GNSS");
+		} else if (in_state > ACQUIRE_CAP_MS) {
+			next_state(LOC_CELL_LOOP, now_ms, "acquire timeout");
+		} else if (in_state > SKY_GRACE_MS && sky_empty) {
+			next_state(LOC_CELL_LOOP, now_ms, "sky empty");
+		}
+		break;
+
+	case LOC_GNSS_EXCLUSIVE:
+		/* Same exits as GNSS_ACQUIRE minus the escalation (we're already
+		 * escalated). Every exit re-activates LTE (lte_wanted goes true);
+		 * a "fix acquired" then bounces through LTE_ATTACH while the
+		 * modem re-registers -- expected, and the fix survives it. */
 		if (fix) {
 			next_state(LOC_REPORT_GNSS, now_ms, "fix acquired");
 		} else if (in_state > ACQUIRE_CAP_MS) {
 			next_state(LOC_CELL_LOOP, now_ms, "acquire timeout");
-		} else if (sky_dead) {
-			next_state(LOC_CELL_LOOP, now_ms, "not enough sky");
+		} else if (in_state > SKY_GRACE_MS && sky_empty) {
+			next_state(LOC_CELL_LOOP, now_ms, "sky empty");
 		}
 		break;
 
@@ -290,14 +323,14 @@ void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 		 * *visible* satellites still carry valid ephemeris, a re-fix is a
 		 * hot start (seconds) and LTE need not be disturbed. */
 		if (!out->gps_current) {
-			if (sky_dead) {
+			if (sky_empty) {
 				next_state(LOC_CELL_LOOP, now_ms, "sky lost");
 			} else if (hotstart_dead) {
 				next_state(LOC_GNSS_ACQUIRE, now_ms,
 					   "fix stale, ephemeris not visible");
 			}
 			/* else: hot-start conditions present; wait for re-fix */
-		} else if (out->ephemeris_held > 0 && !sky_dead &&
+		} else if (out->ephemeris_held > 0 && !sky_empty &&
 			   out->min_ephe_expiry_min <=
 				CONFIG_TRACKER_LOC_EPHE_REFRESH_MIN) {
 			/* Refresh before it lapses: one quiet window now avoids a
@@ -308,12 +341,15 @@ void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 
 	case LOC_CELL_LOOP:
 		/* The exit is signal-driven: the slow cell cadence leaves gaps
-		 * long enough for GNSS to sense the sky, so no blind probe timer
-		 * is needed. */
+		 * long enough for GNSS to sense the sky. One sighted satellite is
+		 * enough to try -- entering ACQUIRE is cheap (a wrong entry
+		 * self-corrects via "sky empty" in ~SKY_GRACE + a few epochs),
+		 * while NOT entering is what starved acquisition forever: the
+		 * next publish always interrupted before evidence could build. */
 		if (fix) {
 			next_state(LOC_REPORT_GNSS, now_ms, "fix returned");
-		} else if (sky_alive) {
-			next_state(LOC_GNSS_ACQUIRE, now_ms, "sky returned");
+		} else if (sats_in_view) {
+			next_state(LOC_GNSS_ACQUIRE, now_ms, "satellites sighted");
 		}
 		break;
 
@@ -322,7 +358,8 @@ void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 	}
 
 	out->state = state;
-	out->gnss_wanted = lte_registered;
+	out->gnss_wanted = lte_registered || (state == LOC_GNSS_EXCLUSIVE);
+	out->lte_wanted = (state != LOC_GNSS_EXCLUSIVE);
 	out->publish_allowed = (state == LOC_REPORT_CELL ||
 				state == LOC_REPORT_GNSS ||
 				state == LOC_CELL_LOOP);
@@ -345,9 +382,9 @@ void loc_fsm_log(const struct loc_status *st,
 	 * Print the whole ladder so a stall is attributable to one rung.
 	 * held != visible: held ephemerides may belong to satellites that have
 	 * set since -- only visible ones can contribute to a fix. */
-	LOG_INF("loc:  %s | gps-time %s | tracked %u strong %u (sky streak %u/%u) | ephemeris %u held / %u visible (need %d) | pdop %.1f",
+	LOG_INF("loc:  %s | gps-time %s | tracked %u strong %u (empty %u/%u) | ephemeris %u held / %u visible (need %d) | pdop %.1f",
 		loc_state_str(st->state), st->gps_time_known ? "known" : "UNKNOWN",
-		st->tracked, st->strong, st->sky_streak, (unsigned)SKY_OK_EPOCHS,
+		st->tracked, st->strong, st->sky_empty, (unsigned)SKY_EMPTY_EPOCHS,
 		st->ephemeris_held, st->ephemeris_visible,
 		SATS_FOR_FIX, (double)st->pdop);
 

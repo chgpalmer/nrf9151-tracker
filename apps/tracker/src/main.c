@@ -477,6 +477,9 @@ int main(void)
 	}
 	bool gnss_running = false;
 	bool gnss_blocked_prev = false;
+	/* lte_lc_connect_async() below turns the stack on; GNSS_EXCLUSIVE is the
+	 * only thing that turns it off. */
+	bool lte_stack_on = true;
 	/* Snapshot of the most recent PVT frame with FIX_VALID set. The live `pvt`
 	 * global only carries defined lat/lon while the flag is set, but the FSM
 	 * lets us publish for up to GPS_STALE_S after the fix lapses -- those
@@ -511,7 +514,7 @@ int main(void)
 		 * for a network the search owns the radio, and GNSS alongside it just
 		 * flip-flops between a few tracked satellites and none. */
 		if (loc.gnss_wanted && !gnss_running) {
-			LOG_INF("LTE registered — starting GNSS");
+			LOG_INF("starting GNSS");
 			if (gnss_start() == 0) {
 				gnss_running = true;
 			}
@@ -519,6 +522,29 @@ int main(void)
 			LOG_INF("LTE lost — stopping GNSS until re-registered");
 			(void)nrf_modem_gnss_stop();
 			gnss_running = false;
+		}
+
+		/* GNSS_EXCLUSIVE: take the LTE stack down entirely so idle-mode
+		 * DRX/reselection can't slice GNSS; bring it back on exit. GNSS
+		 * keeps running across both edges — DEACTIVATE_LTE leaves it be. */
+		if (!loc.lte_wanted && lte_stack_on) {
+			LOG_WRN("deactivating LTE — GNSS gets the radio outright");
+			if (lte_lc_func_mode_set(LTE_LC_FUNC_MODE_DEACTIVATE_LTE) == 0) {
+				lte_stack_on = false;
+			}
+			coap_pub_close(); /* socket dies with the PDN */
+		} else if (loc.lte_wanted && !lte_stack_on) {
+			LOG_INF("re-activating LTE (re-attach follows)");
+			if (lte_lc_func_mode_set(LTE_LC_FUNC_MODE_ACTIVATE_LTE) == 0) {
+				lte_stack_on = true;
+			}
+		}
+
+		/* A PDN drop (deactivation or network-side) orphans the UDP socket;
+		 * recreate it when the PDN returns rather than sending into a void. */
+		if (!pdn_active && coap_pub_ready()) {
+			LOG_WRN("PDN down — closing CoAP socket");
+			coap_pub_close();
 		}
 
 		/* EVT_BLOCKED/UNBLOCKED arrive in ISR context; log the edge here. */

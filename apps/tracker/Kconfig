@@ -56,25 +56,15 @@ config TRACKER_LOC_ACQUIRE_TIMEOUT_S
 	  partial sky. A product decision, not a technical one: cold start may
 	  simply never complete indoors.
 
-config TRACKER_LOC_SKY_LOST_S
-	int "Declare the sky unusable after this long without enough strong satellites"
-	default 60
-	range 15 600
-	help
-	  Debounce, not a probe: C/N0 fades and satellite counts jitter epoch to
-	  epoch, so one bad sample must not abandon an acquisition. A cold
-	  receiver also needs tens of seconds just to acquire signals, so this
-	  cannot be tight.
-
-config TRACKER_LOC_SKY_OK_S
-	int "Observed-good epochs before declaring the sky usable"
+config TRACKER_LOC_SKY_EMPTY_EPOCHS
+	int "Observed epochs with zero satellites before declaring the sky empty"
 	default 5
-	range 2 120
+	range 2 60
 	help
-	  Counted over epochs where GNSS actually observed the sky (~1 Hz),
-	  pausing while LTE holds the radio -- so publishes don't reset the
-	  verdict. Kept low deliberately: entering an acquisition on a sky that
-	  then fades self-corrects within TRACKER_LOC_SKY_LOST_S.
+	  Counted only over epochs where GNSS actually had the radio (blanked
+	  epochs count toward neither verdict). Abandons an acquisition under a
+	  truly empty sky (indoors, Faraday cage); a 30 s cold-start grace at
+	  acquisition entry keeps a warming receiver from tripping it.
 
 config TRACKER_LOC_EPHE_REFRESH_MIN
 	int "Refresh ephemeris when the soonest expiry is under this many minutes"

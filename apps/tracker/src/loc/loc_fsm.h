@@ -28,7 +28,7 @@
  * Edge labels below are the exact reason strings from the transition log, so
  * a UART trace can be read against this diagram.
  *
- *                          (from ANY state)
+ *                    (from ANY state except GNSS_EXCLUSIVE)
  *                             | "registration lost"
  *                             v
  *   +----------------------------------------------------------------+
@@ -45,32 +45,49 @@
  *   +----------------------------------------------------------------+
  *          | "cell reported" (publish confirmed,        | "fix acquired"
  *          |  not a timer)                              | (warm start)
- *          v                                            v
+ *          v                                            v REPORT_GNSS
  *   +----------------------------------------------------------------+
- *   | GNSS_ACQUIRE      GNSS on, NO publishes (radio silent).         |
+ *   | GNSS_ACQUIRE      GNSS on, NO publishes (app radio-silent;      |
+ *   |                   LTE stays registered, PSM parks the radio).   |
  *   |                   Hunting ephemeris: ~30 s of uninterrupted     |
  *   |                   tracking per satellite, needs 4.              |
  *   +----------------------------------------------------------------+
- *      | "fix acquired"        ^        | "not enough sky"
- *      |                       |        |   (SKY_LOST_S without one
- *      |     "sky returned"    |        |    observed-good epoch)
- *      |     (sky streak hits  |        | "acquire timeout"
- *      |      SKY_OK_S good    |        |   (ACQUIRE_TIMEOUT_S cap:
- *      |      observed epochs; |        |    sky teases but no fix)
- *      |      pauses while LTE |        |
- *      |      blanks GNSS)     |        |
- *      v                       |        v
- *   +---------------------+    |    +-----------------------------------+
- *   | REPORT_GNSS         |    +----| CELL_LOOP                         |
- *   | GNSS on, publish    |         | GNSS on, publish cell @           |
- *   | fix @ POST_INTERVAL |         | CELL_POST_INTERVAL_S (slow on     |
- *   | (stale fix -> cell  |         | purpose: the ~25 s gaps are how   |
- *   |  until re-fix)      |         | GNSS gets to sense the sky)       |
- *   +---------------------+         +-----------------------------------+
- *      |         |                      ^         | "fix returned"
- *      |         | "sky lost"           |         v REPORT_GNSS
- *      |         | (fix stale +         |
- *      |         |  SKY_LOST_S) --------+
+ *      | "fix acquired"     | "LTE chops GNSS"        | "sky empty"
+ *      |                    |  (NOT_ENOUGH_WINDOW_    |  (SKY_EMPTY_EPOCHS
+ *      |                    |   TIME persists: idle   |   observed-empty,
+ *      |                    |   DRX/reselection is    |   after 30 s cold-
+ *      |                    |   slicing GNSS even     |   start grace)
+ *      |                    |   though we're silent)  | "acquire timeout"
+ *      |                    v                         |  (ACQUIRE_TIMEOUT_S:
+ *      |   +-------------------------------------+    |   sky teases, no fix)
+ *      |   | GNSS_EXCLUSIVE   GNSS on, LTE OFF.  |    |
+ *      |   | Registration deliberately lapses;   |    |
+ *      |   | GNSS owns the radio outright. The   |    |
+ *      |   | re-attach bill is paid after the    |    |
+ *      |   | fix, when it's amortized.           |    |
+ *      |   +-------------------------------------+    |
+ *      |      | "fix acquired"     | "sky empty" /    |
+ *      |      | (then LTE          | "acquire timeout"|
+ *      |      |  reactivates;      | (LTE reactivates)|
+ *      |      |  expect a bounce   |                  |
+ *      |      |  through           |                  |
+ *      |      |  LTE_ATTACH)       |                  |
+ *      v      v                    v                  v
+ *   +---------------------+     +-----------------------------------+
+ *   | REPORT_GNSS         |     | CELL_LOOP                         |
+ *   | GNSS on, publish    |     | GNSS on, publish cell @           |
+ *   | fix @ POST_INTERVAL |     | CELL_POST_INTERVAL_S (slow on     |
+ *   | (stale fix -> cell  |     | purpose: the gaps are how GNSS    |
+ *   |  until re-fix)      |     | gets to sense the sky)            |
+ *   +---------------------+     +-----------------------------------+
+ *      |         |                  ^      | "satellites sighted"
+ *      |         | "sky lost"       |      |   (ONE observed epoch with
+ *      |         | (fix stale +     |      |    tracked > 0: chopped
+ *      |         |  sky empty) -----+      |    windows understate the
+ *      |         |                         |    sky, so any life earns a
+ *      |         |                         |    real attempt)
+ *      |         |                         | "fix returned" -> REPORT_GNSS
+ *      |         |                         v GNSS_ACQUIRE
  *      |
  *      | "ephemeris expiring" (< EPHE_REFRESH_MIN left; refresh now to
  *      |   avoid a future cold start)
@@ -78,13 +95,13 @@
  *      |   4 ephemeris-bearing satellites observed for VISIBLE_LOST_MS)
  *      +--> GNSS_ACQUIRE
  *
- * Sky evidence rules (the part that bit us three times): all judgements use
- * OBSERVED epochs only -- an epoch where LTE blanked GNSS (tracked == 0 right
- * after a publish) is absence of observation, not observation of absence.
- * Entering ACQUIRE needs positive evidence (a streak of good observed
- * epochs); leaving it needs sustained lack of any (SKY_LOST_S) -- asymmetric
- * on purpose, so a device in a Faraday cage never reads as "sky returned",
- * and a publish never resets progress toward an exit.
+ * Sky evidence rules (the fallacy that bit us three times): only OBSERVED
+ * epochs count. tracked > 0 is an observation by definition; an empty frame
+ * counts only if GNSS actually had the radio (DEADLINE_MISSED clear). Blanked
+ * epochs count toward NEITHER verdict -- absence of observation is not
+ * observation of absence, in either direction. Asymmetry is deliberate:
+ * trying costs little (wrong entries self-correct via "sky empty"), so entry
+ * needs just one sighting, while giving up needs sustained observed evidence.
  */
 enum loc_state {
 	/* Modem not registered. A cell search uses the radio continuously, and
@@ -96,8 +113,15 @@ enum loc_state {
 	LOC_REPORT_CELL,
 	/* Hunting ephemeris. No publishes at all: UDP is silent between sends,
 	 * so zero application traffic means PSM parks LTE and GNSS owns the
-	 * radio. */
+	 * radio -- in good coverage. */
 	LOC_GNSS_ACQUIRE,
+	/* Escalation of GNSS_ACQUIRE for marginal coverage: LTE is deactivated
+	 * entirely. Even application-silent, an idle registered modem does DRX
+	 * paging and (at the coverage edge) constant reselection, chopping GNSS
+	 * into sub-second slices -- the modem reports NOT_ENOUGH_WINDOW_TIME and
+	 * a cold start can never complete. Registration is deliberately let
+	 * lapse; the re-attach is paid after the fix, when it is amortized. */
+	LOC_GNSS_EXCLUSIVE,
 	/* Fix in hand and ephemeris visible. Re-fixes are hot starts (seconds),
 	 * so LTE may transmit freely; publishes carry the GNSS position. */
 	LOC_REPORT_GNSS,
@@ -112,8 +136,13 @@ enum loc_state {
 struct loc_status {
 	enum loc_state state;
 
-	/* Should GNSS be running at all? False while unregistered. */
+	/* Should GNSS be running at all? False while unregistered (a searching
+	 * modem owns the radio) -- except in GNSS_EXCLUSIVE, where being
+	 * unregistered is the whole point. */
 	bool gnss_wanted;
+	/* Should the LTE stack be active? False only in GNSS_EXCLUSIVE; main.c
+	 * maps edges to LTE_LC_FUNC_MODE_{DE,}ACTIVATE_LTE. */
+	bool lte_wanted;
 	/* May main.c publish (and do socket setup)? False in ACQUIRE:
 	 * application silence is what hands the radio to GNSS. */
 	bool publish_allowed;
@@ -128,10 +157,10 @@ struct loc_status {
 	uint8_t tracked;   /* satellites whose signal we follow */
 	uint8_t strong;    /* ...of those, strong enough to demodulate */
 	uint8_t used;      /* ...used in the position calculation */
-	/* Consecutive observed-good epochs; at TRACKER_LOC_SKY_OK_S the sky is
-	 * declared usable (CELL_LOOP -> GNSS_ACQUIRE). Logged so a trace shows
-	 * progress toward that exit, not just the exit. */
-	uint8_t sky_streak;
+	/* Consecutive observed epochs with zero satellites; at
+	 * TRACKER_LOC_SKY_EMPTY_EPOCHS the sky is declared empty. Logged so a
+	 * trace shows progress toward that exit, not just the exit. */
+	uint8_t sky_empty;
 
 	/* Ephemerides held (cached orbit data, valid ~2 h) vs held AND currently
 	 * tracked. Held counts satellites that may be below the horizon by now;
