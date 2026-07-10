@@ -5,29 +5,45 @@
  * timeline window (like trimming a video clip). Dragging re-filters the
  * already-loaded fixes client-side, so the map updates instantly with no
  * per-drag server calls. Fix-density ticks on the timeline show where data
- * exists so you drag straight to it.
+ * exists so you aim straight at it.
+ *
+ * Selecting a window:
+ *   - WINDOW pills set the width (15m/1h/6h/Day) keeping the current center.
+ *   - Click anywhere on the track to center the window there.
+ *   - Drag the selection band to slide the whole window.
+ *   - Drag a handle to trim one edge (this sets a custom width).
+ *   - Arrow keys nudge a focused handle 5 min; Shift+arrows 1 min.
+ * The map re-fits on release, not during the drag, so it doesn't jump around
+ * while you scrub.
  */
 
 import { fetchPositions }  from '/js/api.js';
 import { createMapView }   from '/js/mapview.js';
+import { createFixTable }  from '/js/fixtable.js';
 import { open as openDrawer } from '/js/drawer.js';
 import { currentDevice }   from '/js/devices.js';
 import { fmtAcc, mpsToKph } from '/js/format.js';
 
-const DAY = 86400;
+const DAY      = 86400;
+const MIN_FRAC = 0.005;  // ~7 min: minimum window the handles can trim to
 
 let mapView       = null;
+let fixTable      = null;
 let isInitialized = false;
 
 let dayStart   = 0;      // epoch of 00:00 for the selected local day
 let dayFixes   = [];     // all fixes for the day (chronological)
 let selFrac    = [0, 1]; // [start, end] window as fractions of the day
-let dragging   = null;   // 'start' | 'end' | null
+let dragging   = null;   // 'start' | 'end' | 'move' | null
+let grabOffset = 0;      // pointer-to-window-start offset for band drags
 
 const dateInput = document.getElementById('hist-date');
 const rangeEl   = document.getElementById('hist-range');
 const summaryEl = document.getElementById('hist-summary');
 const accToggle = document.getElementById('show-accuracy-hist');
+const winPills  = document.querySelectorAll('#hist-window .pill');
+const gpsChip   = document.getElementById('filter-gps-hist');
+const cellChip  = document.getElementById('filter-cell-hist');
 
 const track    = document.getElementById('tl-track');
 const densityEl = document.getElementById('tl-density');
@@ -43,6 +59,40 @@ accToggle.addEventListener('change', () => {
   mapView && mapView.setShowAccuracy(accToggle.checked);
 });
 
+[gpsChip, cellChip].forEach(chip => {
+  chip.addEventListener('click', () => {
+    chip.classList.toggle('active');
+    chip.setAttribute('aria-pressed', String(chip.classList.contains('active')));
+    applyWindow();
+  });
+});
+
+// ── window width pills ──────────────────────────────────────
+winPills.forEach(p => {
+  p.addEventListener('click', () => {
+    const w = Math.min(1, parseInt(p.dataset.minutes, 10) * 60 / DAY);
+    setWindow(center() - w / 2, w);
+    setActivePill(p);
+    applyWindow();
+  });
+});
+
+function center() { return (selFrac[0] + selFrac[1]) / 2; }
+
+function setWindow(start, width) {
+  const s = Math.min(Math.max(0, start), 1 - width);
+  selFrac = [s, s + width];
+}
+
+function setActivePill(pill) {
+  winPills.forEach(x => x.classList.toggle('active', x === pill));
+}
+
+// A handle drag sets a custom width, so no pill matches any more.
+function clearActivePill() {
+  winPills.forEach(x => x.classList.remove('active'));
+}
+
 // ── timeline drag ───────────────────────────────────────────
 function fracFromEvent(clientX) {
   const r = track.getBoundingClientRect();
@@ -52,36 +102,59 @@ function fracFromEvent(clientX) {
 function onPointerMove(e) {
   if (!dragging) return;
   const f = fracFromEvent(e.clientX);
-  if (dragging === 'start') selFrac[0] = Math.min(f, selFrac[1] - 0.005);
-  else                      selFrac[1] = Math.max(f, selFrac[0] + 0.005);
-  applyWindow();
+  if (dragging === 'start')     { selFrac[0] = Math.min(f, selFrac[1] - MIN_FRAC); clearActivePill(); }
+  else if (dragging === 'end')  { selFrac[1] = Math.max(f, selFrac[0] + MIN_FRAC); clearActivePill(); }
+  else /* move */               { setWindow(f - grabOffset, selFrac[1] - selFrac[0]); }
+  applyWindow(false);   // no map re-fit mid-drag — it would jump around
 }
 
-function endDrag() { dragging = null; }
+function endDrag() {
+  if (!dragging) return;
+  dragging = null;
+  applyWindow();        // settle: re-fit the map to the final window
+}
 
 startH.addEventListener('pointerdown', (e) => { dragging = 'start'; startH.setPointerCapture(e.pointerId); });
 endH.addEventListener('pointerdown',   (e) => { dragging = 'end';   endH.setPointerCapture(e.pointerId); });
+selEl.addEventListener('pointerdown',  (e) => {
+  dragging = 'move';
+  grabOffset = fracFromEvent(e.clientX) - selFrac[0];
+  selEl.setPointerCapture(e.pointerId);
+});
 track.addEventListener('pointermove', onPointerMove);
 window.addEventListener('pointerup', endDrag);
 
-// keyboard: arrows nudge a focused handle by 5 minutes
+// Click an empty part of the track: center the current window there.
+track.addEventListener('pointerdown', (e) => {
+  if (e.target === startH || e.target === endH || e.target === selEl) return;
+  setWindow(fracFromEvent(e.clientX) - (selFrac[1] - selFrac[0]) / 2,
+            selFrac[1] - selFrac[0]);
+  applyWindow();
+});
+
+// keyboard: arrows nudge a focused handle by 5 minutes (1 min with Shift)
 function nudge(which, deltaFrac) {
-  if (which === 'start') selFrac[0] = Math.min(Math.max(0, selFrac[0] + deltaFrac), selFrac[1] - 0.005);
-  else                   selFrac[1] = Math.max(Math.min(1, selFrac[1] + deltaFrac), selFrac[0] + 0.005);
+  if (which === 'start') selFrac[0] = Math.min(Math.max(0, selFrac[0] + deltaFrac), selFrac[1] - MIN_FRAC);
+  else                   selFrac[1] = Math.max(Math.min(1, selFrac[1] + deltaFrac), selFrac[0] + MIN_FRAC);
+  clearActivePill();
   applyWindow();
 }
-const STEP = 300 / DAY; // 5 min
 startH.addEventListener('keydown', (e) => keyNudge(e, 'start'));
 endH.addEventListener('keydown',   (e) => keyNudge(e, 'end'));
 function keyNudge(e, which) {
-  if (e.key === 'ArrowLeft')  { nudge(which, -STEP); e.preventDefault(); }
-  if (e.key === 'ArrowRight') { nudge(which,  STEP); e.preventDefault(); }
+  const step = (e.shiftKey ? 60 : 300) / DAY;
+  if (e.key === 'ArrowLeft')  { nudge(which, -step); e.preventDefault(); }
+  if (e.key === 'ArrowRight') { nudge(which,  step); e.preventDefault(); }
 }
 
 export function init() {
   if (isInitialized) return;
   isInitialized = true;
   mapView = createMapView('map-history', fix => openDrawer(fix));
+  fixTable = createFixTable('fix-table-history', {
+    onRowClick: fix => { mapView.focusFix(fix); openDrawer(fix); },
+    startOpen: true,
+  });
   window._histMapView = mapView;
   buildAxis();
   loadDay();
@@ -112,12 +185,13 @@ async function loadDay() {
   }
 
   selFrac = [0, 1];
+  setActivePill(document.querySelector('#hist-window .pill[data-minutes="1440"]'));
   renderDensity();
   applyWindow();
 }
 
-// Filter dayFixes to the current window and render map + summary + handles.
-function applyWindow() {
+// Filter dayFixes to the current window + source filter, render everything.
+function applyWindow(fit = true) {
   const from_ts = dayStart + Math.round(selFrac[0] * DAY);
   const to_ts   = dayStart + Math.round(selFrac[1] * DAY);
 
@@ -126,10 +200,23 @@ function applyWindow() {
   endH.style.left   = (selFrac[1] * 100) + '%';
   selEl.style.left  = (selFrac[0] * 100) + '%';
   selEl.style.width = ((selFrac[1] - selFrac[0]) * 100) + '%';
-  rangeEl.textContent = `${hhmm(from_ts)} – ${hhmm(to_ts)}`;
+  rangeEl.textContent = `${hhmm(from_ts)} – ${hhmm(to_ts)} · ${durLabel(to_ts - from_ts)}`;
 
-  const win = dayFixes.filter(f => f.received_ts >= from_ts && f.received_ts <= to_ts);
-  mapView.render(win, { fitBounds: true, showAccuracy: accToggle.checked, showArrows: true });
+  const gps  = gpsChip.classList.contains('active');
+  const cell = cellChip.classList.contains('active');
+  const win = dayFixes.filter(f =>
+    f.received_ts >= from_ts && f.received_ts <= to_ts &&
+    (f.source === 'gps' ? gps : cell));
+
+  const filtered = win.length === 0 && dayFixes.length > 0 && !(gps && cell);
+  mapView.render(win, {
+    fitBounds: fit,
+    showAccuracy: accToggle.checked,
+    showArrows: true,
+    emptyMsg: filtered ? 'All fixes hidden by source filter' : undefined,
+    emptySub: filtered ? 'Re-enable GPS or CELL above.' : undefined,
+  });
+  fixTable.render(win);
   renderSummary(win);
 }
 
@@ -159,6 +246,13 @@ function buildAxis() {
 
 function hhmm(ts) {
   return new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function durLabel(secs) {
+  const m = Math.round(secs / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60), rm = m % 60;
+  return rm > 0 ? `${h}h ${String(rm).padStart(2, '0')}m` : `${h}h`;
 }
 
 function renderSummary(fixes) {

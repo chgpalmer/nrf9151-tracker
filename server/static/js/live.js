@@ -4,6 +4,7 @@
 
 import { fetchPositions } from '/js/api.js';
 import { createMapView }  from '/js/mapview.js';
+import { createFixTable } from '/js/fixtable.js';
 import { updateCharts, initCharts } from '/js/charts.js';
 import { open as openDrawer } from '/js/drawer.js';
 import { currentDevice, setStatus } from '/js/devices.js';
@@ -12,6 +13,7 @@ import { deviceStatus } from '/js/format.js';
 const REFRESH_MS = 5000;
 
 let mapView      = null;
+let fixTable     = null;
 let timer        = null;
 let minuteWindow = 60;   // default: 1 hour
 let currentFixes = [];
@@ -21,6 +23,8 @@ let isInitialized = false;
 const pills = document.querySelectorAll('#time-window .pill');
 const accToggle   = document.getElementById('show-accuracy');
 const arrowToggle = document.getElementById('show-arrows');
+const gpsChip     = document.getElementById('filter-gps');
+const cellChip    = document.getElementById('filter-cell');
 
 pills.forEach(p => {
   p.addEventListener('click', () => {
@@ -39,11 +43,29 @@ arrowToggle.addEventListener('change', () => {
   mapView && mapView.setShowArrows(arrowToggle.checked);
 });
 
+// Source filter chips: re-render from the cached fixes, no refetch.
+[gpsChip, cellChip].forEach(chip => {
+  chip.addEventListener('click', () => {
+    chip.classList.toggle('active');
+    chip.setAttribute('aria-pressed', String(chip.classList.contains('active')));
+    renderView(false);
+  });
+});
+
+function visibleFixes() {
+  const gps  = gpsChip.classList.contains('active');
+  const cell = cellChip.classList.contains('active');
+  return currentFixes.filter(f => (f.source === 'gps' ? gps : cell));
+}
+
 export function init() {
   if (isInitialized) return;
   isInitialized = true;
 
   mapView = createMapView('map-live', fix => openDrawer(fix));
+  fixTable = createFixTable('fix-table-live', {
+    onRowClick: fix => { mapView.focusFix(fix); openDrawer(fix); },
+  });
   initCharts();
 
   // Overlay badges
@@ -77,6 +99,23 @@ export function stop() {
   timer = null;
 }
 
+// Render map + table + charts from the cached fixes through the source filter.
+function renderView(fitBounds) {
+  const vis = visibleFixes();
+  const filtered = vis.length === 0 && currentFixes.length > 0;
+
+  mapView.render(vis, {
+    fitBounds:    fitBounds,
+    showAccuracy: accToggle.checked,
+    showArrows:   arrowToggle.checked,
+    liveDot:      true,
+    emptyMsg:     filtered ? 'All fixes hidden by source filter' : undefined,
+    emptySub:     filtered ? 'Re-enable GPS or CELL above.' : undefined,
+  });
+  fixTable.render(vis);
+  updateCharts(vis);
+}
+
 async function refresh(fitBounds) {
   const deviceId = currentDevice();
   if (!deviceId) return;
@@ -91,13 +130,7 @@ async function refresh(fitBounds) {
     const fixes = await fetchPositions(deviceId, opts);
     currentFixes = fixes;
 
-    mapView.render(fixes, {
-      fitBounds:    fitBounds,
-      showAccuracy: accToggle.checked,
-      showArrows:   arrowToggle.checked,
-    });
-
-    updateCharts(fixes);
+    renderView(fitBounds);
     updateBadge(fixes);
 
     // Update status based on latest fix time

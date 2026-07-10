@@ -96,6 +96,17 @@
             </div>
           </div>
           <div class="control-group">
+            <span class="control-label">SOURCES</span>
+            <div class="chip-group">
+              <button class="src-chip src-gps active" id="filter-gps" type="button" aria-pressed="true">
+                <span class="src-glyph src-glyph-gps"></span>GPS
+              </button>
+              <button class="src-chip src-cell active" id="filter-cell" type="button" aria-pressed="true">
+                <span class="src-glyph src-glyph-cell"></span>CELL
+              </button>
+            </div>
+          </div>
+          <div class="control-group">
             <label class="toggle-label">
               <input type="checkbox" id="show-accuracy" class="toggle-input" />
               <span class="toggle-track"></span>
@@ -123,6 +134,8 @@
             <canvas id="chart-acc" height="70"></canvas>
           </div>
         </div>
+
+        <div id="fix-table-live"></div>
       </section>
 
       <!-- ── HISTORY PAGE ── -->
@@ -134,7 +147,24 @@
           </div>
           <div class="control-group">
             <span class="control-label">WINDOW</span>
+            <div class="pill-group" id="hist-window">
+              <button class="pill" data-minutes="15">15m</button>
+              <button class="pill" data-minutes="60">1h</button>
+              <button class="pill" data-minutes="360">6h</button>
+              <button class="pill active" data-minutes="1440">Day</button>
+            </div>
             <span class="hist-range-label" id="hist-range">—</span>
+          </div>
+          <div class="control-group">
+            <span class="control-label">SOURCES</span>
+            <div class="chip-group">
+              <button class="src-chip src-gps active" id="filter-gps-hist" type="button" aria-pressed="true">
+                <span class="src-glyph src-glyph-gps"></span>GPS
+              </button>
+              <button class="src-chip src-cell active" id="filter-cell-hist" type="button" aria-pressed="true">
+                <span class="src-glyph src-glyph-cell"></span>CELL
+              </button>
+            </div>
           </div>
           <div class="control-group">
             <label class="toggle-label">
@@ -147,8 +177,10 @@
 
         <div class="map-container" id="map-history"></div>
 
-        <!-- Timeline scrubber: drag the handles to set the window. Fix-density
-             ticks show where data exists so you drag to it (video-editor style). -->
+        <!-- Timeline scrubber: drag the handles to trim, drag the band to move
+             the window, or click the track to center the window there. The
+             WINDOW pills set the width. Fix-density ticks show where data
+             exists so you aim straight at it (video-editor style). -->
         <div class="timeline" id="hist-timeline">
           <div class="timeline-axis" id="tl-axis"></div>
           <div class="timeline-track" id="tl-track">
@@ -162,6 +194,8 @@
         </div>
 
         <div class="hist-summary" id="hist-summary"></div>
+
+        <div id="fix-table-history"></div>
       </section>
 
       <!-- ── EVENTS PAGE ── -->

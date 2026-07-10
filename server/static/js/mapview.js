@@ -56,6 +56,7 @@ export function createMapView(containerId, onFixClick) {
   let currentFixes    = [];
   let showAccuracy    = false;
   let showArrows      = true;
+  let liveDot         = false;
   let selectedFixId   = null;
 
   // ── Private helpers ──────────────────────────────────────
@@ -71,6 +72,16 @@ export function createMapView(containerId, onFixClick) {
       html: `<div class="${cls}"></div>`,
       iconSize:   isLatest ? [14, 14] : [10, 10],
       iconAnchor: isLatest ? [7, 7]  : [5, 5],
+    });
+  }
+
+  /** Live view only: the device's current position as a pulsing blue dot. */
+  function liveIcon() {
+    return L.divIcon({
+      className: '',
+      html: `<div class="lm-live"></div>`,
+      iconSize:   [16, 16],
+      iconAnchor: [8, 8],
     });
   }
 
@@ -188,6 +199,7 @@ export function createMapView(containerId, onFixClick) {
   function render(fixes, opts = {}) {
     if (opts.showAccuracy != null) showAccuracy = opts.showAccuracy;
     if (opts.showArrows   != null) showArrows   = opts.showArrows;
+    if (opts.liveDot      != null) liveDot      = opts.liveDot;
 
     currentFixes = fixes;
 
@@ -198,19 +210,24 @@ export function createMapView(containerId, onFixClick) {
     selectedLayer.clearLayers();
 
     if (!fixes || fixes.length === 0) {
-      showEmpty('No fixes in this window', 'Try a wider time range or check device connection.');
+      showEmpty(opts.emptyMsg || 'No fixes in this window',
+                opts.emptySub != null ? opts.emptySub
+                                      : 'Try a wider time range or check device connection.');
       return;
     }
 
     hideEmpty();
 
-    // Polyline track
-    const latlngs = fixes.map(f => [f.lat, f.lon]);
-    L.polyline(latlngs, {
-      color:   TOKEN.signal,
-      weight:  2,
-      opacity: 0.55,
-    }).addTo(trackLayer);
+    // Track polyline: GPS fixes only. Cell fixes are tower-resolution
+    // estimates — a line through them draws travel that never happened.
+    const gpsLatlngs = fixes.filter(f => f.source === 'gps').map(f => [f.lat, f.lon]);
+    if (gpsLatlngs.length > 1) {
+      L.polyline(gpsLatlngs, {
+        color:   TOKEN.signal,
+        weight:  2,
+        opacity: 0.55,
+      }).addTo(trackLayer);
+    }
 
     // Accuracy circles (opt-in)
     if (showAccuracy) {
@@ -222,7 +239,7 @@ export function createMapView(containerId, onFixClick) {
     // Markers + arrows
     fixes.forEach((fix, i) => {
       const isLatest = fix === latest;
-      const icon = markerIcon(fix, isLatest);
+      const icon = (isLatest && liveDot) ? liveIcon() : markerIcon(fix, isLatest);
 
       const marker = L.marker([fix.lat, fix.lon], { icon, zIndexOffset: isLatest ? 1000 : 0 })
         .bindPopup(popupContent(fix), { maxWidth: 240, className: 'trk-popup' })
@@ -249,9 +266,22 @@ export function createMapView(containerId, onFixClick) {
 
     // Fit map to track
     if (opts.fitBounds !== false) {
-      const bounds = L.latLngBounds(latlngs);
-      map.fitBounds(bounds, { padding: [30, 30], maxZoom: 17 });
+      map.fitBounds(computeBounds(fixes), { padding: [30, 30], maxZoom: 17 });
     }
+  }
+
+  /**
+   * Bounds covering the fix positions — and, when accuracy circles are
+   * visible, the full extent of each circle, so no radius gets cut off.
+   */
+  function computeBounds(fixes) {
+    const bounds = L.latLngBounds(fixes.map(f => [f.lat, f.lon]));
+    if (showAccuracy) {
+      fixes.forEach(f => {
+        if (f.acc > 0) bounds.extend(L.latLng(f.lat, f.lon).toBounds(f.acc * 2));
+      });
+    }
+    return bounds;
   }
 
   function highlightSelected(fix) {
@@ -264,8 +294,10 @@ export function createMapView(containerId, onFixClick) {
     showAccuracy = val;
     // Re-render accuracy layer
     accuracyLayer.clearLayers();
-    if (showAccuracy) {
+    if (showAccuracy && currentFixes.length > 0) {
       currentFixes.forEach(f => accuracyCircle(f).addTo(accuracyLayer));
+      // Re-fit so the newly revealed circles aren't cut off at the edges
+      map.fitBounds(computeBounds(currentFixes), { padding: [30, 30], maxZoom: 17 });
     }
   }
 
@@ -279,5 +311,12 @@ export function createMapView(containerId, onFixClick) {
     map.invalidateSize();
   }
 
-  return { render, setShowAccuracy, setShowArrows, invalidate, map };
+  /** Pan to a fix and highlight it (used by the locations table). */
+  function focusFix(fix) {
+    selectedFixId = fix.id;
+    highlightSelected(fix);
+    map.panTo([fix.lat, fix.lon]);
+  }
+
+  return { render, setShowAccuracy, setShowArrows, focusFix, invalidate, map };
 }
