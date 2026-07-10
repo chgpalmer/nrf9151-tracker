@@ -127,10 +127,17 @@ static bool sv_has_ephemeris(uint16_t sv_id)
 static void read_sky(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 		     struct loc_status *st)
 {
+	/* ephemeris_visible drives the REPORT->ACQUIRE decision, so an epoch in
+	 * which GNSS got no radio window (every satellite slot empty -- routine
+	 * right after a publish) must not read as "no ephemeris visible". Absence
+	 * of observation is not observation of absence: carry the last real
+	 * observation instead. */
+	static uint8_t last_visible;
+	uint8_t visible = 0;
+
 	st->tracked = 0;
 	st->strong = 0;
 	st->used = 0;
-	st->ephemeris_visible = 0;
 
 	for (int i = 0; i < NRF_MODEM_GNSS_MAX_SATELLITES; i++) {
 		const struct nrf_modem_gnss_sv *sv = &pvt->sv[i];
@@ -146,9 +153,14 @@ static void read_sky(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 			st->used++;
 		}
 		if (sv_has_ephemeris(sv->sv)) {
-			st->ephemeris_visible++;
+			visible++;
 		}
 	}
+
+	if (st->tracked > 0) {
+		last_visible = visible;
+	}
+	st->ephemeris_visible = last_visible;
 
 	st->ephemeris_held = 0;
 	st->min_ephe_expiry_min = 0;
