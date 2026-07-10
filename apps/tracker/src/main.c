@@ -63,12 +63,10 @@ static enum lte_lc_nw_reg_status lte_status = LTE_LC_NW_REG_NOT_REGISTERED;
 /* Set from the LTE callback thread, polled by the main loop. */
 static volatile bool lte_connected;
 
-/* DEBUG-COMMIT: registration (lte_connected) is NOT the same as having an
- * active default PDN with an assigned IP. coap_pub_init() creating a socket
- * before the PDN is up is a prime suspect for the socket:/connect: errno seen
- * on hardware. Track PDN activation separately and gate socket setup on it.
- * On native_sim CONFIG_LTE_LC_PDN_MODULE is off (no PDN events, host sockets
- * are always up), so default to true there. */
+/* Registration (lte_connected) is NOT the same as having an active default
+ * PDN with an assigned IP; sockets and DNS only work once the PDN is up, so
+ * socket setup gates on this. On native_sim CONFIG_LTE_LC_PDN_MODULE is off
+ * (host sockets are always up), so default to true there. */
 #if defined(CONFIG_LTE_LC_PDN_MODULE)
 static volatile bool pdn_active;
 #else
@@ -178,8 +176,8 @@ static void lte_handler(const struct lte_lc_evt *const evt)
 		break;
 #if defined(CONFIG_LTE_LC_PDN_MODULE)
 	case LTE_LC_EVT_PDN:
-		/* DEBUG-COMMIT: default-context (CID 0) activation is when we
-		 * actually have an IP and sockets can be created. */
+		/* Default-context (CID 0) activation is when we actually have
+		 * an IP and sockets can be created. */
 		if (evt->pdn.cid == 0) {
 			if (evt->pdn.type == LTE_LC_EVT_PDN_ACTIVATED) {
 				pdn_active = true;
@@ -424,8 +422,8 @@ static void print_status(const struct nrf_modem_gnss_pvt_data_frame *p,
 			psm_tau_s, psm_active_s);
 	}
 
-	/* DEBUG-COMMIT: show PDN state next to the socket state so a "no socket"
-	 * that is really "PDN not up yet" is obvious in the board log. */
+	/* PDN state next to socket state, so a "no socket" that is really
+	 * "PDN not up yet" is obvious in the log. */
 	LOG_INF("net:  %s | pdn %s", coap_pub_ready() ? "ready" : "no socket",
 		pdn_active ? "active" : "down");
 }
@@ -461,8 +459,8 @@ int main(void)
 	}
 
 #if defined(CONFIG_LTE_LC_PDN_MODULE)
-	/* DEBUG-COMMIT: subscribe to default-context PDN events so we learn when
-	 * the IP is actually up, not just when we've registered. */
+	/* Default-context PDN events tell us when the IP is actually up,
+	 * not just when we've registered. */
 	err = lte_lc_pdn_default_ctx_events_enable();
 	if (err) {
 		LOG_WRN("pdn events enable: %d", err);
@@ -534,12 +532,9 @@ int main(void)
 		 * goes over the PDN) and is gated on publish_allowed so even the
 		 * getaddrinfo exchange stays out of GNSS quiet windows. There is no
 		 * connection to keep alive: UDP is silent between sends by nature,
-		 * which is the whole point of the CoAP move.
-		 * DEBUG-COMMIT: also gate on pdn_active — creating the socket before
-		 * the default PDN has an IP is the suspected cause of the socket:/
-		 * connect: errno on hardware. (On native_sim pdn_active is always
-		 * true, so this is a no-op there — which is also why the sim never
-		 * reproduced it.) */
+		 * which is the whole point of the CoAP move. Gated on pdn_active
+		 * too: before the default PDN has an IP, getaddrinfo/socket can
+		 * only fail. (Always true on native_sim.) */
 		if (loc.publish_allowed && pdn_active &&
 		    lte_connected && !coap_pub_ready() && now >= next_net_ms) {
 			next_net_ms = now + NET_RETRY_MS;

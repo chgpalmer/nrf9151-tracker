@@ -10,22 +10,6 @@
 
 LOG_MODULE_REGISTER(coap_pub, CONFIG_TRACKER_LOG_LEVEL);
 
-/* DEBUG-COMMIT: log the resolved peer IP so we can see what host/port actually
- * got baked into the build (rules out stale-CMake-cache shipping a wrong
- * server). Formats the first getaddrinfo result. */
-static void debug_log_peer(const struct zsock_addrinfo *res, uint16_t port)
-{
-	char ip[INET6_ADDRSTRLEN] = "?";
-
-	if (res && res->ai_addr && res->ai_family == AF_INET) {
-		struct sockaddr_in *sin = (struct sockaddr_in *)res->ai_addr;
-
-		zsock_inet_ntop(AF_INET, &sin->sin_addr, ip, sizeof(ip));
-	}
-	LOG_INF("DEBUG resolved peer: %s:%u (ai_family %d)",
-		ip, port, res ? res->ai_family : -1);
-}
-
 /* Header + token + options + payload. gps_obs encodes to ~50 B; leave slack. */
 #define PKT_BUF_LEN 192
 
@@ -46,19 +30,21 @@ int coap_pub_init(const char *host, uint16_t port)
 	}
 
 	snprintf(portstr, sizeof(portstr), "%u", port);
-	LOG_INF("DEBUG coap_pub_init: host='%s' port=%u", host, port);
 	err = zsock_getaddrinfo(host, portstr, &hints, &res);
 	if (err) {
-		/* DEBUG-COMMIT: errno too — getaddrinfo returns its own codes
-		 * (EAI_*) but the offloaded resolver may also set errno. */
+		/* getaddrinfo returns its own codes (EAI_*), but the offloaded
+		 * resolver may also set errno — log both. */
 		LOG_WRN("getaddrinfo(%s): ret %d, errno %d (%s)",
 			host, err, errno, strerror(errno));
 		return -EHOSTUNREACH;
 	}
 
-	debug_log_peer(res, port);
-
-	sock = zsock_socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+	/* Explicit type/protocol, NOT res->ai_socktype/ai_protocol: the modem's
+	 * offloaded getaddrinfo ignores the hints' protocol side and returns
+	 * SOCK_DGRAM paired with IPPROTO_TCP (measured on mfw + NCS 3.4), which
+	 * nrf_socket() rightly rejects with EPROTOTYPE. The canonical Nordic
+	 * samples all hardcode (family, SOCK_DGRAM, IPPROTO_UDP). */
+	sock = zsock_socket(res->ai_family, SOCK_DGRAM, IPPROTO_UDP);
 	if (sock < 0) {
 		LOG_ERR("socket: errno %d (%s)", errno, strerror(errno));
 		zsock_freeaddrinfo(res);
