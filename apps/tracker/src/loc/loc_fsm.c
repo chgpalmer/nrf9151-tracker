@@ -37,9 +37,9 @@ LOG_MODULE_REGISTER(loc_fsm, CONFIG_TRACKER_LOG_LEVEL);
 /* Indexed by enum loc_state; keep in step with it. */
 static const char *const loc_state_names[] = {
 	[LOC_LTE_ATTACH]  = "LTE_ATTACH",
-	[LOC_CELL_REPORT] = "CELL_REPORT",
-	[LOC_ACQUIRE]     = "ACQUIRE",
-	[LOC_REPORT]      = "REPORT",
+	[LOC_REPORT_CELL] = "REPORT_CELL",
+	[LOC_GNSS_ACQUIRE] = "GNSS_ACQUIRE",
+	[LOC_REPORT_GNSS] = "REPORT_GNSS",
 	[LOC_CELL_LOOP]   = "CELL_LOOP",
 };
 BUILD_ASSERT(ARRAY_SIZE(loc_state_names) == LOC_STATE_COUNT,
@@ -67,14 +67,17 @@ const char *loc_state_str(enum loc_state s)
 }
 
 /* The ONLY place `state` is ever written. Every transition is logged with its
- * reason, so a UART capture reads as a trace of the machine. */
+ * reason and the dwell time of the state being left, so a UART capture reads
+ * as a complete trace: what ended, why, and how long it lasted. (For
+ * GNSS_ACQUIRE -> REPORT_GNSS the dwell IS the time-to-fix.) */
 static void next_state(enum loc_state next, int64_t now_ms, const char *why)
 {
 	if (next == state) {
 		return; /* self-transitions are not events */
 	}
-	LOG_INF("loc: %s -> %s (%s)",
-		loc_state_names[state], loc_state_names[next], why);
+	LOG_INF("loc: %s -> %s (%s; after %lld s)",
+		loc_state_names[state], loc_state_names[next], why,
+		(long long)((now_ms - state_entered_ms) / 1000));
 	state = next;
 	state_entered_ms = now_ms;
 	/* Judge the new state on its own evidence, not sky history from the old. */
@@ -89,8 +92,9 @@ void loc_fsm_init(int64_t now_ms)
 	state_entered_ms  = now_ms;
 	last_fix_ms       = now_ms - GPS_STALE_MS;
 	last_ephe_poll_ms = now_ms - EPHE_POLL_MS;
-	last_sky_ok_ms    = now_ms;
-	last_sky_bad_ms   = now_ms;
+	last_sky_ok_ms     = now_ms;
+	last_sky_bad_ms    = now_ms;
+	last_visible_ok_ms = now_ms;
 	cell_sent = false;
 	ephe_valid = false;
 }
@@ -235,21 +239,21 @@ void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 	case LOC_LTE_ATTACH:
 		if (lte_registered) {
 			cell_sent = false;
-			next_state(LOC_CELL_REPORT, now_ms, "registered");
+			next_state(LOC_REPORT_CELL, now_ms, "registered");
 		}
 		break;
 
-	case LOC_CELL_REPORT:
+	case LOC_REPORT_CELL:
 		if (fix) {
-			next_state(LOC_REPORT, now_ms, "fix acquired");
+			next_state(LOC_REPORT_GNSS, now_ms, "fix acquired");
 		} else if (cell_sent) {
-			next_state(LOC_ACQUIRE, now_ms, "cell reported");
+			next_state(LOC_GNSS_ACQUIRE, now_ms, "cell reported");
 		}
 		break;
 
-	case LOC_ACQUIRE:
+	case LOC_GNSS_ACQUIRE:
 		if (fix) {
-			next_state(LOC_REPORT, now_ms, "fix acquired");
+			next_state(LOC_REPORT_GNSS, now_ms, "fix acquired");
 		} else if (in_state > ACQUIRE_CAP_MS) {
 			next_state(LOC_CELL_LOOP, now_ms, "acquire timeout");
 		} else if (sky_dead) {
@@ -257,7 +261,7 @@ void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 		}
 		break;
 
-	case LOC_REPORT:
+	case LOC_REPORT_GNSS:
 		/* Losing the fix is not the same as losing the ephemeris: while
 		 * *visible* satellites still carry valid ephemeris, a re-fix is a
 		 * hot start (seconds) and LTE need not be disturbed. */
@@ -265,7 +269,7 @@ void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 			if (sky_dead) {
 				next_state(LOC_CELL_LOOP, now_ms, "sky lost");
 			} else if (hotstart_dead) {
-				next_state(LOC_ACQUIRE, now_ms,
+				next_state(LOC_GNSS_ACQUIRE, now_ms,
 					   "fix stale, ephemeris not visible");
 			}
 			/* else: hot-start conditions present; wait for re-fix */
@@ -274,7 +278,7 @@ void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 				CONFIG_TRACKER_LOC_EPHE_REFRESH_MIN) {
 			/* Refresh before it lapses: one quiet window now avoids a
 			 * full cold start later. */
-			next_state(LOC_ACQUIRE, now_ms, "ephemeris expiring");
+			next_state(LOC_GNSS_ACQUIRE, now_ms, "ephemeris expiring");
 		}
 		break;
 
@@ -283,9 +287,9 @@ void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 		 * long enough for GNSS to sense the sky, so no blind probe timer
 		 * is needed. */
 		if (fix) {
-			next_state(LOC_REPORT, now_ms, "fix returned");
+			next_state(LOC_REPORT_GNSS, now_ms, "fix returned");
 		} else if (sky_alive) {
-			next_state(LOC_ACQUIRE, now_ms, "sky returned");
+			next_state(LOC_GNSS_ACQUIRE, now_ms, "sky returned");
 		}
 		break;
 
@@ -295,10 +299,10 @@ void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 
 	out->state = state;
 	out->gnss_wanted = lte_registered;
-	out->publish_allowed = (state == LOC_CELL_REPORT ||
-				state == LOC_REPORT ||
+	out->publish_allowed = (state == LOC_REPORT_CELL ||
+				state == LOC_REPORT_GNSS ||
 				state == LOC_CELL_LOOP);
-	out->prefer_cell = (state != LOC_REPORT) || !out->gps_current;
+	out->prefer_cell = (state != LOC_REPORT_GNSS) || !out->gps_current;
 	out->publish_interval_ms = (state == LOC_CELL_LOOP) ? CELL_POST_MS : POST_MS;
 }
 

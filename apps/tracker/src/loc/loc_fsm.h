@@ -19,6 +19,11 @@
 #include <stdint.h>
 #include <nrf_modem_gnss.h>
 
+/* States are modes with distinct policy (is GNSS running? may we publish?
+ * which source? what cadence?). Events like "got a fix" or "timed out" are
+ * NOT states -- they are the labelled edges between states, carried by the
+ * reason string in the transition log. A zero-dwell pass-through state would
+ * add trace lines without adding information. */
 enum loc_state {
 	/* Modem not registered. A cell search uses the radio continuously, and
 	 * GNSS alongside it steals timeslots from the search while itself getting
@@ -26,13 +31,13 @@ enum loc_state {
 	LOC_LTE_ATTACH,
 	/* Registered; get one coarse serving-cell position onto the map before
 	 * handing the radio to GNSS (which may then go quiet for minutes). */
-	LOC_CELL_REPORT,
+	LOC_REPORT_CELL,
 	/* Hunting ephemeris. No publishes at all: with the long MQTT keepalive,
 	 * zero application traffic means PSM parks LTE and GNSS owns the radio. */
-	LOC_ACQUIRE,
+	LOC_GNSS_ACQUIRE,
 	/* Fix in hand and ephemeris visible. Re-fixes are hot starts (seconds),
-	 * so LTE may transmit freely. */
-	LOC_REPORT,
+	 * so LTE may transmit freely; publishes carry the GNSS position. */
+	LOC_REPORT_GNSS,
 	/* Not enough sky to be worth starving LTE for. Report cells on a slow
 	 * cadence whose gaps are long enough for GNSS to *sense* the sky, so the
 	 * exit is signal-driven rather than a blind timer. */
