@@ -118,18 +118,22 @@ open-ports:
 #   CADDY_DOMAIN unset -> HTTP on :80, reachable by public IP
 #   CADDY_DOMAIN=host  -> auto-HTTPS for host + www (needs DNS -> this host)
 caddy: setup-caddy
-> @if [ -n "$(CADDY_DOMAIN)" ]; then \
->    printf '%s, www.%s {\n    reverse_proxy 127.0.0.1:%s\n}\n' \
->      '$(CADDY_DOMAIN)' '$(CADDY_DOMAIN)' '$(HTTP_PORT)' | sudo tee $(CADDYFILE) >/dev/null; \
->    echo "Caddy: HTTPS for $(CADDY_DOMAIN) (+www) -> 127.0.0.1:$(HTTP_PORT)"; \
->  else \
->    printf ':80 {\n    reverse_proxy 127.0.0.1:%s\n}\n' \
->      '$(HTTP_PORT)' | sudo tee $(CADDYFILE) >/dev/null; \
->    echo "Caddy: HTTP on :80 (reach by IP) -> 127.0.0.1:$(HTTP_PORT)"; \
->  fi
-> @sudo systemctl enable caddy >/dev/null 2>&1 || true
-> @sudo systemctl reload caddy 2>/dev/null || sudo systemctl restart caddy
-> @echo "caddy (re)loaded"
+> HASH=$$(caddy hash-password --plaintext "$(CADDY_PASSWORD)"); \
+> CADDY_CREDENTIALS="$(CADDY_USERNAME) $$HASH"; \
+> if [ -n "$(CADDY_DOMAIN)" ]; then \
+>     printf '%s {\n    basicauth * {\n        %s\n    }\n    reverse_proxy 127.0.0.1:%s\n}\n' \
+>         "$(CADDY_DOMAIN), www.$(CADDY_DOMAIN)" "$$CADDY_CREDENTIALS" "$(HTTP_PORT)" \
+>         | sudo tee $(CADDYFILE) >/dev/null; \
+>     echo "Caddy: HTTPS for $(CADDY_DOMAIN) (+www) -> 127.0.0.1:$(HTTP_PORT)"; \
+> else \
+>     printf ':80 {\n    basicauth * {\n        %s\n    }\n    reverse_proxy 127.0.0.1:%s\n}\n' \
+>         "$$CADDY_CREDENTIALS" "$(HTTP_PORT)" \
+>         | sudo tee $(CADDYFILE) >/dev/null; \
+>     echo "Caddy: HTTP on :80 (reach by IP) -> 127.0.0.1:$(HTTP_PORT)"; \
+> fi
+> sudo systemctl enable caddy >/dev/null 2>&1 || true
+> sudo systemctl reload caddy 2>/dev/null || sudo systemctl restart caddy
+> echo "caddy (re)loaded"
 
 # Run the CoAP ingest in the foreground (demo/serve background it themselves).
 coap-server:
