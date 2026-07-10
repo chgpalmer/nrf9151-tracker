@@ -23,7 +23,9 @@ LOG_MODULE_REGISTER(loc_fsm, CONFIG_TRACKER_LOG_LEVEL);
  * epoch to epoch, and one unlucky sample must not discard a usable sky (nor one
  * lucky sample start an acquisition). */
 #define SKY_LOST_MS      (CONFIG_TRACKER_LOC_SKY_LOST_S * 1000)
-#define SKY_OK_MS        (CONFIG_TRACKER_LOC_SKY_OK_S * 1000)
+/* PVT epochs arrive at 1 Hz, so observed epochs ~= seconds of actual GNSS
+ * observation, excluding time LTE held the radio. */
+#define SKY_OK_EPOCHS    CONFIG_TRACKER_LOC_SKY_OK_S
 
 /* Reading ephemeris state is a modem call; it does not change at 1 Hz. */
 #define EPHE_POLL_MS 5000
@@ -50,7 +52,9 @@ static int64_t state_entered_ms;
 static int64_t last_fix_ms;
 static int64_t last_ephe_poll_ms;
 static int64_t last_sky_ok_ms;
-static int64_t last_sky_bad_ms;
+/* Consecutive OBSERVED epochs with a usable sky; pauses while GNSS is blanked
+ * by LTE, resets on an observed bad epoch. */
+static uint8_t sky_good_streak;
 /* Last *observed* epoch with enough ephemeris-bearing satellites in view. */
 static int64_t last_visible_ok_ms;
 static bool cell_sent;
@@ -82,7 +86,7 @@ static void next_state(enum loc_state next, int64_t now_ms, const char *why)
 	state_entered_ms = now_ms;
 	/* Judge the new state on its own evidence, not sky history from the old. */
 	last_sky_ok_ms      = now_ms;
-	last_sky_bad_ms     = now_ms;
+	sky_good_streak     = 0;
 	last_visible_ok_ms  = now_ms;
 }
 
@@ -93,7 +97,7 @@ void loc_fsm_init(int64_t now_ms)
 	last_fix_ms       = now_ms - GPS_STALE_MS;
 	last_ephe_poll_ms = now_ms - EPHE_POLL_MS;
 	last_sky_ok_ms     = now_ms;
-	last_sky_bad_ms    = now_ms;
+	sky_good_streak    = 0;
 	last_visible_ok_ms = now_ms;
 	cell_sent = false;
 	ephe_valid = false;
@@ -212,14 +216,34 @@ void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 	out->gps_current = (now_ms - last_fix_ms) < GPS_STALE_MS;
 
 	/* Debounced sky quality. "Enough sky" means enough satellites above the
-	 * demodulation floor to eventually earn SATS_FOR_FIX ephemerides. */
-	if (out->strong >= SATS_FOR_FIX) {
-		last_sky_ok_ms = now_ms;
-	} else {
-		last_sky_bad_ms = now_ms;
+	 * demodulation floor to eventually earn SATS_FOR_FIX ephemerides.
+	 *
+	 * Judged on OBSERVED epochs only (tracked > 0): while LTE holds the radio
+	 * -- several epochs around every publish -- GNSS reports an empty frame,
+	 * and counting that as "bad sky" is the observation-of-absence fallacy.
+	 * In CELL_LOOP it made leaving nearly impossible: each 30 s publish reset
+	 * the clock, re-acquisition ate ~5 s more, and one jittery dip restarted
+	 * the rest. So the good streak PAUSES while blanked and resets only on an
+	 * observed bad epoch.
+	 *
+	 * Asymmetry is deliberate: sky_alive needs positive evidence (a streak of
+	 * observed-good epochs), while sky_dead is the sustained lack of any such
+	 * evidence -- a device in a Faraday cage observes nothing, which must
+	 * never read as "the sky came back". A wrong sky_alive is cheap anyway:
+	 * GNSS_ACQUIRE's own sky_dead debounce bounces back within SKY_LOST_S. */
+	if (out->tracked > 0) {
+		if (out->strong >= SATS_FOR_FIX) {
+			last_sky_ok_ms = now_ms;
+			if (sky_good_streak < UINT8_MAX) {
+				sky_good_streak++;
+			}
+		} else {
+			sky_good_streak = 0;
+		}
 	}
+	out->sky_streak = sky_good_streak;
 	bool sky_dead  = (now_ms - last_sky_ok_ms) > SKY_LOST_MS;
-	bool sky_alive = (now_ms - last_sky_bad_ms) > SKY_OK_MS;
+	bool sky_alive = sky_good_streak >= SKY_OK_EPOCHS;
 
 	/* Hot-start viability, debounced on observed epochs only (blanked epochs
 	 * carry the cached count and must not refresh the clock either way). */
@@ -321,9 +345,10 @@ void loc_fsm_log(const struct loc_status *st,
 	 * Print the whole ladder so a stall is attributable to one rung.
 	 * held != visible: held ephemerides may belong to satellites that have
 	 * set since -- only visible ones can contribute to a fix. */
-	LOG_INF("loc:  %s | gps-time %s | tracked %u strong %u | ephemeris %u held / %u visible (need %d) | pdop %.1f",
+	LOG_INF("loc:  %s | gps-time %s | tracked %u strong %u (sky streak %u/%u) | ephemeris %u held / %u visible (need %d) | pdop %.1f",
 		loc_state_str(st->state), st->gps_time_known ? "known" : "UNKNOWN",
-		st->tracked, st->strong, st->ephemeris_held, st->ephemeris_visible,
+		st->tracked, st->strong, st->sky_streak, (unsigned)SKY_OK_EPOCHS,
+		st->ephemeris_held, st->ephemeris_visible,
 		SATS_FOR_FIX, (double)st->pdop);
 
 	for (int i = 0; i < NRF_MODEM_GNSS_MAX_SATELLITES; i++) {

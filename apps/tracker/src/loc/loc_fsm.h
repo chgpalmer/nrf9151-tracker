@@ -23,7 +23,69 @@
  * which source? what cadence?). Events like "got a fix" or "timed out" are
  * NOT states -- they are the labelled edges between states, carried by the
  * reason string in the transition log. A zero-dwell pass-through state would
- * add trace lines without adding information. */
+ * add trace lines without adding information.
+ *
+ * Edge labels below are the exact reason strings from the transition log, so
+ * a UART trace can be read against this diagram.
+ *
+ *                          (from ANY state)
+ *                             | "registration lost"
+ *                             v
+ *   +----------------------------------------------------------------+
+ *   | LTE_ATTACH        GNSS off, no publishes.                       |
+ *   |                   A searching modem owns the radio; GNSS beside |
+ *   |                   it starves the search and gets nothing.       |
+ *   +----------------------------------------------------------------+
+ *                             | "registered"
+ *                             v
+ *   +----------------------------------------------------------------+
+ *   | REPORT_CELL       GNSS on, publish cell @ POST_INTERVAL_S.      |
+ *   |                   Coarse position onto the map first -- a cold  |
+ *   |                   GNSS start takes minutes of radio silence.    |
+ *   +----------------------------------------------------------------+
+ *          | "cell reported" (publish confirmed,        | "fix acquired"
+ *          |  not a timer)                              | (warm start)
+ *          v                                            v
+ *   +----------------------------------------------------------------+
+ *   | GNSS_ACQUIRE      GNSS on, NO publishes (radio silent).         |
+ *   |                   Hunting ephemeris: ~30 s of uninterrupted     |
+ *   |                   tracking per satellite, needs 4.              |
+ *   +----------------------------------------------------------------+
+ *      | "fix acquired"        ^        | "not enough sky"
+ *      |                       |        |   (SKY_LOST_S without one
+ *      |     "sky returned"    |        |    observed-good epoch)
+ *      |     (sky streak hits  |        | "acquire timeout"
+ *      |      SKY_OK_S good    |        |   (ACQUIRE_TIMEOUT_S cap:
+ *      |      observed epochs; |        |    sky teases but no fix)
+ *      |      pauses while LTE |        |
+ *      |      blanks GNSS)     |        |
+ *      v                       |        v
+ *   +---------------------+    |    +-----------------------------------+
+ *   | REPORT_GNSS         |    +----| CELL_LOOP                         |
+ *   | GNSS on, publish    |         | GNSS on, publish cell @           |
+ *   | fix @ POST_INTERVAL |         | CELL_POST_INTERVAL_S (slow on     |
+ *   | (stale fix -> cell  |         | purpose: the ~25 s gaps are how   |
+ *   |  until re-fix)      |         | GNSS gets to sense the sky)       |
+ *   +---------------------+         +-----------------------------------+
+ *      |         |                      ^         | "fix returned"
+ *      |         | "sky lost"           |         v REPORT_GNSS
+ *      |         | (fix stale +         |
+ *      |         |  SKY_LOST_S) --------+
+ *      |
+ *      | "ephemeris expiring" (< EPHE_REFRESH_MIN left; refresh now to
+ *      |   avoid a future cold start)
+ *      | "fix stale, ephemeris not visible" (can't hot-start: fewer than
+ *      |   4 ephemeris-bearing satellites observed for VISIBLE_LOST_MS)
+ *      +--> GNSS_ACQUIRE
+ *
+ * Sky evidence rules (the part that bit us three times): all judgements use
+ * OBSERVED epochs only -- an epoch where LTE blanked GNSS (tracked == 0 right
+ * after a publish) is absence of observation, not observation of absence.
+ * Entering ACQUIRE needs positive evidence (a streak of good observed
+ * epochs); leaving it needs sustained lack of any (SKY_LOST_S) -- asymmetric
+ * on purpose, so a device in a Faraday cage never reads as "sky returned",
+ * and a publish never resets progress toward an exit.
+ */
 enum loc_state {
 	/* Modem not registered. A cell search uses the radio continuously, and
 	 * GNSS alongside it steals timeslots from the search while itself getting
@@ -66,6 +128,10 @@ struct loc_status {
 	uint8_t tracked;   /* satellites whose signal we follow */
 	uint8_t strong;    /* ...of those, strong enough to demodulate */
 	uint8_t used;      /* ...used in the position calculation */
+	/* Consecutive observed-good epochs; at TRACKER_LOC_SKY_OK_S the sky is
+	 * declared usable (CELL_LOOP -> GNSS_ACQUIRE). Logged so a trace shows
+	 * progress toward that exit, not just the exit. */
+	uint8_t sky_streak;
 
 	/* Ephemerides held (cached orbit data, valid ~2 h) vs held AND currently
 	 * tracked. Held counts satellites that may be below the horizon by now;

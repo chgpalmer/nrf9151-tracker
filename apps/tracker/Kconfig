@@ -67,12 +67,14 @@ config TRACKER_LOC_SKY_LOST_S
 	  cannot be tight.
 
 config TRACKER_LOC_SKY_OK_S
-	int "Declare the sky usable after this long with enough strong satellites"
-	default 10
+	int "Observed-good epochs before declaring the sky usable"
+	default 5
 	range 2 120
 	help
-	  The opposite debounce: avoid starting an acquisition (which silences
-	  reporting) on one lucky epoch.
+	  Counted over epochs where GNSS actually observed the sky (~1 Hz),
+	  pausing while LTE holds the radio -- so publishes don't reset the
+	  verdict. Kept low deliberately: entering an acquisition on a sky that
+	  then fades self-corrects within TRACKER_LOC_SKY_LOST_S.
 
 config TRACKER_LOC_EPHE_REFRESH_MIN
 	int "Refresh ephemeris when the soonest expiry is under this many minutes"
