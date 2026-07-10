@@ -39,26 +39,42 @@ config TRACKER_LOC_CN0_MIN_DBHZ
 	  message cannot be demodulated, so it never yields an ephemeris. Used to
 	  decide whether the sky is worth taking the radio away from LTE for.
 
-config TRACKER_LOC_BOOT_CELL_S
-	int "Give up waiting for the boot cell report after this long"
-	default 120
-	range 0 600
+config TRACKER_CELL_POST_INTERVAL_S
+	int "Cell publish interval while GNSS has no usable sky (seconds)"
+	default 30
+	range 15 3600
 	help
-	  A cold GNSS start takes minutes, so at boot we publish a serving-cell
-	  position first (coarse now, precise later) and only then hand the radio to
-	  GNSS. Normally we leave that state the moment the cell report is sent;
-	  this is only the backstop for a modem that never attaches, where waiting
-	  longer buys nothing.
+	  Deliberately slower than the normal publish interval: the gaps between
+	  cell publishes are what let GNSS observe satellites, so leaving that
+	  no-sky state is signal-driven rather than a blind retry timer. Below
+	  ~15 s the gaps are too short for GNSS to sense anything.
 
 config TRACKER_LOC_ACQUIRE_TIMEOUT_S
 	int "Give up a quiet GNSS acquisition window after this long"
 	default 300
 	range 60 1800
+	help
+	  Bounds how long the tracker may go silent hunting ephemeris under a
+	  partial sky. A product decision, not a technical one: cold start may
+	  simply never complete indoors.
 
-config TRACKER_LOC_CELL_RETRY_S
-	int "Minimum seconds in CELL_ONLY before retrying GNSS acquisition"
-	default 300
-	range 30 3600
+config TRACKER_LOC_SKY_LOST_S
+	int "Declare the sky unusable after this long without enough strong satellites"
+	default 60
+	range 15 600
+	help
+	  Debounce, not a probe: C/N0 fades and satellite counts jitter epoch to
+	  epoch, so one bad sample must not abandon an acquisition. A cold
+	  receiver also needs tens of seconds just to acquire signals, so this
+	  cannot be tight.
+
+config TRACKER_LOC_SKY_OK_S
+	int "Declare the sky usable after this long with enough strong satellites"
+	default 10
+	range 2 120
+	help
+	  The opposite debounce: avoid starting an acquisition (which silences
+	  reporting) on one lucky epoch.
 
 config TRACKER_LOC_EPHE_REFRESH_MIN
 	int "Refresh ephemeris when the soonest expiry is under this many minutes"

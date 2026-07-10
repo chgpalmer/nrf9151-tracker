@@ -1,17 +1,16 @@
 /*
  * nRF9151 GPS tracker — active mode
  *
- * Loop:
- *   - sample GNSS every second (1 Hz PVT events)
- *   - MQTT publish latest fix every 10 seconds
- *
- * LTE is brought up once at boot and kept connected. GNSS runs
- * concurrently via the modem's LTE-M+GPS timeslotting.
+ * loc_fsm decides who gets the shared radio (GNSS vs LTE) and what to publish;
+ * this file executes that policy: modem bring-up, MQTT, and the publish loop.
+ * LTE registers once at boot and stays registered — PSM parks the radio between
+ * sends, which is what gives GNSS its acquisition windows.
  */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <nrf_modem_gnss.h>
@@ -20,6 +19,9 @@
 #include <modem/lte_lc.h>
 #include <net/mqtt_helper.h>
 #include <hw_id.h>
+#if defined(CONFIG_LTE_LC_RAI_MODULE)
+#include <zephyr/net/socket.h> /* SO_RAI / RAI_LAST (socket_ncs.h) */
+#endif
 
 #include "loc_fsm.h"
 
@@ -69,18 +71,36 @@ static volatile bool rrc_connected;
 static volatile int  psm_tau_s    = -1;
 static volatile int  psm_active_s = -1; /* -1 = PSM not granted */
 
+/* When the last MQTT publish went out. The LTE handler uses it to log how long
+ * RRC stayed connected after we finished sending -- the tail RAI should shrink. */
+static volatile int64_t last_pub_ms;
+
 static char device_id[HW_ID_LEN];
 static char pos_topic[64];
 static char cell_topic[64];
 
 /* ── GNSS ─────────────────────────────────────────────────────────  */
+/* Set by EVT_BLOCKED/UNBLOCKED; the handler runs in ISR context, so it only
+ * flags the change and the main loop logs the edge. */
+static volatile bool gnss_blocked;
+
 static void gnss_handler(int event)
 {
-	if (event == NRF_MODEM_GNSS_EVT_PVT) {
+	switch (event) {
+	case NRF_MODEM_GNSS_EVT_PVT:
 		if (nrf_modem_gnss_read(&pvt, sizeof(pvt),
 					NRF_MODEM_GNSS_DATA_PVT) == 0) {
 			k_sem_give(&pvt_sem);
 		}
+		break;
+	case NRF_MODEM_GNSS_EVT_BLOCKED:
+		gnss_blocked = true;
+		break;
+	case NRF_MODEM_GNSS_EVT_UNBLOCKED:
+		gnss_blocked = false;
+		break;
+	default:
+		break;
 	}
 }
 
@@ -149,7 +169,21 @@ static void lte_handler(const struct lte_lc_evt *const evt)
 		break;
 	case LTE_LC_EVT_RRC_UPDATE:
 		rrc_connected = (evt->rrc_mode == LTE_LC_RRC_MODE_CONNECTED);
-		LOG_INF("RRC: %s", rrc_connected ? "connected (GNSS blocked)" : "idle");
+		if (rrc_connected) {
+			LOG_INF("RRC: connected (GNSS blocked)");
+		} else {
+			/* The tail between our last publish and RRC release is
+			 * radio time GNSS cannot use. RAI exists to shrink it;
+			 * this delta is the measurement of whether it works. */
+			int64_t tail = k_uptime_get() - last_pub_ms;
+
+			if (last_pub_ms > 0 && tail < 30000) {
+				LOG_INF("RRC: idle (%lld ms after publish)",
+					(long long)tail);
+			} else {
+				LOG_INF("RRC: idle");
+			}
+		}
 		break;
 	default:
 		break;
@@ -172,6 +206,41 @@ static const char *lte_status_str(void)
 /* ── MQTT ─────────────────────────────────────────────────────────  */
 static char mqtt_payload[256];
 
+/* mqtt_helper has no fd getter; the only way to reach its socket (for the RAI
+ * option) is the on_all_events callback, which hands us the client struct.
+ * Not a stable API -- if this breaks on an NCS upgrade, drop RAI and fall back
+ * to PSM's active timer parking the radio a few seconds later. */
+static volatile int mqtt_sock = -1;
+
+static bool on_mqtt_all_events(struct mqtt_client *const client,
+			       const struct mqtt_evt *const event)
+{
+	ARG_UNUSED(event);
+	mqtt_sock = client->transport.tcp.sock;
+	return true; /* we only observe; let mqtt_helper process the event */
+}
+
+/* Tell the modem the next send is our last, so it can ask the network to
+ * release RRC right after it instead of idling through the inactivity timer
+ * (canonical pattern from nrf/samples/cellular/udp). Compiled out on
+ * native_sim, where there is no modem. Caveat: over TCP the broker's ACK still
+ * follows the publish, so the release is later than UDP's -- the RRC-idle
+ * delta log says how much this actually buys. */
+static void rai_last_before_send(void)
+{
+#if defined(CONFIG_LTE_LC_RAI_MODULE)
+	int sock = mqtt_sock;
+	int rai = RAI_LAST;
+
+	if (sock < 0) {
+		return;
+	}
+	if (zsock_setsockopt(sock, SOL_SOCKET, SO_RAI, &rai, sizeof(rai)) < 0) {
+		LOG_DBG("SO_RAI failed: %d", -errno);
+	}
+#endif
+}
+
 static void on_connack(enum mqtt_conn_return_code rc, bool session_present)
 {
 	if (rc == MQTT_CONNECTION_ACCEPTED) {
@@ -193,6 +262,7 @@ static int tracker_mqtt_connect(void)
 	static char broker_host[] = BROKER_HOST;
 
 	struct mqtt_helper_cfg cfg = {
+		.cb.on_all_events = on_mqtt_all_events, /* socket capture for RAI */
 		.cb.on_connack    = on_connack,
 		.cb.on_disconnect = on_disconnect,
 	};
@@ -248,11 +318,13 @@ static int mqtt_publish_fix(const struct nrf_modem_gnss_pvt_data_frame *p)
 		.retain_flag                  = 0,
 	};
 
+	rai_last_before_send();
 	int err = mqtt_helper_publish(&msg);
 	if (err) {
 		LOG_ERR("mqtt_helper_publish: %d", err);
 		return err;
 	}
+	last_pub_ms = k_uptime_get();
 
 	LOG_INF("MQTT → %s (%zu bytes)", pos_topic, strlen(mqtt_payload));
 	return 0;
@@ -272,11 +344,13 @@ static int publish_json(const char *topic)
 		.retain_flag              = 0,
 	};
 
+	rai_last_before_send();
 	int err = mqtt_helper_publish(&msg);
 	if (err) {
 		LOG_ERR("mqtt_helper_publish: %d", err);
 		return err;
 	}
+	last_pub_ms = k_uptime_get();
 	LOG_INF("MQTT → %s (%zu bytes)", topic, strlen(mqtt_payload));
 	return 0;
 }
@@ -461,6 +535,7 @@ int main(void)
 		return err;
 	}
 	bool gnss_running = false;
+	bool gnss_blocked_prev = false;
 
 	int64_t last_post_ms   = 0;
 	int64_t last_status_ms = 0;
@@ -478,7 +553,6 @@ int main(void)
 
 		/* Policy first: it owns the fix-staleness and ephemeris bookkeeping. */
 		loc_fsm_update(&pvt, now, lte_connected, &loc);
-		bool gps_current = loc.gps_current;
 
 		/* Run GNSS only when the FSM says so. While the modem is searching
 		 * for a network the search owns the radio, and GNSS alongside it just
@@ -494,27 +568,24 @@ int main(void)
 			gnss_running = false;
 		}
 
-		/* A cold start needs ~30 s of uninterrupted GNSS. Publishing, and the
-		 * 60 s MQTT keepalive, both wake the radio and cut the window short.
-		 * So while the FSM wants silence, take MQTT down entirely — PSM then
-		 * puts LTE to sleep and GNSS gets the whole radio. */
-		if (loc.radio_quiet_wanted) {
-			if (mqtt_connected) {
-				LOG_INF("loc: ACQUIRE — dropping MQTT to free the radio");
-				(void)mqtt_helper_disconnect();
-			}
-			/* Don't let the reconnect below fire the moment we leave. */
-			next_mqtt_ms = now + MQTT_RETRY_MS;
+		/* EVT_BLOCKED/UNBLOCKED arrive in ISR context; log the edge here. */
+		if (gnss_blocked != gnss_blocked_prev) {
+			gnss_blocked_prev = gnss_blocked;
+			LOG_INF("GNSS: %s by LTE",
+				gnss_blocked ? "blocked" : "unblocked");
 		}
 
-		/* (Re)connect MQTT whenever LTE is up and the broker isn't. This
-		 * covers the first connect at boot and every later drop — a broker
-		 * restart, a lost PDN — without needing to power-cycle the board.
+		/* NOTE: the MQTT connection stays up across ACQUIRE. Application
+		 * silence is enough for quiet: CONFIG_MQTT_KEEPALIVE is set above
+		 * the acquire cap, so no PINGREQ can fire inside a window, and a
+		 * publish-only client has no other traffic. Connect attempts are
+		 * still gated on publish_allowed — a TCP handshake is radio noise.
+		 *
 		 * mqtt_helper_init() accepts UNINIT and DISCONNECTED alike, so
 		 * tracker_mqtt_connect() is safe to call again after a disconnect.
 		 * -EOPNOTSUPP just means an attempt is still in flight (no connack
 		 * yet); back off and let it settle rather than logging a failure. */
-		if (!loc.radio_quiet_wanted &&
+		if (loc.publish_allowed &&
 		    lte_connected && !mqtt_connected && now >= next_mqtt_ms) {
 			next_mqtt_ms = now + MQTT_RETRY_MS;
 			LOG_INF("connecting MQTT to %s:%d...", BROKER_HOST, BROKER_PORT);
@@ -531,11 +602,12 @@ int main(void)
 			print_status(&pvt, &loc, now);
 		}
 
-		/* Publish once per interval when MQTT is up. Prefer a current
-		 * GPS fix; otherwise report the serving cell (cheap XMONITOR
-		 * read — no radio scan). Covers boot-before-GPS and GPS loss. */
-		if (now - last_post_ms >= POST_INTERVAL_MS && mqtt_connected) {
-			if (gps_current) {
+		/* Publish what the FSM asks for, at the cadence it asks for.
+		 * prefer_cell covers both the boot cell report and a stale fix;
+		 * the cell read is a cached XMONITOR parse, not a radio scan. */
+		if (loc.publish_allowed && mqtt_connected &&
+		    now - last_post_ms >= loc.publish_interval_ms) {
+			if (!loc.prefer_cell) {
 				last_post_ms = now;
 				err = mqtt_publish_fix(&pvt);
 				if (err) {
@@ -559,7 +631,8 @@ int main(void)
 				}
 			}
 		} else if (!mqtt_connected) {
-			last_post_ms = now - POST_INTERVAL_MS + 3000;
+			/* Publish shortly after the next successful connect. */
+			last_post_ms = now - loc.publish_interval_ms + 3000;
 		}
 	}
 

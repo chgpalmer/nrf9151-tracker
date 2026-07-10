@@ -5,12 +5,12 @@
  * alone, and a cold start needs ~30 s of *uninterrupted* tracking to demodulate
  * each satellite's ephemeris off the air. Publishing every 10 s (plus a 60 s
  * MQTT keepalive) never leaves a gap that long, so GNSS tracks satellites
- * forever and never decodes them. See the ephemeris counter in loc_status.
+ * forever and never decodes them.
  *
- * This module is deliberately ignorant of MQTT: it consumes PVT frames and says
- * whether it wants the radio quiet. main.c decides that means dropping the MQTT
- * connection (which also kills the keepalive). That keeps the policy pure and
- * buildable under native_sim.
+ * This module is deliberately ignorant of MQTT: it consumes PVT frames plus the
+ * LTE registration state and emits a policy (should GNSS run, may we publish,
+ * what kind, how often). main.c executes the policy. That keeps the FSM pure
+ * and buildable under native_sim.
  */
 #ifndef LOC_FSM_H__
 #define LOC_FSM_H__
@@ -20,37 +20,60 @@
 #include <nrf_modem_gnss.h>
 
 enum loc_state {
-	/* GNSS lacks ephemeris but can see enough sky to fetch it. Hold LTE off
-	 * the air until it has a fix (or we give up). Also used to refresh
-	 * ephemeris before it expires, which avoids a future cold start. */
-	LOC_STATE_ACQUIRE,
-	/* Fix in hand and ephemeris valid. Re-fixes are hot starts (seconds), so
-	 * LTE can transmit freely. */
-	LOC_STATE_REPORT,
-	/* Not enough sky to be worth starving LTE for. Report the serving cell
-	 * and re-test GNSS periodically. */
-	LOC_STATE_CELL_ONLY,
+	/* Modem not registered. A cell search uses the radio continuously, and
+	 * GNSS alongside it steals timeslots from the search while itself getting
+	 * nowhere -- so GNSS is off entirely until registration. */
+	LOC_LTE_ATTACH,
+	/* Registered; get one coarse serving-cell position onto the map before
+	 * handing the radio to GNSS (which may then go quiet for minutes). */
+	LOC_CELL_REPORT,
+	/* Hunting ephemeris. No publishes at all: with the long MQTT keepalive,
+	 * zero application traffic means PSM parks LTE and GNSS owns the radio. */
+	LOC_ACQUIRE,
+	/* Fix in hand and ephemeris visible. Re-fixes are hot starts (seconds),
+	 * so LTE may transmit freely. */
+	LOC_REPORT,
+	/* Not enough sky to be worth starving LTE for. Report cells on a slow
+	 * cadence whose gaps are long enough for GNSS to *sense* the sky, so the
+	 * exit is signal-driven rather than a blind timer. */
+	LOC_CELL_LOOP,
+
+	LOC_STATE_COUNT,
 };
 
 struct loc_status {
 	enum loc_state state;
-	/* main.c must keep the radio off the air while this is true. */
-	bool radio_quiet_wanted;
-	/* Whether GNSS should be running at all. False while the modem is still
-	 * searching for a network: a cell search uses the radio continuously, and
-	 * GNSS running alongside it steals timeslots from the search (the modem
-	 * reports NOT_ENOUGH_WINDOW_TIME) while itself getting nowhere. Register
-	 * first, then hunt satellites. */
+
+	/* Should GNSS be running at all? False while unregistered. */
 	bool gnss_wanted;
+	/* May main.c publish (and attempt MQTT connects)? False in ACQUIRE:
+	 * application silence is what hands the radio to GNSS. */
+	bool publish_allowed;
+	/* What to publish: serving cell (true) or the GNSS fix (false). */
+	bool prefer_cell;
+	/* Publish cadence for the current state. */
+	uint32_t publish_interval_ms;
+
 	/* A fix newer than CONFIG_TRACKER_GPS_STALE_S. */
 	bool gps_current;
 
-	uint8_t tracked;    /* satellites whose signal we follow */
-	uint8_t strong;     /* ...of those, strong enough to demodulate */
-	uint8_t used;       /* ...used in the position calculation */
-	uint8_t ephemeris;  /* satellites whose orbit data we already hold */
-	uint16_t min_ephe_expiry_min; /* 0 when we hold none */
+	uint8_t tracked;   /* satellites whose signal we follow */
+	uint8_t strong;    /* ...of those, strong enough to demodulate */
+	uint8_t used;      /* ...used in the position calculation */
+
+	/* Ephemerides held (cached orbit data, valid ~2 h) vs held AND currently
+	 * tracked. Held counts satellites that may be below the horizon by now;
+	 * only visible ones can contribute to a fix. This distinction is why
+	 * "ephemeris 4/4 but no fix" is not a contradiction. */
+	uint8_t ephemeris_held;
+	uint8_t ephemeris_visible;
+	uint16_t min_ephe_expiry_min; /* 0 when none held */
 	bool gps_time_known;
+
+	/* Position dilution of precision: satellite geometry quality. Four
+	 * satellites bunched together give a valid-looking count and an unusable
+	 * solution; this is the number that says so. */
+	float pdop;
 };
 
 const char *loc_state_str(enum loc_state s);
@@ -58,10 +81,9 @@ const char *loc_state_str(enum loc_state s);
 void loc_fsm_init(int64_t now_ms);
 
 /* main.c calls this once a serving-cell position has actually reached the
- * broker. Until then the FSM holds the radio for LTE at boot: a cold GNSS start
- * takes minutes, and going quiet first would leave the device off the map for
- * all of it. Keyed on the publish rather than a timer because LTE attach on a
- * roaming SIM can take longer than any timeout worth waiting. */
+ * broker. CELL_REPORT holds the radio for LTE until then -- keyed on the
+ * publish rather than a timer because LTE attach on a roaming SIM can take
+ * longer than any timeout worth waiting. */
 void loc_fsm_note_cell_sent(void);
 
 /* Feed one PVT frame (or a stale one, if GNSS produced no event) and get the
@@ -71,7 +93,7 @@ void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 		    int64_t now_ms, bool lte_registered, struct loc_status *out);
 
 /* Human-readable progress: which stage of the cold start we are at, plus C/N0
- * per satellite. Costs a modem call, so drive it from the status block. */
+ * per satellite. Drive it from the status block, not the PVT rate. */
 void loc_fsm_log(const struct loc_status *st,
 		 const struct nrf_modem_gnss_pvt_data_frame *pvt);
 
