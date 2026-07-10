@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Trackr — Asset Tracker</title>
+
+  <!-- Leaflet -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+
+  <!-- Google Fonts: JetBrains Mono + Inter -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+
+  <link rel="stylesheet" href="/css/main.css" />
+</head>
+<body>
+
+  <!-- Top Rail -->
+  <header class="top-rail">
+    <div class="brand">
+      <span class="brand-mark">TRK</span>
+      <span class="brand-name">TRACKR</span>
+    </div>
+
+    <div class="device-picker-wrap">
+      <label class="device-picker-label" for="device-select">DEVICE</label>
+      <div class="select-wrap">
+        <select id="device-select" class="device-select">
+          <option value="">— loading —</option>
+        </select>
+        <span class="select-arrow">▾</span>
+      </div>
+      <span class="device-count" id="device-count"></span>
+    </div>
+
+    <div class="status-cluster">
+      <div class="status-indicator" id="status-indicator" data-status="offline">
+        <div class="status-ring"></div>
+        <span class="status-label" id="status-label">OFFLINE</span>
+      </div>
+      <span class="clock" id="clock"></span>
+    </div>
+  </header>
+
+  <!-- App Shell -->
+  <div class="app-shell">
+
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <nav class="nav" role="navigation" aria-label="Main navigation">
+        <a href="#live"     class="nav-item" data-page="live">
+          <span class="nav-icon">◉</span>
+          <span class="nav-label">Live</span>
+        </a>
+        <a href="#history"  class="nav-item" data-page="history">
+          <span class="nav-icon">⊡</span>
+          <span class="nav-label">History</span>
+        </a>
+        <a href="#events"   class="nav-item" data-page="events">
+          <span class="nav-icon">◈</span>
+          <span class="nav-label">Events</span>
+          <span class="nav-badge soon">soon</span>
+        </a>
+        <a href="#settings" class="nav-item" data-page="settings">
+          <span class="nav-icon">◧</span>
+          <span class="nav-label">Settings</span>
+          <span class="nav-badge soon">soon</span>
+        </a>
+      </nav>
+
+      <div class="sidebar-device-info" id="sidebar-device-info">
+        <!-- populated by JS -->
+      </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="main-content" id="main-content">
+
+      <!-- ── LIVE PAGE ── -->
+      <section class="page" id="page-live" data-page="live">
+        <div class="page-controls">
+          <div class="control-group">
+            <span class="control-label">WINDOW</span>
+            <div class="pill-group" id="time-window">
+              <button class="pill" data-minutes="15">15m</button>
+              <button class="pill active" data-minutes="60">1h</button>
+              <button class="pill" data-minutes="360">6h</button>
+              <button class="pill" data-minutes="1440">24h</button>
+              <button class="pill" data-minutes="0">All</button>
+            </div>
+          </div>
+          <div class="control-group">
+            <label class="toggle-label">
+              <input type="checkbox" id="show-accuracy" class="toggle-input" />
+              <span class="toggle-track"></span>
+              <span class="toggle-text">Accuracy radii</span>
+            </label>
+          </div>
+          <div class="control-group">
+            <label class="toggle-label">
+              <input type="checkbox" id="show-arrows" class="toggle-input" checked />
+              <span class="toggle-track"></span>
+              <span class="toggle-text">Direction arrows</span>
+            </label>
+          </div>
+        </div>
+
+        <div class="map-container" id="map-live"></div>
+
+        <div class="chart-strip" id="chart-strip-live">
+          <div class="chart-wrap">
+            <div class="chart-header">SPEED (km/h)</div>
+            <canvas id="chart-speed" height="70"></canvas>
+          </div>
+          <div class="chart-wrap">
+            <div class="chart-header">ACCURACY (m)</div>
+            <canvas id="chart-acc" height="70"></canvas>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── HISTORY PAGE ── -->
+      <section class="page hidden" id="page-history" data-page="history">
+        <div class="page-controls">
+          <div class="control-group">
+            <label class="control-label" for="hist-date">DATE</label>
+            <input type="date" id="hist-date" class="date-input" />
+          </div>
+          <div class="control-group">
+            <span class="control-label">WINDOW</span>
+            <span class="hist-range-label" id="hist-range">—</span>
+          </div>
+          <div class="control-group">
+            <label class="toggle-label">
+              <input type="checkbox" id="show-accuracy-hist" class="toggle-input" />
+              <span class="toggle-track"></span>
+              <span class="toggle-text">Accuracy radii</span>
+            </label>
+          </div>
+        </div>
+
+        <div class="map-container" id="map-history"></div>
+
+        <!-- Timeline scrubber: drag the handles to set the window. Fix-density
+             ticks show where data exists so you drag to it (video-editor style). -->
+        <div class="timeline" id="hist-timeline">
+          <div class="timeline-axis" id="tl-axis"></div>
+          <div class="timeline-track" id="tl-track">
+            <div class="tl-density" id="tl-density"></div>
+            <div class="tl-selection" id="tl-sel"></div>
+            <div class="tl-handle tl-handle-start" id="tl-start" tabindex="0" role="slider"
+                 aria-label="Window start"></div>
+            <div class="tl-handle tl-handle-end" id="tl-end" tabindex="0" role="slider"
+                 aria-label="Window end"></div>
+          </div>
+        </div>
+
+        <div class="hist-summary" id="hist-summary"></div>
+      </section>
+
+      <!-- ── EVENTS PAGE ── -->
+      <section class="page hidden" id="page-events" data-page="events">
+        <div class="coming-soon">
+          <div class="coming-soon-icon">◈</div>
+          <div class="coming-soon-title">Events</div>
+          <div class="coming-soon-body">Geofence trips, motion alerts, and low-battery notifications will appear here once the firmware supports them.</div>
+          <div class="coming-soon-tag">NOT YET IMPLEMENTED</div>
+        </div>
+      </section>
+
+      <!-- ── SETTINGS PAGE ── -->
+      <section class="page hidden" id="page-settings" data-page="settings">
+        <div class="coming-soon">
+          <div class="coming-soon-icon">◧</div>
+          <div class="coming-soon-title">Settings</div>
+          <div class="coming-soon-body">Device naming, reporting interval, and geofence configuration will be available here.</div>
+          <div class="coming-soon-tag">NOT YET IMPLEMENTED</div>
+        </div>
+      </section>
+
+    </main>
+
+    <!-- Fix Detail Drawer -->
+    <aside class="fix-drawer" id="fix-drawer" aria-hidden="true">
+      <div class="drawer-header">
+        <span class="drawer-title">Fix detail</span>
+        <button class="drawer-close" id="drawer-close" aria-label="Close">✕</button>
+      </div>
+      <div class="drawer-body" id="drawer-body">
+        <!-- populated by JS -->
+      </div>
+    </aside>
+
+  </div><!-- .app-shell -->
+
+  <script type="module" src="/js/app.js"></script>
+</body>
+</html>
