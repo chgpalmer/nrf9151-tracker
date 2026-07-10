@@ -17,12 +17,12 @@ board's USB is brought across the WSL2 boundary once with
 curl -fsSL https://raw.githubusercontent.com/chgpalmer/nrf9151-tracker/main/setup.sh | bash
 cd nrf9151-tracker-ws/nrf9151-tracker
 make setup-tools               # host tools: nrfutil, usbip, tio
-make setup-host                # server tools: mosquitto, Python deps
+make setup-host                # server tools: Python deps (aiocoap, zcbor)
 make build                     # build the default app (tracker), non-secure
 make windows-usb-passthrough   # attach the J-Link into WSL (usbipd)
 make flash
 make uart                      # stream the serial console
-make demo                      # run local MQTT broker + server + sim
+make demo                      # run local CoAP server + web map + sim
 ./smoke.sh                     # check both flows: make build + make demo
 ```
 
@@ -41,12 +41,12 @@ cp env.template .env
 
 | Variable | Used by | Purpose |
 |---|---|---|
-| `TRACKER_BROKER_HOST` | `make build APP=tracker` | MQTT broker the physical device connects to over LTE — set to your server's hostname/IP. Default `test.mosquitto.org`. |
-| `TRACKER_BROKER_PORT` | `make build APP=tracker` | Broker port (default `1883`). |
+| `TRACKER_SERVER_HOST` | `make build APP=tracker` | CoAP server the physical device sends to over LTE (`coap://HOST:PORT/obs`, UDP) — set to your server's hostname/IP. |
+| `TRACKER_SERVER_PORT` | `make build APP=tracker` | CoAP UDP port (default `5683`). |
 | `CADDY_DOMAIN` | `make serve` | Domain for auto-HTTPS; empty serves plain HTTP by IP. |
 
 Precedence is **CLI > `.env` > built-in default**, e.g. `make build APP=tracker
-TRACKER_BROKER_HOST=noil.uk` overrides `.env` for one build. `.env` is
+TRACKER_SERVER_HOST=noil.uk` overrides `.env` for one build. `.env` is
 git-ignored; `env.template` is the committed reference.
 
 ## USB passthrough (one-time)
@@ -107,7 +107,7 @@ make build flash APP=gnss BOARD=nrf9151dk/nrf9151/ns
 `make serve` runs the full stack behind [Caddy](https://caddyserver.com/) as a
 reverse proxy. The FastAPI app binds `127.0.0.1` only; Caddy (a systemd service)
 is the sole public face. First run installs Caddy and opens the firewall
-(80/443/1883) automatically.
+(80/443 TCP + 5683 UDP) automatically.
 
 ```sh
 make serve                      # public HTTP by IP (works before DNS is set up)
@@ -120,9 +120,31 @@ make serve CADDY_DOMAIN=noil.uk # public HTTPS: Caddy gets a Let's Encrypt cert
   this host. Caddy fetches + auto-renews the cert; no manual certificate steps.
 
 Caddy runs as a persistent service, so HTTPS stays up across `Ctrl-C` and reboots
-(`Ctrl-C` on `make serve` only stops the app + broker + ingest). Requirements:
+(`Ctrl-C` on `make serve` only stops the app + CoAP ingest). Requirements:
 the domain must resolve to this host, and OCI/cloud security lists must allow
-**80** (HTTP + ACME), **443** (HTTPS), and **1883** (MQTT for real devices).
+**80** (HTTP + ACME), **443** (HTTPS), and **UDP 5683** (CoAP for real devices).
+
+## Wire protocol
+
+Reports go as **CBOR in non-confirmable CoAP POSTs over UDP** (`coap://server:5683/obs`).
+The schema lives in one place — `proto/tracker.cddl` — and both sides consume it:
+the firmware's encoders are generated from it ([zcbor](https://github.com/NordicSemiconductor/zcbor),
+already a west module of this workspace), and the CoAP server decodes/validates
+against the same file at runtime, so the two cannot drift apart silently.
+
+```sh
+vi proto/tracker.cddl          # edit the schema (never the generated C)
+make proto                     # regenerate apps/tracker/src/proto/  (committed)
+```
+
+Why this transport: a GPS report is **96 B on air with no downlink** (49 B CBOR +
+19 B CoAP + UDP/IP) vs ~161 B up + a ~40 B TCP ACK down for the old MQTT/JSON path.
+Reports carry the RFC 7967 No-Response option, and the firmware sets `SO_RAI`
+(`RAI_LAST`) before each send — with nothing coming back, the modem releases the
+radio connection immediately after the datagram, which is also what keeps GNSS
+acquisition windows intact. Note the ingest is **anonymous and unauthenticated**
+(as the MQTT broker was); DTLS-PSK via the modem's offloaded sockets is the
+upgrade path when that starts to matter.
 
 ## Apps
 
@@ -141,12 +163,14 @@ nrf9151-tracker-ws/          workspace root (created by setup.sh)
     Makefile            shared config + cross-cutting entry points (demo, setup-venv)
     setup.sh            one-line bootstrap (curl | bash)
     smoke.sh            smoke test: make build + make demo end-to-end
-    env.template        copy to .env for host-specific config (broker, domain)
+    env.template        copy to .env for host-specific config (server, domain)
+    proto/
+      tracker.cddl      wire schema — single source for fw encoders + server decode
     mk/
-      fw.mk             firmware/Zephyr targets (build, flash, debug, sim)
-      server.mk         server/host services (broker, ingest, web, Caddy)
+      fw.mk             firmware/Zephyr targets (build, flash, debug, sim, proto)
+      server.mk         server/host services (CoAP ingest, web, Caddy)
     apps/<name>/        CMakeLists.txt, prj.conf, src/main.c
-    server/             Python MQTT ingest, FastAPI web map
+    server/             Python CoAP ingest (aiocoap + zcbor), FastAPI web map
     scripts/
       setup-system.sh   installs the Zephyr apt build deps
       setup-tools.sh    installs nrfutil / usbip / tio

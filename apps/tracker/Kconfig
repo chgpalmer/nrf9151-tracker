@@ -6,7 +6,7 @@ config TRACKER_LOG_LEVEL
 	range 0 4
 
 config TRACKER_POST_INTERVAL_S
-	int "MQTT publish interval in seconds"
+	int "Publish interval in seconds"
 	default 10
 	range 1 3600
 
@@ -15,20 +15,18 @@ config TRACKER_GPS_STALE_S
 	default 30
 	range 10 3600
 
-config TRACKER_MQTT_BROKER_HOST
-	string "MQTT broker hostname or IP"
-	default "test.mosquitto.org"
-
-config TRACKER_MQTT_BROKER_PORT
-	int "MQTT broker port"
-	default 1883
-	range 1 65535
-
-config TRACKER_MQTT_TOPIC_PREFIX
-	string "MQTT topic prefix"
-	default "trackers"
+config TRACKER_SERVER_HOST
+	string "CoAP server hostname or IP"
+	default "127.0.0.1"
 	help
-	  Topics are built at runtime as <prefix>/<device_id>/position.
+	  Where observations are POSTed (coap://HOST:PORT/obs). The default suits
+	  the native_sim demo; hardware builds set it via .env
+	  (TRACKER_SERVER_HOST).
+
+config TRACKER_SERVER_PORT
+	int "CoAP server UDP port"
+	default 5683
+	range 1 65535
 
 config TRACKER_LOC_CN0_MIN_DBHZ
 	int "C/N0 floor for a satellite to count as usable (dB-Hz)"

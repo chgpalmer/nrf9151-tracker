@@ -32,8 +32,9 @@ enum loc_state {
 	/* Registered; get one coarse serving-cell position onto the map before
 	 * handing the radio to GNSS (which may then go quiet for minutes). */
 	LOC_REPORT_CELL,
-	/* Hunting ephemeris. No publishes at all: with the long MQTT keepalive,
-	 * zero application traffic means PSM parks LTE and GNSS owns the radio. */
+	/* Hunting ephemeris. No publishes at all: UDP is silent between sends,
+	 * so zero application traffic means PSM parks LTE and GNSS owns the
+	 * radio. */
 	LOC_GNSS_ACQUIRE,
 	/* Fix in hand and ephemeris visible. Re-fixes are hot starts (seconds),
 	 * so LTE may transmit freely; publishes carry the GNSS position. */
@@ -51,7 +52,7 @@ struct loc_status {
 
 	/* Should GNSS be running at all? False while unregistered. */
 	bool gnss_wanted;
-	/* May main.c publish (and attempt MQTT connects)? False in ACQUIRE:
+	/* May main.c publish (and do socket setup)? False in ACQUIRE:
 	 * application silence is what hands the radio to GNSS. */
 	bool publish_allowed;
 	/* What to publish: serving cell (true) or the GNSS fix (false). */

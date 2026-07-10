@@ -3,7 +3,6 @@ build/
 .venv/
 .env
 server/*.db
-server/mosquitto.conf
 server/opencellid/
 server/__pycache__/
 apps/tracker/boards/native_sim.conf

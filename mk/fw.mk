@@ -26,15 +26,27 @@ SIM_BUILD     := build/tracker-sim
 SIM_DEVICE_ID ?= sim-dev-1
 SIM           := TRACKER_DEVICE_ID=$(SIM_DEVICE_ID) $(SIM_BUILD)/tracker/zephyr/zephyr.exe
 
-# Point the physical tracker firmware at the configured broker. Only applied
-# when building the tracker app; empty (harmless) for every other app.
+# Point the physical tracker firmware at the configured CoAP server. Only
+# applied when building the tracker app; empty (harmless) for every other app.
 ifeq ($(APP),tracker)
-BUILD_DEFINES := -DCONFIG_TRACKER_MQTT_BROKER_HOST=\"$(TRACKER_BROKER_HOST)\" \
-                 -DCONFIG_TRACKER_MQTT_BROKER_PORT=$(TRACKER_BROKER_PORT)
+BUILD_DEFINES := -DCONFIG_TRACKER_SERVER_HOST=\"$(TRACKER_SERVER_HOST)\" \
+                 -DCONFIG_TRACKER_SERVER_PORT=$(TRACKER_SERVER_PORT)
 endif
 
 .PHONY: setup setup-system setup-zephyr setup-tools windows-usb-passthrough \
-        build flash recover uart gdb clean sim run-sim check-workspace
+        build flash recover uart gdb clean sim run-sim check-workspace proto
+
+# Regenerate the CBOR encoders from the wire schema. The output is committed
+# (apps/tracker/src/proto/), so firmware builds don't need the zcbor CLI; run
+# this after editing proto/tracker.cddl. The CLI comes from the workspace's
+# own zcbor module (make setup-host installs it), keeping the generator and
+# the on-target zcbor runtime the same version.
+proto:
+> @test -x $(VENV)/bin/zcbor || { echo "Run: make setup-host (installs zcbor CLI)"; exit 1; }
+> $(VENV)/bin/zcbor code -c proto/tracker.cddl -e -t gps_obs cell_obs \
+>   --oc apps/tracker/src/proto/tracker_encode.c \
+>   --oh apps/tracker/src/proto/tracker_encode.h
+> @echo "regenerated apps/tracker/src/proto/ from proto/tracker.cddl"
 
 # One-time firmware setup: pull SDK/deps + install host build tools.
 setup: setup-zephyr setup-tools
@@ -107,7 +119,7 @@ clean:
 # hardware TRACKER_BROKER_HOST used by `make build APP=tracker`.
 sim: | check-workspace
 > $(WEST) build -p auto -b native_sim/native/64 apps/tracker -d $(SIM_BUILD) \
->   -DCONFIG_TRACKER_MQTT_BROKER_HOST=\"$(BROKER_HOST)\"
+>   -DCONFIG_TRACKER_SERVER_HOST=\"$(SIM_SERVER_HOST)\"
 > @echo "Sim built: $(SIM_BUILD)/tracker/zephyr/zephyr.exe"
 > @echo "Run: make run-sim  (override device: make run-sim SIM_DEVICE_ID=sim-dev-2)"
 

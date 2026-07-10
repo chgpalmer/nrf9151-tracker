@@ -1,9 +1,8 @@
-# Server/host services: MQTT broker, SQLite ingest, web map, Caddy front.
+# Server/host services: CoAP ingest, SQLite store, web map, Caddy front.
 # (The native_sim build lives in mk/fw.mk; the demo entry point in Makefile.)
 #
 # Override on the command line:
-#   BROKER_HOST=localhost     broker the ingest connects to
-#   MQTT_PORT=1883            broker port
+#   COAP_PORT=5683            CoAP ingest UDP port
 #   HTTP_PORT=8080            web map port
 #   CADDY_DOMAIN=noil.uk      empty -> HTTP on :80 by IP; set -> HTTPS for domain
 #
@@ -12,16 +11,13 @@
 # you can reach it by public IP while DNS is still pending. Set CADDY_DOMAIN to
 # your domain once it resolves to this host and Caddy gets a Let's Encrypt cert
 # automatically (HTTPS + www + auto-renew).
+#
+# The CoAP ingest is NOT proxied by Caddy (it proxies HTTP, this is UDP): the
+# ingest binds all interfaces itself and open-ports admits UDP 5683.
 
-MQTT_PORT  ?= 1883
-MQTT_TOPIC ?= trackers/\#
+COAP_PORT  ?= 5683
 HTTP_PORT  ?= 8080
 CADDYFILE  := /etc/caddy/Caddyfile
-# Address mosquitto listens on. Loopback by default so `make demo` (sim on the
-# same host) never exposes a broker; `serve` overrides it to 0.0.0.0 because a
-# real device dials in from the internet. Generated config, git-ignored.
-MQTT_BIND  ?= 127.0.0.1
-MOSQ_CONF  := server/mosquitto.conf
 
 # OpenCelliD cell-tower DB for GPS-less location fallback.
 # CELL_MCC: MCC files to download (space-separated). Default = UK (234,730,748).
@@ -31,20 +27,16 @@ CELL_CSV_DIR     ?= server/opencellid
 CELL_MCC         ?= 234 730 748
 OPENCELLID_TOKEN ?=
 
-INGEST := $(VENV)/bin/python3 server/ingest.py --host $(BROKER_HOST) --port $(MQTT_PORT) --topic '$(MQTT_TOPIC)'
-# Bind the app to localhost only — Caddy is the sole public face.
-WEB    := $(VENV)/bin/uvicorn app:app --host 127.0.0.1 --port $(HTTP_PORT) --app-dir server
+COAP := $(VENV)/bin/python3 -u server/coap_server.py --port $(COAP_PORT)
+# Bind the app to localhost only — Caddy is the sole public face for HTTP.
+WEB  := $(VENV)/bin/uvicorn app:app --host 127.0.0.1 --port $(HTTP_PORT) --app-dir server
 
 .PHONY: setup-host setup-caddy open-ports caddy \
-        broker ingest server serve stop cells update-cells
+        coap-server server serve stop cells update-cells
 
-# One-time server setup. Idempotent: skips apt when mosquitto is already on
-# PATH (like setup-system does), so re-running is cheap and prompts no sudo.
+# One-time server setup: Python deps only (the MQTT-era mosquitto is gone —
+# the CoAP ingest is a plain Python process on UDP).
 setup-host: setup-venv
-> @if ! command -v mosquitto >/dev/null 2>&1; then \
->    echo "Installing mosquitto..."; \
->    sudo apt-get install -y mosquitto mosquitto-clients; \
->  else echo "mosquitto already installed"; fi
 > $(VENV)/bin/pip install --quiet -r server/requirements.txt
 > @echo "Host tools ready."
 
@@ -89,17 +81,21 @@ setup-caddy:
 >    sudo apt-get update && sudo apt-get install -y caddy; \
 >  fi
 
-# Open the public ports (80 HTTP, 443 HTTPS, 1883 MQTT) in the host firewall.
-# The default INPUT chain REJECTs anything but SSH, so these must be inserted
-# before the REJECT rule. Idempotent (-C guards duplicates) and persisted.
+# Open the public ports in the host firewall: 80/443 TCP (web via Caddy) and
+# the CoAP ingest's UDP port. The default INPUT chain REJECTs anything but
+# SSH, so these must be inserted before the REJECT rule. Idempotent (-C guards
+# duplicates) and persisted. Remember the cloud provider's security list must
+# admit UDP $(COAP_PORT) too — an iptables rule can't help with that.
 open-ports:
-> @for p in 80 443 1883; do \
+> @for p in 80 443; do \
 >    sudo iptables -C INPUT -p tcp --dport $$p -j ACCEPT 2>/dev/null \
 >      || sudo iptables -I INPUT 4 -p tcp --dport $$p -j ACCEPT; \
 >  done
+> @sudo iptables -C INPUT -p udp --dport $(COAP_PORT) -j ACCEPT 2>/dev/null \
+>    || sudo iptables -I INPUT 4 -p udp --dport $(COAP_PORT) -j ACCEPT
 > @sudo netfilter-persistent save >/dev/null 2>&1 \
 >    || sudo sh -c 'iptables-save > /etc/iptables/rules.v4'
-> @echo "ports 80/443/1883 open + persisted"
+> @echo "ports 80/443 tcp + $(COAP_PORT) udp open + persisted"
 
 # Write the Caddyfile for the current mode and (re)load the caddy service.
 #   CADDY_DOMAIN unset -> HTTP on :80, reachable by public IP
@@ -118,67 +114,37 @@ caddy: setup-caddy
 > @sudo systemctl reload caddy 2>/dev/null || sudo systemctl restart caddy
 > @echo "caddy (re)loaded"
 
-# Start mosquitto in the background and wait until the port accepts a TCP
-# connection before returning. Any distro mosquitto.service auto-started by
-# apt would squat 1883, so stop it and reclaim the port first.
-#
-# mosquitto 2.x run without a config file starts in "local only mode": it binds
-# 127.0.0.1 and no remote client can ever reach it. `mosquitto -p N` does NOT
-# change that -- the port is right, the bind address is not. So we always write
-# an explicit listener. MQTT_BIND stays on loopback for `make demo` (the sim is
-# a local process) and `serve` widens it to 0.0.0.0 for real devices.
-#
-# The 127.0.0.1 readiness probe below passes in either mode, which is exactly why
-# a loopback-only broker looked healthy while the DK timed out against it.
-broker:
-> @which mosquitto >/dev/null 2>&1 || { echo "Run: make setup-host"; exit 1; }
-> @sudo systemctl stop mosquitto 2>/dev/null || true
-> @fuser -k $(MQTT_PORT)/tcp 2>/dev/null || true
-> @sleep 0.3
-> @printf 'listener %s %s\nallow_anonymous true\n' '$(MQTT_PORT)' '$(MQTT_BIND)' > $(MOSQ_CONF)
-> @nohup mosquitto -c $(MOSQ_CONF) > /tmp/mosquitto-$(MQTT_PORT).log 2>&1 &
-> @for i in {1..50}; do \
->    (exec 3<>/dev/tcp/127.0.0.1/$(MQTT_PORT)) 2>/dev/null && { exec 3>&-; break; }; \
->    sleep 0.1; \
->  done; \
->  if (exec 3<>/dev/tcp/127.0.0.1/$(MQTT_PORT)) 2>/dev/null; then \
->    exec 3>&-; echo "mosquitto started on $(MQTT_BIND):$(MQTT_PORT)"; \
->  else echo "mosquitto failed — see /tmp/mosquitto-$(MQTT_PORT).log"; exit 1; fi
-
-ingest:
+# Run the CoAP ingest in the foreground (demo/serve background it themselves).
+coap-server:
 > @test -x $(VENV)/bin/python3 || { echo "Run: make setup-host"; exit 1; }
-> $(INGEST)
+> $(COAP)
 
 server:
 > @test -x $(VENV)/bin/uvicorn || { echo "Run: make setup-host"; exit 1; }
 > $(WEB)
 
-# Real-server stack: firewall + broker + Caddy front + ingest (bg) + web (fg).
+# Real-server stack: firewall + Caddy front + CoAP ingest (bg) + web (fg).
 # Caddy runs as a persistent systemd service (stays up across Ctrl-C/disconnect);
-# Ctrl-C here stops the app + broker + ingest via the EXIT trap.
+# Ctrl-C here stops the app + ingest via the EXIT trap.
 #   make serve                 public HTTP by IP  (default, works without DNS)
 #   make serve CADDY_DOMAIN=noil.uk   public HTTPS once DNS points here
-# Target-specific, and GNU make passes it down to the `broker` prerequisite.
-# This is the one place the broker is meant to face the internet.
-serve: MQTT_BIND := 0.0.0.0
-serve: open-ports broker caddy
+serve: open-ports caddy
 > @trap '$(MAKE) --no-print-directory stop' EXIT; \
->  $(INGEST) & echo "ingest started (pid $$!)"; \
+>  $(COAP) & echo "coap ingest started (pid $$!)"; \
 >  if [ -n "$(CADDY_DOMAIN)" ]; then \
->    echo "public: https://$(CADDY_DOMAIN)"; \
+>    echo "public: https://$(CADDY_DOMAIN)  +  coap://$(CADDY_DOMAIN):$(COAP_PORT)"; \
 >  else \
 >    echo "public: http://$$(curl -s --max-time 3 https://api.ipify.org 2>/dev/null || echo YOUR_PUBLIC_IP)"; \
 >  fi; \
 >  echo "app on 127.0.0.1:$(HTTP_PORT)  —  Ctrl-C to stop app (Caddy stays up)"; \
 >  $(WEB)
 
-# Stop the listeners by port (server 8080, broker 1883) and kill the
-# backgrounded sim + ingest processes. ingest is an MQTT *client* with no
-# listening socket, so fuser can't find it — match it by argv instead. The
-# bracket trick ('[z]ephyr.exe') stops pkill matching its own argv.
+# Stop the listeners (web by TCP port, CoAP ingest by UDP port) and kill the
+# backgrounded sim. The bracket trick ('[z]ephyr.exe') stops pkill matching
+# its own argv.
 stop:
 > @fuser -k $(HTTP_PORT)/tcp 2>/dev/null && echo "stopped server (port $(HTTP_PORT))" || true
-> @fuser -k $(MQTT_PORT)/tcp  2>/dev/null && echo "stopped broker (port $(MQTT_PORT))" || true
+> @fuser -k $(COAP_PORT)/udp 2>/dev/null && echo "stopped coap ingest (udp $(COAP_PORT))" || true
 > @pkill -f '[z]ephyr.exe' 2>/dev/null && echo "stopped sim(s)" || true
-> @pkill -f '[s]erver/ingest.py' 2>/dev/null && echo "stopped ingest" || true
+> @pkill -f '[c]oap_server.py' 2>/dev/null && echo "stopped coap ingest" || true
 > @echo "cleanup done"

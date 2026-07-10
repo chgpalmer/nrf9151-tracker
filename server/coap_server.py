@@ -1,29 +1,39 @@
 #!/usr/bin/env python3
 """
-MQTT → SQLite ingest.
+CoAP → SQLite ingest.
 
-Subscribes to trackers/<device_id>/<kind> and stores position fixes.
-The server stamps its own receive time (received_ts, Unix epoch) — the
-firmware payload carries no timestamp.
+Receives non-confirmable POSTs on /obs (UDP 5683) carrying CBOR observations
+and stores position fixes. The wire format is defined once, in
+proto/tracker.cddl: this server decodes and validates against that same file
+via the zcbor package, so firmware and server cannot drift apart silently.
+The server stamps its own receive time (received_ts, Unix epoch).
+
+Devices send the RFC 7967 No-Response option: replying would page the tracker
+after RAI already released its radio connection, costing it the whole saving.
+aiocoap honours the option, so a well-formed report produces no downlink.
 
 Usage:
-  python3 server/ingest.py [--host HOST] [--port PORT] [--topic TOPIC] [--db DB]
+  python3 server/coap_server.py [--port PORT] [--db DB] [--cells-db DB]
 """
 
 import argparse
-import json
+import asyncio
 import math
 import sqlite3
 import sys
 import time
 from pathlib import Path
 
-import paho.mqtt.client as mqtt
+import aiocoap
+import aiocoap.resource as resource
+from zcbor import DataTranslator, CddlValidationError
 
 DB_DEFAULT = Path(__file__).parent / "tracker.db"
 
 # Local OpenCelliD lookup DB (built by build_cells.py from *.csv.gz exports).
 CELLS_DB_DEFAULT = Path(__file__).parent / "cells.db"
+
+CDDL_PATH = Path(__file__).parent.parent / "proto" / "tracker.cddl"
 
 
 def init_db(path: Path) -> sqlite3.Connection:
@@ -51,34 +61,31 @@ def init_db(path: Path) -> sqlite3.Connection:
     return conn
 
 
-def handle_position(conn: sqlite3.Connection, device_id: str, payload: str) -> None:
+def handle_gps(conn: sqlite3.Connection, g) -> None:
+    """Store one gps_obs (already schema-validated). Wire units are scaled
+    integers (see tracker.cddl); the DB keeps the human units the web UI
+    already expects: degrees, metres, m/s."""
     received_ts = int(time.time())
-    try:
-        d = json.loads(payload)
-    except json.JSONDecodeError:
-        print(f"[ingest] bad JSON on {device_id}: {payload!r}", file=sys.stderr)
-        return
-
     conn.execute(
         """INSERT INTO positions
            (device_id, received_ts, source, lat, lon, alt, acc, spd, hdg, sats)
            VALUES (?, ?, 'gps', ?, ?, ?, ?, ?, ?, ?)""",
         (
-            device_id, received_ts,
-            d.get("lat"), d.get("lon"), d.get("alt"), d.get("acc"),
-            d.get("spd"), d.get("hdg"), d.get("sats"),
+            g.device_id_m, received_ts,
+            g.lat_e7_m / 1e7, g.lon_e7_m / 1e7,
+            g.alt_dm_m / 10.0, g.acc_dm_m / 10.0,
+            g.spd_dms_m / 10.0, g.hdg_ddeg_m / 10.0, g.sats_m,
         ),
     )
     conn.commit()
-    print(f"[ingest] {device_id} gps  {d.get('lat'):.6f}, {d.get('lon'):.6f}  "
-          f"spd {d.get('spd')}m/s  hdg {d.get('hdg')}°")
+    print(f"[coap] {g.device_id_m} gps  {g.lat_e7_m / 1e7:.6f}, "
+          f"{g.lon_e7_m / 1e7:.6f}  acc {g.acc_dm_m / 10.0:.1f}m  "
+          f"fix_age {g.fix_age_s_m}s")
 
 
-def resolve_cell(payload: dict, cells: sqlite3.Connection | None):
+def resolve_cell(mcc, mnc, tac, cid, cells: sqlite3.Connection | None):
     """Resolve a serving cell to (lat, lon, accuracy, how) via the local
-    OpenCelliD DB. Returns None on miss or if no DB is loaded. Neighbor cells
-    are not used (OpenCelliD keys on full mcc/net/area/cell identity, which
-    neighbors lack).
+    OpenCelliD DB. Returns None on miss or if no DB is loaded.
 
     Two strategies, in order:
 
@@ -94,8 +101,6 @@ def resolve_cell(payload: dict, cells: sqlite3.Connection | None):
     """
     if cells is None:
         return None
-    mcc, mnc = payload.get("mcc"), payload.get("mnc")
-    tac, cid = payload.get("tac"), payload.get("cid")
 
     row = cells.execute(
         "SELECT lat, lon, range FROM cells "
@@ -108,8 +113,6 @@ def resolve_cell(payload: dict, cells: sqlite3.Connection | None):
         # falling back to a coarse default when absent.
         return lat, lon, float(rng) if rng else 2000.0, "exact"
 
-    if cid is None or mcc is None or mnc is None:
-        return None
     enb = cid >> 8
     rows = cells.execute(
         "SELECT lat, lon, range FROM cells "
@@ -137,20 +140,14 @@ def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return 2 * r * math.asin(math.sqrt(a))
 
 
-def handle_cell(conn: sqlite3.Connection, device_id: str, payload: str,
+def handle_cell(conn: sqlite3.Connection, c,
                 cells: sqlite3.Connection | None) -> None:
     received_ts = int(time.time())
-    try:
-        d = json.loads(payload)
-    except json.JSONDecodeError:
-        print(f"[ingest] bad cell JSON on {device_id}: {payload!r}", file=sys.stderr)
-        return
 
-    fix = resolve_cell(d, cells)
+    fix = resolve_cell(c.mcc_m, c.mnc_m, c.tac_m, c.cell_id_m, cells)
     if fix is None:
-        print(f"[ingest] {device_id} cell  unresolved "
-              f"(mcc={d.get('mcc')} mnc={d.get('mnc')} "
-              f"tac={d.get('tac')} cid={d.get('cid')})")
+        print(f"[coap] {c.device_id_m} cell  unresolved "
+              f"(mcc={c.mcc_m} mnc={c.mnc_m} tac={c.tac_m} cid={c.cell_id_m})")
         return
 
     lat, lon, acc, how = fix
@@ -158,78 +155,78 @@ def handle_cell(conn: sqlite3.Connection, device_id: str, payload: str,
         """INSERT INTO positions
            (device_id, received_ts, source, lat, lon, alt, acc, spd, hdg, sats)
            VALUES (?, ?, 'cell', ?, ?, NULL, ?, NULL, NULL, NULL)""",
-        (device_id, received_ts, lat, lon, acc),
+        (c.device_id_m, received_ts, lat, lon, acc),
     )
     conn.commit()
-    print(f"[ingest] {device_id} cell  {lat:.6f}, {lon:.6f}  acc {acc:.0f}m ({how})")
+    print(f"[coap] {c.device_id_m} cell  {lat:.6f}, {lon:.6f}  "
+          f"acc {acc:.0f}m ({how})")
 
 
-def main():
-    parser = argparse.ArgumentParser(description="MQTT → SQLite ingest")
-    parser.add_argument("--host",  default="localhost")
-    parser.add_argument("--port",  default=1883, type=int)
-    parser.add_argument("--topic", default="trackers/#")
-    parser.add_argument("--db",    default=str(DB_DEFAULT))
-    parser.add_argument("--cells-db", default=str(CELLS_DB_DEFAULT),
-                        help="OpenCelliD lookup DB (build with build_cells.py)")
-    args = parser.parse_args()
+class ObsResource(resource.Resource):
+    def __init__(self, conn, cells, observation):
+        super().__init__()
+        self.conn = conn
+        self.cells = cells
+        self.observation = observation
 
+    async def render_post(self, request):
+        try:
+            obs = self.observation.decode_str(request.payload)
+        except (CddlValidationError, Exception) as e:
+            print(f"[coap] rejected payload ({len(request.payload)} B): {e}",
+                  file=sys.stderr)
+            return aiocoap.Message(code=aiocoap.Code.BAD_REQUEST)
+
+        if obs.union_choice == "gps_obs_m":
+            handle_gps(self.conn, obs.gps_obs_m)
+        else:
+            handle_cell(self.conn, obs.cell_obs_m, self.cells)
+
+        # Devices set No-Response, so aiocoap drops this on the floor for
+        # them; it still answers curious human clients (coap-client etc).
+        return aiocoap.Message(code=aiocoap.Code.CHANGED)
+
+
+async def serve(args):
     conn = init_db(Path(args.db))
-    print(f"[ingest] db: {args.db}")
+    print(f"[coap] db: {args.db}")
 
     cells = None
     if Path(args.cells_db).exists():
         cells = sqlite3.connect(f"file:{args.cells_db}?mode=ro", uri=True,
                                 check_same_thread=False)
         n = cells.execute("SELECT COUNT(*) FROM cells").fetchone()[0]
-        print(f"[ingest] cell DB: {args.cells_db} ({n} cells)")
+        print(f"[coap] cell DB: {args.cells_db} ({n} cells)")
     else:
-        print(f"[ingest] no cell DB at {args.cells_db} — cell fixes won't resolve "
-              f"(run: make cells)")
+        print(f"[coap] no cell DB at {args.cells_db} — cell fixes won't "
+              f"resolve (run: make cells)")
 
-    def on_connect(client, userdata, flags, reason_code, properties):
-        if reason_code == 0:
-            print(f"[ingest] connected to {args.host}:{args.port} — "
-                  f"subscribing to {args.topic!r}")
-            client.subscribe(args.topic)
-        else:
-            print(f"[ingest] connection refused: {reason_code}", file=sys.stderr)
+    # One schema for both sides: the firmware's encoders are generated from
+    # this same file (make proto).
+    translator = DataTranslator.from_cddl(CDDL_PATH.read_text(), 16)
+    observation = translator.my_types["observation"]
+    print(f"[coap] schema: {CDDL_PATH}")
 
-    def on_message(client, userdata, msg):
-        # topic: trackers/<device_id>/<kind>
-        parts = msg.topic.split("/")
-        if len(parts) != 3:
-            return
-        _, device_id, kind = parts
-        payload = msg.payload.decode("utf-8", errors="replace")
-        if kind == "position":
-            handle_position(conn, device_id, payload)
-        elif kind == "cell":
-            handle_cell(conn, device_id, payload, cells)
-        # status/event reserved for later
+    site = resource.Site()
+    site.add_resource(["obs"], ObsResource(conn, cells, observation))
 
-    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-    client.on_connect = on_connect
-    client.on_message = on_message
+    await aiocoap.Context.create_server_context(site, bind=("::", args.port))
+    print(f"[coap] listening on UDP {args.port} (POST /obs)")
+    await asyncio.get_running_loop().create_future()  # run forever
 
-    # Broker may not be up yet (e.g. started moments earlier). Retry briefly.
-    for attempt in range(30):
-        try:
-            client.connect(args.host, args.port, keepalive=60)
-            break
-        except (ConnectionRefusedError, OSError) as e:
-            if attempt == 29:
-                print(f"[ingest] cannot reach broker {args.host}:{args.port}: {e}",
-                      file=sys.stderr)
-                return
-            time.sleep(0.5)
+
+def main():
+    parser = argparse.ArgumentParser(description="CoAP → SQLite ingest")
+    parser.add_argument("--port", default=5683, type=int)
+    parser.add_argument("--db", default=str(DB_DEFAULT))
+    parser.add_argument("--cells-db", default=str(CELLS_DB_DEFAULT),
+                        help="OpenCelliD lookup DB (build with build_cells.py)")
+    args = parser.parse_args()
 
     try:
-        client.loop_forever()
+        asyncio.run(serve(args))
     except KeyboardInterrupt:
-        print("\n[ingest] stopped")
-    finally:
-        conn.close()
+        print("\n[coap] stopped")
 
 
 if __name__ == "__main__":

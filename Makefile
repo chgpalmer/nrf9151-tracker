@@ -35,11 +35,11 @@ WEST := $(VENV)/bin/west
 # Keep comments on their own lines: make preserves the space before a trailing
 # `#`, so `VAR ?= value # note` yields "value " and breaks quoted -D defines.
 
-# Local plumbing: the broker that ingest and the sim talk to.
-BROKER_HOST         ?= localhost
-# Where the physical device connects over LTE.
-TRACKER_BROKER_HOST ?= test.mosquitto.org
-TRACKER_BROKER_PORT ?= 1883
+# Local plumbing: where the sim sends its CoAP reports (the demo server).
+SIM_SERVER_HOST     ?= 127.0.0.1
+# Where the physical device sends over LTE (coap://HOST:PORT/obs).
+TRACKER_SERVER_HOST ?= 127.0.0.1
+TRACKER_SERVER_PORT ?= 5683
 # Empty -> Caddy serves HTTP by IP; set -> HTTPS for the domain.
 CADDY_DOMAIN        ?=
 
@@ -68,13 +68,14 @@ setup-venv:
 >   echo "venv exists at $(VENV)"; \
 > fi
 
-# Full localhost end-to-end: broker + ingest + web + one sim, one command.
+# Full localhost end-to-end: CoAP ingest + web + one sim, one command.
 # Cross-cutting: builds the sim (fw.mk) if needed, then runs the server stack
 # (server.mk). Ctrl-C tears the whole stack down.
-demo: broker
+demo:
 > @test -f $(SIM_BUILD)/tracker/zephyr/zephyr.exe || $(MAKE) --no-print-directory sim
 > @trap '$(MAKE) --no-print-directory stop' EXIT; \
->  $(INGEST) & echo "ingest started (pid $$!)"; \
+>  $(COAP) & echo "coap ingest started (pid $$!)"; \
+>  sleep 0.5; \
 >  $(SIM) > /dev/null 2>&1 & echo "sim '$(SIM_DEVICE_ID)' started (pid $$!)"; \
 >  echo "map at http://localhost:$(HTTP_PORT)  —  Ctrl-C to stop"; \
 >  $(WEB)
@@ -87,8 +88,8 @@ help:
 > @echo "  make setup                    one-time firmware setup (SDK + host tools)"
 > @echo "  make build [APP=] [BOARD=]    build firmware app"
 > @echo "  make flash [APP=]             flash firmware to the DK"
-> @echo "  make setup-host               one-time server setup (mosquitto + py deps)"
-> @echo "  make demo                     localhost end-to-end: broker+ingest+web+sim"
+> @echo "  make setup-host               one-time server setup (Python deps)"
+> @echo "  make demo                     localhost end-to-end: coap+web+sim"
 > @echo "  make serve                    public server via Caddy: HTTP by IP (no sim)"
 > @echo "  make serve CADDY_DOMAIN=x.uk  public server via Caddy: HTTPS for domain"
 > @echo ""
@@ -104,13 +105,15 @@ help:
 > @echo "  make run-sim [SIM_DEVICE_ID=] run the sim binary (foreground)"
 > @echo ""
 > @echo "SERVER (mk/server.mk)"
-> @echo "  make broker                   start mosquitto (background)"
-> @echo "  make ingest                   start MQTT→SQLite ingest (server/tracker.db)"
+> @echo "  make coap-server              start CoAP→SQLite ingest (UDP 5683, fg)"
 > @echo "  make server                   start FastAPI map (127.0.0.1:8080)"
 > @echo "  make setup-caddy              install Caddy (systemd HTTPS reverse proxy)"
-> @echo "  make open-ports               open firewall for 80/443/1883 (persisted)"
+> @echo "  make open-ports               open firewall 80/443 tcp + 5683 udp (persisted)"
 > @echo "  make caddy [CADDY_DOMAIN=]    write Caddyfile + reload caddy"
-> @echo "  make stop                     stop broker + server + sims (free ports)"
+> @echo "  make stop                     stop coap + server + sims (free ports)"
+> @echo ""
+> @echo "PROTOCOL"
+> @echo "  make proto                    regen CBOR encoders from proto/tracker.cddl"
 > @echo ""
 > @echo "Current: APP=$(APP)  BOARD=$(BOARD)  PORT=$(PORT)  RUNNER=$(RUNNER)"
 > @echo "Apps available: $$(ls apps 2>/dev/null | tr '\n' ' ')"
