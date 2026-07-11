@@ -71,6 +71,24 @@ def main():
                 page.click(tid)
                 page.wait_for_timeout(100)
 
+        # Cross-view selection: clicking the speed chart must open the fix
+        # drawer AND highlight the matching table row.
+        box = page.locator("#chart-speed").bounding_box()
+        if box:
+            page.mouse.click(box["x"] + box["width"] * 0.5,
+                             box["y"] + box["height"] * 0.5)
+            page.wait_for_timeout(400)
+            if page.locator("#fix-drawer.open").count() == 0:
+                problems.append("chart click did not open the fix drawer")
+            if page.locator(".ftable-table tr.sel").count() == 0:
+                problems.append("chart click did not highlight a table row")
+
+        # Day steppers must navigate without errors.
+        for tid in ("#date-prev", "#date-next"):
+            if page.locator(tid).count():
+                page.click(tid)
+                page.wait_for_timeout(400)
+
         page.wait_for_timeout(500)
 
         if args.screenshot:

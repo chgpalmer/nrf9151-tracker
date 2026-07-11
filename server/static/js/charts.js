@@ -58,6 +58,7 @@ let speedChart  = null;
 let accChart    = null;
 let chartFixes  = [];   // decimated series; parallel to both charts' data
 let onHoverCb   = null; // (fix|null) => void
+let onSelectCb  = null; // (fix) => void — click on either chart
 
 function makeChart(canvasId, color, unit) {
   const ctx = document.getElementById(canvasId);
@@ -86,6 +87,11 @@ function makeChart(canvasId, color, unit) {
         if (!onHoverCb) return;
         onHoverCb(elements.length ? chartFixes[elements[0].index] : null);
       },
+      onClick: (evt, elements) => {
+        if (onSelectCb && elements.length) {
+          onSelectCb(chartFixes[elements[0].index]);
+        }
+      },
       plugins: {
         ...CHART_DEFAULTS.plugins,
         tooltip: {
@@ -99,14 +105,34 @@ function makeChart(canvasId, color, unit) {
   });
 }
 
-export function initCharts({ onHover } = {}) {
+export function initCharts({ onHover, onSelect } = {}) {
   onHoverCb  = onHover || null;
+  onSelectCb = onSelect || null;
   speedChart = makeChart('chart-speed', TOKEN.signal, 'km/h');
   accChart   = makeChart('chart-acc',   TOKEN.amber,  'm');
 
   // Hover ends when the pointer leaves the canvas, not just the line.
   for (const c of [speedChart, accChart]) {
     if (c) c.canvas.addEventListener('mouseleave', () => onHoverCb && onHoverCb(null));
+  }
+}
+
+/**
+ * Mark the chart point for this fix as active on both charts (dot + tooltip)
+ * — the charts' half of cross-view selection sync. The series is decimated,
+ * so land on the nearest kept point by timestamp.
+ */
+export function setActiveFix(fix) {
+  if (!speedChart || !accChart || chartFixes.length === 0) return;
+  let best = 0, bestD = Infinity;
+  for (let i = 0; i < chartFixes.length; i++) {
+    const d = Math.abs(chartFixes[i].received_ts - fix.received_ts);
+    if (d < bestD) { bestD = d; best = i; }
+  }
+  for (const c of [speedChart, accChart]) {
+    c.setActiveElements([{ datasetIndex: 0, index: best }]);
+    c.tooltip.setActiveElements([{ datasetIndex: 0, index: best }], { x: 0, y: 0 });
+    c.update('none');
   }
 }
 

@@ -20,7 +20,7 @@
 import { fetchPositions }  from '/js/api.js';
 import { createMapView }   from '/js/mapview.js';
 import { createFixTable }  from '/js/fixtable.js';
-import { initCharts, updateCharts } from '/js/charts.js';
+import { initCharts, updateCharts, setActiveFix } from '/js/charts.js';
 import { open as openDrawer } from '/js/drawer.js';
 import { currentDevice, setStatus } from '/js/devices.js';
 import { fmtAcc, mpsToKph, deviceStatus } from '/js/format.js';
@@ -70,6 +70,18 @@ function todayStr() {
 
 dateInput.value = todayStr();
 dateInput.addEventListener('change', loadDay);
+
+// Prev/next day steppers; forward navigation stops at today.
+function stepDay(days) {
+  const d = new Date(`${dateInput.value}T12:00:00`); // noon dodges DST edges
+  d.setDate(d.getDate() + days);
+  const s = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  if (s > todayStr()) return;
+  dateInput.value = s;
+  loadDay();
+}
+document.getElementById('date-prev').addEventListener('click', () => stepDay(-1));
+document.getElementById('date-next').addEventListener('click', () => stepDay(1));
 
 accToggle.addEventListener('change', () => mapView && mapView.setShowAccuracy(accToggle.checked));
 arrowToggle.addEventListener('change', () => mapView && mapView.setShowArrows(arrowToggle.checked));
@@ -146,17 +158,30 @@ startH.addEventListener('keydown', e => keyNudge(e, 'start'));
 endH.addEventListener('keydown',   e => keyNudge(e, 'end'));
 
 // ── lifecycle ───────────────────────────────────────────────
+// Cross-view selection: whichever surface a fix is picked on (map marker,
+// chart click, table row), all four reflect it — map ring + pan, detail
+// drawer, chart dot + tooltip, highlighted table row.
+function selectPoint(fix) {
+  mapView.focusFix(fix);
+  openDrawer(fix);
+  setActiveFix(fix);
+  fixTable.highlight(fix);
+}
+
 export function init() {
   if (isInitialized) return;
   isInitialized = true;
 
-  mapView = createMapView('map-main', fix => openDrawer(fix));
+  mapView = createMapView('map-main', selectPoint);
   window._mapView = mapView;
   fixTable = createFixTable('fix-table', {
-    onRowClick: fix => { mapView.focusFix(fix); openDrawer(fix); },
+    onRowClick: selectPoint,
     onRowHover: fix => mapView.hoverFix(fix),
   });
-  initCharts({ onHover: fix => mapView.hoverFix(fix) });
+  initCharts({
+    onHover: fix => mapView.hoverFix(fix),
+    onSelect: selectPoint,
+  });
   buildAxis();
   loadDay();
 }
@@ -321,6 +346,8 @@ function renderChips() {
       sel = c.mode === 'trip' ? { mode: 'trip', i: c.i } : { mode: c.mode };
       renderChips();
       applyView(true);
+      // Selecting a trip is "show me this trip" — that includes its fixes.
+      if (c.mode === 'trip') fixTable.setOpen(true);
     });
     chipsEl.appendChild(b);
   }
@@ -355,6 +382,7 @@ function renderTripBands() {
       sel = { mode: 'trip', i };
       renderChips();
       applyView(true);
+      fixTable.setOpen(true);
     });
     tripsEl.appendChild(band);
   });

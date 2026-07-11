@@ -1289,3 +1289,21 @@ button { cursor: pointer; }
 
 .ftable-src.gps  { color: var(--signal); }
 .ftable-src.cell { color: var(--amber); }
+
+/* Cross-view selection: the table row matching the selected fix. */
+.ftable-table tbody tr.sel { background: var(--signal-dim); }
+.ftable-table tbody tr.sel td { color: var(--text); }
+
+/* Prev/next day steppers beside the date input. */
+.date-step {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-sec);
+  font-family: var(--font-mono);
+  font-size: 14px;
+  line-height: 1;
+  padding: 4px 8px;
+  transition: color 0.12s, border-color 0.12s;
+}
+.date-step:hover { color: var(--signal); border-color: var(--border-hi); }

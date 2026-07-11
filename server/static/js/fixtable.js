@@ -92,5 +92,27 @@ export function createFixTable(containerId, { onRowClick, onRowHover, startOpen 
     else dirty = true;
   }
 
-  return { render };
+  function setOpen(v) {
+    if (open === v) return;
+    open = v;
+    root.classList.toggle('open', open);
+    head.setAttribute('aria-expanded', String(open));
+    if (open && dirty) renderBody();
+  }
+
+  /* Mark the row for this fix as selected and scroll it into view (opening
+   * the table if needed) — the table's half of cross-view selection sync. */
+  function highlight(fix) {
+    setOpen(true);
+    if (dirty) renderBody();
+    tbody.querySelectorAll('tr.sel').forEach(tr => tr.classList.remove('sel'));
+    const i = fixes.indexOf(fix);
+    const tr = i >= 0 ? tbody.querySelector(`tr[data-i="${i}"]`) : null;
+    if (tr) {
+      tr.classList.add('sel');
+      tr.scrollIntoView({ block: 'nearest' });
+    }
+  }
+
+  return { render, setOpen, highlight };
 }
