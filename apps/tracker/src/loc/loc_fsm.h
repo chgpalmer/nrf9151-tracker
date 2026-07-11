@@ -133,6 +133,11 @@ enum loc_state {
 	 * cadence whose gaps are long enough for GNSS to *sense* the sky, so the
 	 * exit is signal-driven rather than a blind timer. */
 	LOC_CELL_LOOP,
+	/* Parked with a held fix (stationary input from motion.c). GNSS drops
+	 * to periodic position checks -- the modem sleeps between them -- and
+	 * the check that lands outside the parked radius flips the stationary
+	 * verdict, which snaps us back to REPORT_GNSS at 1 Hz. */
+	LOC_QUIESCENT,
 
 	LOC_STATE_COUNT,
 };

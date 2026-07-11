@@ -24,6 +24,7 @@
 #include <hw_id.h>
 
 #include "loc_fsm.h"
+#include "motion.h"
 #include "coap_pub.h"
 #include "obs_queue.h"
 #include "uplink.h"
@@ -471,6 +472,7 @@ int main(void)
 	struct loc_status loc;
 
 	loc_fsm_init(k_uptime_get());
+	motion_init(k_uptime_get());
 
 	for (;;) {
 		/* Wait for next PVT event (1 Hz) with a 2s timeout so the
@@ -482,10 +484,12 @@ int main(void)
 		if (pvt.flags & NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID) {
 			fix_pvt = pvt;
 			fix_pvt_ms = now;
+			motion_note_gps(pvt.latitude, pvt.longitude, now);
 		}
 
 		/* Policy first: it owns the fix-staleness and ephemeris bookkeeping. */
-		loc_fsm_update(&pvt, now, lte_connected, false, &loc);
+		loc_fsm_update(&pvt, now, lte_connected, motion_stationary(now),
+			       &loc);
 		leds_update(&loc, lte_connected);
 
 		/* Apply the FSM's GNSS mode. Runs GNSS only when the FSM says
@@ -589,6 +593,7 @@ int main(void)
 					cell_unavail = false;
 					obs_queue_add_cell(sc.mcc, sc.mnc, sc.tac,
 							   sc.cid, sc.rsrp_dbm, now);
+					motion_note_cell(sc.cid, now);
 				} else if (!cell_unavail) {
 					cell_unavail = true;
 					LOG_WRN("serving cell unavailable");
@@ -604,6 +609,13 @@ int main(void)
 			prev_state = loc.state;
 			uplink_request_flush(UPLINK_FLUSH_URGENT);
 		}
+		/* Parked = slow flush timer. Keyed on the FSM state (not the
+		 * raw verdict) so shipping only slows once actually quiesced;
+		 * the QUIESCENT->REPORT_GNSS transition urgent-flushes above,
+		 * so motion still reaches the map in seconds. */
+		uplink_set_flush_interval(loc.state == LOC_QUIESCENT
+			? (uint32_t)CONFIG_TRACKER_QUIESCENT_FLUSH_S * 1000
+			: (uint32_t)CONFIG_TRACKER_FLUSH_INTERVAL_S * 1000);
 		uplink_set_allowed(loc.publish_allowed);
 		(void)uplink_poll(now);
 	}

@@ -27,6 +27,12 @@ static volatile bool want_flush;      /* deferred flush requests land here */
 static volatile bool want_flush_log;  /* ...log-urgent ones here (rate-limited) */
 static int64_t last_flush_ms;
 static int64_t last_log_wake_ms = -LOG_WAKE_MIN_MS;
+static uint32_t flush_interval_ms = FLUSH_INTERVAL_MS;
+
+void uplink_set_flush_interval(uint32_t interval_ms)
+{
+	flush_interval_ms = interval_ms;
+}
 
 void uplink_init(const char *device_id)
 {
@@ -201,7 +207,7 @@ int uplink_poll(int64_t now_ms)
 	if (want_flush_log && now_ms - last_log_wake_ms >= LOG_WAKE_MIN_MS) {
 		due = true;
 	}
-	if (now_ms - last_flush_ms >= FLUSH_INTERVAL_MS) {
+	if (now_ms - last_flush_ms >= flush_interval_ms) {
 		due = true;
 	}
 

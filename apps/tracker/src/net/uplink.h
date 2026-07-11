@@ -62,6 +62,11 @@ int uplink_register(const struct uplink_source *src, uint8_t prio);
 /* The FSM's radio verdict (and socket readiness), refreshed every loop. */
 void uplink_set_allowed(bool allowed);
 
+/* Flush-timer period. Default CONFIG_TRACKER_FLUSH_INTERVAL_S; the main
+ * loop slows it while the tracker is parked. Takes effect from the last
+ * flush (shortening can only flush sooner, never lose data). */
+void uplink_set_flush_interval(uint32_t interval_ms);
+
 /* Ask for a flush on the next poll. Safe from any context (sets a flag). */
 void uplink_request_flush(enum uplink_flush_why why);
 

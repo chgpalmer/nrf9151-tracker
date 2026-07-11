@@ -131,6 +131,25 @@ config TRACKER_MOTION_ENTRY_S
 	  a ride is a few minutes of standing still and must not park the
 	  tracker. Exit needs no hysteresis (one out-of-radius fix wakes it).
 
+config TRACKER_QUIESCENT_CHECK_S
+	int "Parked-with-fix position check interval (seconds)"
+	default 120
+	range 30 3600
+	help
+	  GNSS periodic-mode interval while parked with a held fix. Each
+	  check is a hot start (1-3 s awake); the next check after the bike
+	  moves is what detects theft, so this bounds detection latency.
+
+config TRACKER_QUIESCENT_FLUSH_S
+	int "Uplink flush interval while parked (seconds)"
+	default 1200
+	range 120 7200
+	help
+	  Radio wakes are the parked data cost (47 B datagram overhead plus
+	  RRC signalling); 20 min x ~30 B check points ~= 25 KB/day parked
+	  vs ~600 KB/day at the moving cadence. Motion still flushes
+	  urgently via the FSM state change.
+
 config TRACKER_SIM_DEVICE_ID
 	string "native_sim fallback device ID"
 	default "sim-dev-1"

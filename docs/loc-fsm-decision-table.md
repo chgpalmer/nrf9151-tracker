@@ -65,7 +65,18 @@ override typically bounces CELL_LOOP → LTE_ATTACH within seconds (see F-2).
 | E1 | `!gps_current` and `sky_empty` | CELL_LOOP | "sky lost" |
 | E2 | `!gps_current` and `hotstart_dead` | GNSS_ACQUIRE | "fix stale, ephemeris not visible" |
 | E3 | `!gps_current` (hot start still viable) | stay | wait for re-fix |
-| E4 | *(removed — see finding F-1)* | | while the fix is current, REPORT_GNSS never exits |
+| E4 | *(removed — see finding F-1)* | | the old ephemeris-refresh exit |
+| E4' | `gps_current` and `stationary` | QUIESCENT | "stationary" |
+
+### QUIESCENT — parked with a held fix; periodic checks
+| # | Condition | Next | |
+|---|---|---|---|
+| Q1 | `!stationary` | REPORT_GNSS | "motion" |
+| Q2 | fix older than 3 check intervals | GNSS_ACQUIRE | "checks not fixing" |
+
+Sky-evidence streaks are 1 Hz bookkeeping and are NOT consulted here.
+Staleness is cadence-aware: `gps_current` in this state means "fix newer
+than 3 × QUIESCENT_CHECK_S", not 30 s.
 
 ### CELL_LOOP — cell cadence; sight-triggered retry
 | # | Condition | Next | |
@@ -83,6 +94,7 @@ override typically bounces CELL_LOOP → LTE_ATTACH within seconds (see F-2).
 | GNSS_EXCLUSIVE | CONT | **no** | **no** | — | — |
 | REPORT_GNSS | CONT | yes | yes | only if fix stale | 1 s |
 | CELL_LOOP | CONT | yes | yes | yes | 30 s |
+| QUIESCENT | PERIODIC(check) | yes | yes | no (yes if stale) | check interval |
 
 \* gnss_mode is OFF whenever `!lte_registered`, except in EXCLUSIVE where
 being unregistered is deliberate — so GNSS is off while attaching.
@@ -117,7 +129,8 @@ timeout → … a ~6–7 min churn cycle, forever, narrating ~1 KB of logs per l
 satellite with no rate limit, and the 30 s cell cadence ships ~7.4 MB/mo.
 Nothing here is individually wrong; what's missing is backoff/quiescence for
 "stationary and repeatedly failing". This is the adaptive-cadence work; it
-should build on this table.
+should build on this table. **Partially addressed:** QUIESCENT covers the
+parked-with-fix half; REST covers the no-fix half.
 
 **F-3 — `cell_sent` can be satisfied by a stale cell.** The uplink kinds-mask
 latches on *any* delivered cell entry, including one queued in a previous

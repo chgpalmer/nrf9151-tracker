@@ -101,6 +101,9 @@ static struct loc_status step(bool fix, int tracked, uint32_t flags)
 		      loc_state_str(_st.state), loc_state_str(want)); \
 } while (0)
 
+static void check_outputs(struct loc_status st, enum loc_gnss_mode mode,
+			  bool lte, bool publish, uint32_t interval);
+
 /* ── drivers: shortest table-sanctioned path to each state ──────────────── */
 
 static void reset_fsm(void)
@@ -131,6 +134,13 @@ static void to_report_gnss(void)
 {
 	to_report_cell();
 	ASSERT_STATE(step(true, 4, OBSERVED), LOC_REPORT_GNSS); /* B1 */
+}
+
+static void to_quiescent(void)
+{
+	to_report_gnss();
+	g_stationary = true;
+	ASSERT_STATE(step(true, 4, OBSERVED), LOC_QUIESCENT); /* E4' */
 }
 
 static void to_exclusive(void)
@@ -393,6 +403,63 @@ ZTEST(loc_fsm, test_f1_expiring_ephemeris_never_exits)
 		      st.ephemeris_held);
 	zassert_equal(st.min_ephe_expiry_min, 5, "expected expiry 5, got %u",
 		      st.min_ephe_expiry_min);
+}
+
+/* ── QUIESCENT ──────────────────────────────────────────────────────────── */
+
+ZTEST(loc_fsm, test_q_entry_requires_stationary_and_fix)
+{
+	to_report_gnss();
+	/* moving: stays put no matter how long */
+	for (int i = 0; i < 30; i++) {
+		ASSERT_STATE(step(true, 4, OBSERVED), LOC_REPORT_GNSS);
+	}
+	g_stationary = true;
+	ASSERT_STATE(step(true, 4, OBSERVED), LOC_QUIESCENT);
+}
+
+ZTEST(loc_fsm, test_q1_motion_resumes_tracking)
+{
+	to_quiescent();
+	g_stationary = false;
+	ASSERT_STATE(step(true, 4, OBSERVED), LOC_REPORT_GNSS);
+}
+
+/* Staleness is cadence-aware: a fix is current until 3 check intervals
+ * pass without one, not 30 s. And the sky-empty evidence is NOT evaluated
+ * here — empty checks lead to ACQUIRE via staleness, never to CELL_LOOP. */
+ZTEST(loc_fsm, test_q2_checks_not_fixing)
+{
+	to_quiescent();
+	/* six observed-empty epochs: >SKY_EMPTY_EPOCHS, way past 30 s-stale —
+	 * both would have fired in REPORT_GNSS; QUIESCENT must hold. */
+	for (int i = 0; i < EMPTY_EPOCHS + 1; i++) {
+		ASSERT_STATE(step(false, 0, OBSERVED), LOC_QUIESCENT);
+	}
+	/* ...but three missed checks means the parked spot lost its sky. */
+	t += 3 * (int64_t)CONFIG_TRACKER_QUIESCENT_CHECK_S * 1000;
+	ASSERT_STATE(step(false, 0, OBSERVED), LOC_GNSS_ACQUIRE);
+}
+
+ZTEST(loc_fsm, test_q_outputs)
+{
+	struct loc_status st;
+
+	to_quiescent();
+	st = step(true, 4, OBSERVED);
+	ASSERT_STATE(st, LOC_QUIESCENT);
+	check_outputs(st, LOC_GNSS_PERIODIC, true, true,
+		      (uint32_t)CONFIG_TRACKER_QUIESCENT_CHECK_S * 1000);
+	zassert_equal(st.gnss_interval_s, CONFIG_TRACKER_QUIESCENT_CHECK_S,
+		      "check interval");
+	zassert_false(st.prefer_cell, "parked with fix: GPS, not cell");
+}
+
+ZTEST(loc_fsm, test_q_override_registration_loss)
+{
+	to_quiescent();
+	ASSERT_STATE(step_full(true, 4, CN0_STRONG, OBSERVED, false),
+		     LOC_LTE_ATTACH);
 }
 
 /* ── CELL_LOOP ──────────────────────────────────────────────────────────── */

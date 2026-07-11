@@ -43,6 +43,7 @@ static const char *const loc_state_names[] = {
 	[LOC_GNSS_EXCLUSIVE] = "GNSS_EXCLUSIVE",
 	[LOC_REPORT_GNSS] = "REPORT_GNSS",
 	[LOC_CELL_LOOP]   = "CELL_LOOP",
+	[LOC_QUIESCENT]   = "QUIESCENT",
 };
 BUILD_ASSERT(ARRAY_SIZE(loc_state_names) == LOC_STATE_COUNT,
 	     "loc_state_names out of step with enum loc_state");
@@ -214,7 +215,6 @@ void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 {
 	bool fix = pvt->flags & NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID;
 
-	ARG_UNUSED(stationary); /* consumed from the QUIESCENT state onward */
 
 	if (fix) {
 		last_fix_ms = now_ms;
@@ -222,7 +222,14 @@ void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 
 	poll_ephemeris(now_ms);
 	read_sky(pvt, out);
-	out->gps_current = (now_ms - last_fix_ms) < GPS_STALE_MS;
+	/* Staleness is judged against the CURRENT sampling cadence: at 1 Hz a
+	 * 30 s hole means trouble, but under periodic checks a fix is only
+	 * expected every check interval -- three missed checks is the
+	 * equivalent evidence. */
+	int64_t stale_ms = (state == LOC_QUIESCENT)
+		? 3 * (int64_t)CONFIG_TRACKER_QUIESCENT_CHECK_S * 1000
+		: GPS_STALE_MS;
+	out->gps_current = (now_ms - last_fix_ms) < stale_ms;
 
 	/* Sky evidence. CELL_LOOP's chopped windows systematically UNDERSTATE the
 	 * sky (C/N0 estimates need integration time a 20 s gap doesn't give), so
@@ -342,6 +349,21 @@ void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 					   "fix stale, ephemeris not visible");
 			}
 			/* else: hot-start conditions present; wait for re-fix */
+		} else if (stationary) {
+			/* Parked with a good fix: drop to periodic checks.
+			 * motion.c already applied the entry hysteresis. */
+			next_state(LOC_QUIESCENT, now_ms, "stationary");
+		}
+		break;
+
+	case LOC_QUIESCENT:
+		/* Sky evidence (empty/chopped streaks) is 1 Hz bookkeeping and
+		 * is NOT consulted here: a periodic check either fixes or it
+		 * doesn't, and three missed checks is the give-up signal. */
+		if (!stationary) {
+			next_state(LOC_REPORT_GNSS, now_ms, "motion");
+		} else if (!out->gps_current) {
+			next_state(LOC_GNSS_ACQUIRE, now_ms, "checks not fixing");
 		}
 		break;
 
@@ -364,15 +386,27 @@ void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 	}
 
 	out->state = state;
-	out->gnss_mode = (lte_registered || state == LOC_GNSS_EXCLUSIVE)
-			 ? LOC_GNSS_CONTINUOUS : LOC_GNSS_OFF;
-	out->gnss_interval_s = 0;
+	if (!lte_registered && state != LOC_GNSS_EXCLUSIVE) {
+		out->gnss_mode = LOC_GNSS_OFF;
+	} else if (state == LOC_QUIESCENT) {
+		out->gnss_mode = LOC_GNSS_PERIODIC;
+	} else {
+		out->gnss_mode = LOC_GNSS_CONTINUOUS;
+	}
+	out->gnss_interval_s = (state == LOC_QUIESCENT)
+		? CONFIG_TRACKER_QUIESCENT_CHECK_S : 0;
 	out->lte_wanted = (state != LOC_GNSS_EXCLUSIVE);
 	out->publish_allowed = (state == LOC_REPORT_CELL ||
 				state == LOC_REPORT_GNSS ||
+				state == LOC_QUIESCENT ||
 				state == LOC_CELL_LOOP);
-	out->prefer_cell = (state != LOC_REPORT_GNSS) || !out->gps_current;
-	out->publish_interval_ms = (state == LOC_CELL_LOOP) ? CELL_POST_MS : POST_MS;
+	out->prefer_cell = (state != LOC_REPORT_GNSS &&
+			    state != LOC_QUIESCENT) || !out->gps_current;
+	out->publish_interval_ms =
+		(state == LOC_CELL_LOOP)  ? CELL_POST_MS :
+		(state == LOC_QUIESCENT)
+			? (uint32_t)CONFIG_TRACKER_QUIESCENT_CHECK_S * 1000
+			: POST_MS;
 }
 
 void loc_fsm_log(const struct loc_status *st,
