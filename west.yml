@@ -37,5 +37,6 @@ manifest:
           - cmsis_6
           - picolibc
           - segger
+          - nanopb        # protobuf codegen + runtime for the v3 wire protocol
           - zcbor
           - tf-psa-crypto

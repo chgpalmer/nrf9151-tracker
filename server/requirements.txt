@@ -1,7 +1,8 @@
 fastapi>=0.111.0
 uvicorn>=0.29.0
 aiocoap>=0.4.7
-# Wire-schema toolchain: same zcbor version as the firmware's west module
-# (modules/lib/zcbor). 0.9.x needs cbor2<6 (API break in 6.0).
-zcbor==0.9.1
-cbor2<6
+# Wire protocol: protobuf runtime for decoding (schema in proto/tracker.proto;
+# the generated server/tracker_pb2.py is committed, like the firmware's nanopb
+# C). grpcio-tools provides protoc for `make proto` codegen (host-side only).
+protobuf>=5.27
+grpcio-tools>=1.64

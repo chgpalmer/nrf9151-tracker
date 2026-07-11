@@ -2,11 +2,18 @@
 """
 CoAP → SQLite ingest.
 
-Receives non-confirmable POSTs on /obs (UDP 5683) carrying CBOR observations
-and stores position fixes. The wire format is defined once, in
-proto/tracker.cddl: this server decodes and validates against that same file
-via the zcbor package, so firmware and server cannot drift apart silently.
-The server stamps its own receive time (received_ts, Unix epoch).
+Receives non-confirmable POSTs on /obs (UDP 5683) carrying protobuf-encoded
+observations (see proto/tracker.proto) and stores position fixes. The wire
+format is defined once, in that .proto: the firmware encodes with nanopb and
+this server decodes with the generated tracker_pb2, so the two cannot drift
+apart silently. The server stamps its own receive time (received_ts, Unix
+epoch); each entry carries its age-at-send, so absolute time is received_ts
+minus that age and no device clock can corrupt history.
+
+A track segment is an anchor fix plus fixed-cadence delta arrays: the server
+reconstructs absolute positions by accumulating the deltas, timestamps point i
+at received_ts - age + i*dt_ms, takes speed from the GNSS Doppler array, and
+derives heading from the delta bearing.
 
 Devices send the RFC 7967 No-Response option: replying would page the tracker
 after RAI already released its radio connection, costing it the whole saving.
@@ -26,14 +33,13 @@ from pathlib import Path
 
 import aiocoap
 import aiocoap.resource as resource
-from zcbor import DataTranslator, CddlValidationError
+
+import tracker_pb2 as pb
 
 DB_DEFAULT = Path(__file__).parent / "tracker.db"
 
 # Local OpenCelliD lookup DB (built by build_cells.py from *.csv.gz exports).
 CELLS_DB_DEFAULT = Path(__file__).parent / "cells.db"
-
-CDDL_PATH = Path(__file__).parent.parent / "proto" / "tracker.cddl"
 
 
 def init_db(path: Path) -> sqlite3.Connection:
@@ -42,7 +48,7 @@ def init_db(path: Path) -> sqlite3.Connection:
         CREATE TABLE IF NOT EXISTS positions (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             device_id   TEXT    NOT NULL,
-            received_ts INTEGER NOT NULL,
+            received_ts REAL    NOT NULL,
             source      TEXT    NOT NULL DEFAULT 'gps',
             lat REAL, lon REAL, alt REAL, acc REAL,
             spd REAL, hdg REAL, sats INTEGER
@@ -61,33 +67,24 @@ def init_db(path: Path) -> sqlite3.Connection:
     return conn
 
 
-def handle_gps(conn: sqlite3.Connection, g, ts: int) -> None:
-    """Store one GPS entry (already schema-validated). Wire units are scaled
-    integers (see tracker.cddl); the DB keeps the human units the web UI
-    already expects: degrees, metres, m/s. ts is the observation time
-    (server receive time minus the entry's age)."""
-    received_ts = ts
-    # (0, 0) is the Gulf of Guinea, not this tracker: it is what an unfixed PVT
-    # frame used to leak before the firmware published from a fix-valid
-    # snapshot. Drop it defensively so a regression can't dirty the map again.
-    if g.lat_e7_m == 0 and g.lon_e7_m == 0:
-        print(f"[coap] {g.device_id_m} gps  dropped (0,0) — unfixed frame?",
-              file=sys.stderr)
-        return
-    conn.execute(
-        """INSERT INTO positions
-           (device_id, received_ts, source, lat, lon, alt, acc, spd, hdg, sats)
-           VALUES (?, ?, 'gps', ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            g.device_id_m, received_ts,
-            g.lat_e7_m / 1e7, g.lon_e7_m / 1e7,
-            g.alt_dm_m / 10.0, g.acc_dm_m / 10.0,
-            g.spd_dms_m / 10.0, g.hdg_ddeg_m / 10.0, g.sats_m,
-        ),
-    )
-    conn.commit()
-    print(f"[coap] {g.device_id_m} gps  {g.lat_e7_m / 1e7:.6f}, "
-          f"{g.lon_e7_m / 1e7:.6f}  acc {g.acc_dm_m / 10.0:.1f}m  @{received_ts}")
+def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance in metres."""
+    r = 6371000.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp, dl = p2 - p1, math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(math.sqrt(a))
+
+
+def _bearing(dlat_e7: int, dlon_e7: int, lat_deg: float) -> float | None:
+    """Compass heading (degrees, 0=N) implied by a position delta. Returns None
+    for a zero delta (a stationary point has no direction). dlon is scaled by
+    cos(lat) because a degree of longitude shrinks toward the poles."""
+    if dlat_e7 == 0 and dlon_e7 == 0:
+        return None
+    north = dlat_e7
+    east = dlon_e7 * math.cos(math.radians(lat_deg))
+    return math.degrees(math.atan2(east, north)) % 360.0
 
 
 def resolve_cell(mcc, mnc, tac, cid, cells: sqlite3.Connection | None):
@@ -138,127 +135,101 @@ def resolve_cell(mcc, mnc, tac, cid, cells: sqlite3.Connection | None):
     return lat, lon, max(spread, rng, 2000.0), f"enb {enb}, {len(rows)} sectors"
 
 
-def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Great-circle distance in metres."""
-    r = 6371000.0
-    p1, p2 = math.radians(lat1), math.radians(lat2)
-    dp, dl = p2 - p1, math.radians(lon2 - lon1)
-    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
-    return 2 * r * math.asin(math.sqrt(a))
-
-
-def handle_cell(conn: sqlite3.Connection, c, ts: int,
-                cells: sqlite3.Connection | None) -> None:
-    received_ts = ts
-
-    fix = resolve_cell(c.mcc_m, c.mnc_m, c.tac_m, c.cell_id_m, cells)
-    if fix is None:
-        print(f"[coap] {c.device_id_m} cell  unresolved "
-              f"(mcc={c.mcc_m} mnc={c.mnc_m} tac={c.tac_m} cid={c.cell_id_m})")
-        return
-
-    lat, lon, acc, how = fix
+def _insert_gps(conn, dev, ts, lat, lon, alt, acc, spd, hdg, sats):
     conn.execute(
         """INSERT INTO positions
            (device_id, received_ts, source, lat, lon, alt, acc, spd, hdg, sats)
-           VALUES (?, ?, 'cell', ?, ?, NULL, ?, NULL, NULL, NULL)""",
-        (c.device_id_m, received_ts, lat, lon, acc),
-    )
-    conn.commit()
-    print(f"[coap] {c.device_id_m} cell  {lat:.6f}, {lon:.6f}  "
-          f"acc {acc:.0f}m ({how})")
+           VALUES (?, ?, 'gps', ?, ?, ?, ?, ?, ?, ?)""",
+        (dev, ts, lat, lon, alt, acc, spd, hdg, sats))
 
 
-def handle_batch(conn: sqlite3.Connection, b,
-                 cells: sqlite3.Connection | None) -> None:
-    """Store a v2 batch: entries carry age-at-send; absolute time is the
-    server receive stamp minus that age (worst error = uplink latency, and no
-    device clock can ever corrupt history). A repeat entry re-asserts the
-    previous GPS position at a new time; the chain seeds from the batch or,
-    for a leading repeat, from the device's last stored GPS row."""
-    now = int(time.time())
-    dev = b.device_id_m
-    prev_gps = None  # (lat, lon, alt, acc, spd, hdg, sats) in DB units
+def store_track(conn, dev, base_ts, seg) -> int:
+    """Expand one TrackSegment into per-point GPS rows. Returns the count.
 
-    row = conn.execute(
-        "SELECT lat, lon, alt, acc, spd, hdg, sats FROM positions "
-        "WHERE device_id=? AND source='gps' ORDER BY received_ts DESC LIMIT 1",
-        (dev,)).fetchone()
-    if row:
-        prev_gps = tuple(row)
+    Point 0 is the absolute anchor; point i+1 = point i + (dlat[i], dlon[i]).
+    Time is base_ts + i*dt_ms. Speed comes from the Doppler array (deriving it
+    from the deltas is too noisy at 1 Hz+ to use). alt/acc/sats are carried from
+    the anchor — they barely change across a <=50 s segment and we don't spend
+    wire bytes resending them. Heading is derived from each delta's bearing."""
+    a = seg.anchor
+    n = len(seg.dlat)
+    if len(seg.dlon) != n:
+        print(f"[coap] {dev} track: dlat/dlon length mismatch "
+              f"({n}/{len(seg.dlon)}) — dropped", file=sys.stderr)
+        return 0
+    # (0,0) is the Gulf of Guinea, not this tracker: an unfixed PVT frame used
+    # to leak it. Drop the whole segment if its anchor is (0,0).
+    if a.lat_e7 == 0 and a.lon_e7 == 0:
+        print(f"[coap] {dev} track: dropped (0,0) anchor — unfixed frame?",
+              file=sys.stderr)
+        return 0
 
-    n_gps = n_rep = n_cell = 0
-    for e in b.entry_m_l.entry_m:
-        kind = e.union_choice
-        if kind == "gps_entry_m":
-            g = e.gps_entry_m
-            ts = now - g.age_s_m
-            lat, lon = g.lat_e7_m / 1e7, g.lon_e7_m / 1e7
-            if g.lat_e7_m == 0 and g.lon_e7_m == 0:
-                continue  # unfixed-frame leak; see handle_gps
-            vals = (lat, lon, g.alt_dm_m / 10.0, g.acc_dm_m / 10.0,
-                    g.spd_dms_m / 10.0, g.hdg_ddeg_m / 10.0, g.sats_m)
-            conn.execute(
-                """INSERT INTO positions
-                   (device_id, received_ts, source, lat, lon, alt, acc, spd, hdg, sats)
-                   VALUES (?, ?, 'gps', ?, ?, ?, ?, ?, ?, ?)""",
-                (dev, ts) + vals)
-            prev_gps = vals
-            n_gps += 1
-        elif kind == "repeat_entry_m":
-            ts = now - e.repeat_entry_m.age_s_m
-            if prev_gps is None:
-                print(f"[coap] {dev} repeat with no prior gps — skipped",
-                      file=sys.stderr)
-                continue
-            conn.execute(
-                """INSERT INTO positions
-                   (device_id, received_ts, source, lat, lon, alt, acc, spd, hdg, sats)
-                   VALUES (?, ?, 'gps', ?, ?, ?, ?, ?, ?, ?)""",
-                (dev, ts) + prev_gps)
-            n_rep += 1
-        else:
-            c = e.cell_entry_m
-            ts = now - c.age_s_m
-            fix = resolve_cell(c.mcc_m, c.mnc_m, c.tac_m, c.cell_id_m, cells)
+    dt = seg.dt_ms / 1000.0
+    alt = a.alt_dm / 10.0
+    acc = a.acc_dm / 10.0
+    sats = a.sats
+    lat_e7, lon_e7 = a.lat_e7, a.lon_e7
+
+    # Anchor (point 0): its own speed/heading come from the fix itself.
+    _insert_gps(conn, dev, base_ts, lat_e7 / 1e7, lon_e7 / 1e7, alt, acc,
+                a.spd_dms / 10.0, a.hdg_ddeg / 10.0, sats)
+    count = 1
+
+    for i in range(n):
+        hdg = _bearing(seg.dlat[i], seg.dlon[i], lat_e7 / 1e7)
+        lat_e7 += seg.dlat[i]
+        lon_e7 += seg.dlon[i]
+        ts = base_ts + (i + 1) * dt
+        spd = seg.spd_dms[i] / 10.0 if i < len(seg.spd_dms) else None
+        _insert_gps(conn, dev, ts, lat_e7 / 1e7, lon_e7 / 1e7, alt, acc,
+                    spd, hdg, sats)
+        count += 1
+    return count
+
+
+def store_obs(conn, obs, cells, now: int) -> tuple[int, int]:
+    """Store a decoded Obs. Returns (track_points, cell_fixes)."""
+    dev = obs.device_id
+    n_pts = n_cell = 0
+    for e in obs.entries:
+        base_ts = now - e.age_s
+        kind = e.WhichOneof("kind")
+        if kind == "track":
+            n_pts += store_track(conn, dev, base_ts, e.track)
+        elif kind == "cell":
+            c = e.cell
+            fix = resolve_cell(c.mcc, c.mnc, c.tac, c.cell_id, cells)
             if fix is None:
                 print(f"[coap] {dev} cell unresolved "
-                      f"(mcc={c.mcc_m} mnc={c.mnc_m} tac={c.tac_m} "
-                      f"cid={c.cell_id_m})")
+                      f"(mcc={c.mcc} mnc={c.mnc} tac={c.tac} cid={c.cell_id})")
                 continue
             lat, lon, acc, how = fix
             conn.execute(
                 """INSERT INTO positions
                    (device_id, received_ts, source, lat, lon, alt, acc, spd, hdg, sats)
                    VALUES (?, ?, 'cell', ?, ?, NULL, ?, NULL, NULL, NULL)""",
-                (dev, ts, lat, lon, acc))
+                (dev, base_ts, lat, lon, acc))
             n_cell += 1
     conn.commit()
-    print(f"[coap] {dev} batch: {n_gps} gps + {n_rep} repeat + {n_cell} cell")
+    print(f"[coap] {dev} v{obs.version}: {n_pts} track pts + {n_cell} cell")
+    return n_pts, n_cell
 
 
 class ObsResource(resource.Resource):
-    def __init__(self, conn, cells, observation):
+    def __init__(self, conn, cells):
         super().__init__()
         self.conn = conn
         self.cells = cells
-        self.observation = observation
 
     async def render_post(self, request):
         try:
-            obs = self.observation.decode_str(request.payload)
-        except (CddlValidationError, Exception) as e:
+            obs = pb.Obs.FromString(request.payload)
+        except Exception as e:
             print(f"[coap] rejected payload ({len(request.payload)} B): {e}",
                   file=sys.stderr)
             return aiocoap.Message(code=aiocoap.Code.BAD_REQUEST)
 
-        now = int(time.time())
-        if obs.union_choice == "batch_m":
-            handle_batch(self.conn, obs.batch_m, self.cells)
-        elif obs.union_choice == "gps_obs_m":
-            handle_gps(self.conn, obs.gps_obs_m, now)
-        else:
-            handle_cell(self.conn, obs.cell_obs_m, now, self.cells)
+        store_obs(self.conn, obs, self.cells, int(time.time()))
 
         # Devices set No-Response, so aiocoap drops this on the floor for
         # them; it still answers curious human clients (coap-client etc).
@@ -279,17 +250,11 @@ async def serve(args):
         print(f"[coap] no cell DB at {args.cells_db} — cell fixes won't "
               f"resolve (run: make cells)")
 
-    # One schema for both sides: the firmware's encoders are generated from
-    # this same file (make proto).
-    translator = DataTranslator.from_cddl(CDDL_PATH.read_text(), 16)
-    observation = translator.my_types["observation"]
-    print(f"[coap] schema: {CDDL_PATH}")
-
     site = resource.Site()
-    site.add_resource(["obs"], ObsResource(conn, cells, observation))
+    site.add_resource(["obs"], ObsResource(conn, cells))
 
     await aiocoap.Context.create_server_context(site, bind=("::", args.port))
-    print(f"[coap] listening on UDP {args.port} (POST /obs)")
+    print(f"[coap] listening on UDP {args.port} (POST /obs, protobuf)")
     await asyncio.get_running_loop().create_future()  # run forever
 
 

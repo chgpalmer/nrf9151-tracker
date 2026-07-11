@@ -1,0 +1,39 @@
+# nanopb field options for tracker.proto
+#
+# The repeated delta/speed arrays are the whole point of the design and can hold
+# up to ~60-90 points per segment. If they were generated as FIXED C ARRAYS
+# (max_count:N) nanopb would embed N*4 B *per array* directly in the message
+# struct -- ~720 B for three 60-point arrays -- which we would then have to fill
+# by COPYING out of obs_queue (the ring that already holds these points). That
+# is a second copy of the data and, if the message struct is a thread-local, a
+# stack-overflow risk on Zephyr.
+#
+# Instead every unbounded field is a CALLBACK (pb_callback_t). At encode time the
+# callback streams straight from the obs_queue ring into the encoder one value at
+# a time -- zero extra buffering, the Obs struct stays a few dozen bytes, and the
+# only RAM that scales with segment length is obs_queue itself (which we need
+# regardless). This is the standard nanopb pattern for "I already have the data
+# buffered elsewhere."
+#
+#   encode wiring (firmware, obs_queue.c):
+#     Obs obs = Obs_init_zero;
+#     obs.device_id.funcs.encode = &encode_device_id;   obs.device_id.arg = ...
+#     obs.entries.funcs.encode   = &encode_entries;      obs.entries.arg   = &queue;
+#   and inside encode_entries, for the track entry:
+#     seg.dlat.funcs.encode = &encode_dlat;  seg.dlat.arg = &queue;   // etc.
+#   each callback walks the ring, emitting anchor-relative deltas + Doppler speed.
+#
+# The chunk size (<= 50 points, see tracker.proto) is fixed BEFORE pb_encode is
+# called; each callback then emits that chunk's array IN FULL. Never stop a
+# callback early on a byte budget -- packed arrays are length-prefixed and
+# encoded field-by-field, so a partial dlat would desync from a full dlon/spd.
+
+Obs.device_id          type:FT_CALLBACK
+Obs.entries            type:FT_CALLBACK
+
+TrackSegment.dlat      type:FT_CALLBACK
+TrackSegment.dlon      type:FT_CALLBACK
+TrackSegment.spd_dms   type:FT_CALLBACK
+
+# The anchor is a single fixed submessage -- fine as a normal nested struct.
+# CellFix / GpsFix scalar fields are fixed-width and need no options.

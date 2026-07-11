@@ -1,0 +1,96 @@
+syntax = "proto3";
+
+// Tracker wire protocol -- single source of truth (v3).
+//
+// The firmware encodes these with nanopb (generated C), and the CoAP server
+// decodes with the Python protobuf runtime. One .proto, both ends. Edit here,
+// regenerate, never edit generated code.
+//
+// Transport: CoAP NON POST /obs, application/octet-stream, No-Response option
+// (no downlink). One datagram = one Obs. Keep an Obs under the safe cellular
+// MTU (~512 B) so UDP never fragments.
+//
+// The point count of a segment MUST be decided BEFORE encoding, never capped
+// mid-encode. Packed arrays are length-prefixed and written field-by-field (all
+// dlat, then all dlon, then all spd_dms), each by its own callback, so stopping
+// partway would truncate one array and leave the others full -- the parallel
+// arrays would no longer align and the server could not pair them. The firmware
+// therefore chunks a flush into segments of at most 50 points (worst case
+// ~7.7 B/point -> ~385 B, safely under 512 even on IPv6); a longer flush emits
+// several datagrams, each a self-contained segment with its own anchor.
+//
+// Time model (unchanged from v2 and deliberate): the device has no wall clock.
+// Each Entry carries age_s = seconds before the datagram was sent. The server
+// timestamps it received_ts - age_s. For a track segment, age_s is the age of
+// the ANCHOR (oldest point); point i's time = received_ts - age_s + i*dt_ms.
+// A wrong device clock would write plausible-but-wrong history; an age can only
+// be off by the uplink flight time.
+//
+// Extensibility: field numbers are the contract. NEVER reuse a retired number.
+// Adding a new field (including a new packed per-point array, e.g. lean angle)
+// is backward-compatible: old decoders skip it, the parallel arrays stay
+// index-aligned. That is the whole reason this is protobuf and not a packed
+// blob.
+
+// Full GNSS fix. Used as a track segment's anchor (absolute position); a lone
+// fix is just a TrackSegment with empty delta arrays.
+message GpsFix {
+  sint32 lat_e7   = 1;   // degrees * 1e7
+  sint32 lon_e7   = 2;   // degrees * 1e7
+  sint32 alt_dm   = 3;   // decimetres
+  uint32 acc_dm   = 4;   // decimetres
+  uint32 spd_dms  = 5;   // dm/s
+  uint32 hdg_ddeg = 6;   // tenths of a degree
+  uint32 sats     = 7;   // satellites used
+}
+
+// A run of GNSS positions at a fixed cadence. The anchor is point 0 (absolute);
+// dlat[i]/dlon[i]/spd_dms[i] describe point i+1 (i.e. the arrays parallel each
+// other and are all the same length = point_count - 1). Deltas are in
+// 1e-7-degree units, zigzag varint: small (slow / high-rate) deltas cost 1 B,
+// typical driving deltas 2 B. Overflow-free by construction: the firmware
+// starts a fresh segment (new anchor) before any delta would exceed a tick's
+// real range. A stationary run is simply zero deltas (folds in v2's "repeat"
+// entry) -- note a zero point costs 2 B on the wire (1 B in dlat + 1 B in dlon),
+// not 1.
+//
+// spd_dms carries the GNSS-measured (Doppler) speed per point. This is NOT
+// derived from the position deltas on the server: at 1 Hz that derivation
+// carries ~8 km/h of jitter and at 10 Hz it is unusable (a stationary unit
+// would show a phantom ~70 km/h from position noise alone). Doppler speed is
+// filtered and costs ~1-2 B/point, so we send it. Being a packed array it may
+// be left empty (0 B) in a future low-bandwidth mode; the server then falls
+// back to a coarse derived speed.
+message TrackSegment {
+  GpsFix anchor = 1;
+  uint32 dt_ms  = 2;                          // spacing between points
+  repeated sint32 dlat    = 3 [packed = true];
+  repeated sint32 dlon    = 4 [packed = true];
+  repeated uint32 spd_dms = 5 [packed = true]; // GNSS Doppler speed, dm/s
+}
+
+// Serving-cell observation (no GNSS, or a stationary keepalive). The server
+// resolves this to an approximate location.
+message CellFix {
+  uint32 mcc      = 1;
+  uint32 mnc      = 2;
+  uint32 tac      = 3;
+  uint32 cell_id  = 4;   // 28-bit ECI
+  sint32 rsrp_dbm = 5;
+}
+
+// One item in a batch. age_s ages the anchor (track) or the fix (cell).
+message Entry {
+  uint32 age_s = 1;
+  oneof kind {
+    TrackSegment track = 2;
+    CellFix      cell  = 3;
+  }
+}
+
+// The datagram. version+device_id are shared by every entry in the batch.
+message Obs {
+  uint32 version   = 1;   // 3
+  string device_id = 2;   // IMEI on hardware, TRACKER_DEVICE_ID on the sim
+  repeated Entry entries = 3;
+}

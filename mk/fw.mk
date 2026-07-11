@@ -36,17 +36,23 @@ endif
 .PHONY: setup setup-system setup-zephyr setup-tools windows-usb-passthrough \
         build flash recover uart gdb clean sim run-sim check-workspace proto
 
-# Regenerate the CBOR encoders from the wire schema. The output is committed
-# (apps/tracker/src/proto/), so firmware builds don't need the zcbor CLI; run
-# this after editing proto/tracker.cddl. The CLI comes from the workspace's
-# own zcbor module (make setup-host installs it), keeping the generator and
-# the on-target zcbor runtime the same version.
+# Regenerate both ends of the wire protocol from proto/tracker.proto:
+#   firmware -> apps/tracker/src/proto/tracker.pb.{c,h}  (nanopb)
+#   server   -> server/tracker_pb2.py                    (protoc)
+# Both outputs are committed, so neither a firmware build nor a server run needs
+# the generators; run this after editing the .proto or .options. The nanopb
+# generator comes from the workspace's own module (modules/lib/nanopb), keeping
+# the generator and the on-target nanopb runtime the same version.
+NANOPB_DIR := $(WS)/modules/lib/nanopb
 proto:
-> @test -x $(VENV)/bin/zcbor || { echo "Run: make setup-host (installs zcbor CLI)"; exit 1; }
-> $(VENV)/bin/zcbor code -c proto/tracker.cddl -e -t gps_obs cell_obs \
->   --oc apps/tracker/src/proto/tracker_encode.c \
->   --oh apps/tracker/src/proto/tracker_encode.h
-> @echo "regenerated apps/tracker/src/proto/ from proto/tracker.cddl"
+> @test -f $(NANOPB_DIR)/generator/nanopb_generator.py || { \
+>   echo "nanopb missing — run: west update"; exit 1; }
+> @test -x $(VENV)/bin/python3 || { echo "Run: make setup-host"; exit 1; }
+> $(VENV)/bin/python3 $(NANOPB_DIR)/generator/nanopb_generator.py \
+>   -I proto -D apps/tracker/src/proto proto/tracker.proto
+> $(VENV)/bin/python3 -m grpc_tools.protoc -Iproto --python_out=server \
+>   proto/tracker.proto
+> @echo "regenerated apps/tracker/src/proto/ + server/tracker_pb2.py from proto/tracker.proto"
 
 # One-time firmware setup: pull SDK/deps + install host build tools.
 setup: setup-zephyr setup-tools
