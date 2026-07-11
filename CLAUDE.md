@@ -55,10 +55,11 @@ module pins have no wheels for newer Pythons; 26.04 breaks `make setup-zephyr`).
 ## State of play (update when it changes)
 - Wire: protobuf v3 — anchor+delta track segments (~5-7 B/pt @1 Hz), cell
   fixes, log batches. Mixed-month ≈ 1.7 MB + logs.
-- Known unsolved data cost: **parked devices** — CELL_LOOP samples a cell
-  every 30 s (~7.4 MB/mo if parked in it all month) and failed-acquire churn
-  narrates ~1 KB/cycle. Fix = adaptive cadence / quiescent mode (queued; its
-  prerequisite — the FSM decision-table review + ztest — is DONE).
+- Parked cost SOLVED in firmware (QUIESCENT + REST + motion.c, adaptive
+  cadence): parked ≈ 0.15–0.75 MB/mo vs 7.4 MB before. PENDING FIELD
+  VERIFICATION: park ≥5 min → flush cadence drops & cell fixes stop; carry
+  away → track resumes within ~2 min; overnight indoors → heartbeats only,
+  no churn logs. Board must be REFLASHED to get this + the F-1 fix.
 - Phase 2 (specced, queued): flash flight recorder + obs spill on the DK's
   32 MB NOR, epoch timestamps, log byte-budget backstop.
 - GNSS acquisition-while-moving is weak (ephemeris demodulation needs steady
