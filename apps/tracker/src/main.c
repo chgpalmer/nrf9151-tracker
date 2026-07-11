@@ -25,6 +25,7 @@
 
 #include "loc_fsm.h"
 #include "motion.h"
+#include "agnss.h"
 #include "coap_pub.h"
 #include "obs_queue.h"
 #include "uplink.h"
@@ -421,6 +422,7 @@ int main(void)
 	uplink_on_sent(on_uplink_sent);
 	obs_queue_init(POST_INTERVAL_MS);
 	log_uplink_init();
+	agnss_set_device_id(device_id);
 	leds_init();
 
 	/* Start LTE async — don't block, status loop shows progress */
@@ -646,6 +648,11 @@ int main(void)
 			: (uint32_t)CONFIG_TRACKER_FLUSH_INTERVAL_S * 1000);
 		uplink_set_allowed(loc.publish_allowed);
 		(void)uplink_poll(now);
+
+		/* A-GNSS: opportunistic assistance fetch while the radio is
+		 * already ours (never during acquisition silence or parked
+		 * sleep — see agnss.c for the policy). */
+		agnss_poll(now, &loc);
 	}
 
 	return 0;

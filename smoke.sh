@@ -25,6 +25,9 @@ step "make build"
 make build || fail "make build"
 
 step "make demo (background, log: $DEMO_LOG)"
+# A-GNSS from the committed fixture: no network dependency in tests. (A stale
+# fixture serves time-only assistance — the exchange still runs and asserts.)
+export TRACKER_AGNSS_FILE=server/tests/brdc_fixture.rnx
 make demo >"$DEMO_LOG" 2>&1 &
 demo_pid=$!
 
@@ -43,8 +46,17 @@ step "waiting for the sim's observations to reach the API"
 for _ in $(seq "$TIMEOUT"); do
   if curl -fsS "http://127.0.0.1:$HTTP_PORT/api/devices" | grep -q '"device_id"'; then
     echo "device data OK"
-    step "PASS: build + demo both healthy"
-    exit 0
+    step "waiting for the A-GNSS exchange"
+    # The sim's mock reports a thin inventory, so a fetch must follow.
+    for _ in $(seq "$TIMEOUT"); do
+      if grep -q '\[agnss\].*served' "$DEMO_LOG"; then
+        echo "A-GNSS exchange OK"
+        step "PASS: build + demo both healthy"
+        exit 0
+      fi
+      sleep 1
+    done
+    fail "server never served an A-GNSS request (see $DEMO_LOG)"
   fi
   kill -0 "$demo_pid" 2>/dev/null || fail "make demo exited early"
   sleep 1

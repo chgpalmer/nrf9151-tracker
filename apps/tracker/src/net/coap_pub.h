@@ -25,6 +25,14 @@ bool coap_pub_ready(void);
  * release as soon as the datagram is out. */
 int coap_pub_send(const uint8_t *payload, size_t len);
 
+/* The one request/RESPONSE exchange (A-GNSS): NON POST `path` with req as
+ * payload, then block up to timeout_ms for the matching response (token
+ * checked; stale datagrams drained). Sets RAI_ONE_RESP before the send —
+ * "one downlink is coming, then release RRC". Returns the response payload
+ * length (copied into resp), or -EAGAIN on timeout / negative errno. */
+int coap_pub_exchange(const char *path, const uint8_t *req, size_t req_len,
+		      uint8_t *resp, size_t resp_cap, int timeout_ms);
+
 void coap_pub_close(void);
 
 #endif /* COAP_PUB_H__ */

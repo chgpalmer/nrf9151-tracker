@@ -177,6 +177,42 @@ config TRACKER_REST_BACKOFF_MAX_S
 	  returned on its own (carrying it outside usually exits sooner via
 	  the cell change).
 
+config TRACKER_AGNSS
+	bool "Fetch A-GNSS assistance from the tracker server"
+	default y
+	help
+	  Pull ephemeris/time/location assistance over the existing CoAP
+	  socket (POST /agnss) and inject it with nrf_modem_gnss_agnss_write.
+	  Turns minutes of 50 bps ephemeris demodulation (which motion keeps
+	  corrupting) into a ~1 KB download. Best-effort: with the server
+	  unreachable, behaviour is identical to this option being off.
+
+config TRACKER_AGNSS_MIN_HEALTHY
+	int "Fetch when fewer GPS satellites than this have usable ephemeris"
+	default 8
+	depends on TRACKER_AGNSS
+	help
+	  The drive-gap failure mode was a 4-5 satellite inventory losing
+	  line-of-sight to one or two of them. 8 keeps headroom: any 4 of 8
+	  visible is nearly always true under open sky.
+
+config TRACKER_AGNSS_MIN_LEFT_MIN
+	int "Minutes of remaining ephemeris validity to count as usable"
+	default 30
+	depends on TRACKER_AGNSS
+	help
+	  An ephemeris about to lapse is not worth counting: refreshing at
+	  30 min remaining costs one ~1 KB fetch instead of a cold start.
+
+config TRACKER_AGNSS_COOLDOWN_S
+	int "Seconds between successful assistance fetches"
+	default 1800
+	depends on TRACKER_AGNSS
+	help
+	  Upper bound on fetch rate. Typical day: boot + every ~2 h while
+	  tracking ~= 8-12 fetches ~= 12 KB/day (~0.35 MB/mo); this floor
+	  caps the pathological case at 48/day (~1.6 MB/mo).
+
 config TRACKER_SIM_DEVICE_ID
 	string "native_sim fallback device ID"
 	default "sim-dev-1"

@@ -6,6 +6,7 @@ target_sources(app PRIVATE
   src/main.c
   src/loc/loc_fsm.c
   src/loc/motion.c
+  src/loc/agnss.c
   src/net/coap_pub.c
   src/net/obs_queue.c
   src/net/uplink.c

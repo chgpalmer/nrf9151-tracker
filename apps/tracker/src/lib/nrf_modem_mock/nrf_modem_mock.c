@@ -135,6 +135,35 @@ int32_t nrf_modem_gnss_use_case_set(uint8_t use_case)
  * ephemeris for enough satellites, well short of expiry. Otherwise loc_fsm
  * would read zeroes and keep re-entering ACQUIRE, and the sim would never
  * publish. Expiry is in minutes; broadcast ephemeris lasts about two hours. */
+/* Accept assistance writes like the real modem would: validate the buffer
+ * length against the struct the type implies, log, succeed. Lets the sim
+ * exercise the whole fetch->decode->inject path in `make demo`/smoke. */
+int32_t nrf_modem_gnss_agnss_write(void *buf, int32_t buf_len, uint16_t type)
+{
+	static const struct { uint16_t type; size_t len; } expect[] = {
+		{ NRF_MODEM_GNSS_AGNSS_GPS_EPHEMERIDES,
+		  sizeof(struct nrf_modem_gnss_agnss_gps_data_ephemeris) },
+		{ NRF_MODEM_GNSS_AGNSS_GPS_SYSTEM_CLOCK_AND_TOWS,
+		  sizeof(struct nrf_modem_gnss_agnss_gps_data_system_time_and_sv_tow) },
+		{ NRF_MODEM_GNSS_AGNSS_LOCATION,
+		  sizeof(struct nrf_modem_gnss_agnss_data_location) },
+		{ NRF_MODEM_GNSS_AGNSS_GPS_UTC_PARAMETERS,
+		  sizeof(struct nrf_modem_gnss_agnss_gps_data_utc) },
+		{ NRF_MODEM_GNSS_AGNSS_KLOBUCHAR_IONOSPHERIC_CORRECTION,
+		  sizeof(struct nrf_modem_gnss_agnss_data_klobuchar) },
+	};
+
+	if (buf == NULL || buf_len <= 0) {
+		return -1;
+	}
+	for (size_t i = 0; i < ARRAY_SIZE(expect); i++) {
+		if (expect[i].type == type) {
+			return (size_t)buf_len == expect[i].len ? 0 : -1;
+		}
+	}
+	return -1; /* type we never send */
+}
+
 int32_t nrf_modem_gnss_agnss_expiry_get(struct nrf_modem_gnss_agnss_expiry *agnss_expiry)
 {
 	if (agnss_expiry == NULL) {
