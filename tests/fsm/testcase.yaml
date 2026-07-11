@@ -1,0 +1,7 @@
+# Twister metadata (future CI); `make fsmtest` builds and runs it directly.
+tests:
+  tracker.loc_fsm:
+    platform_allow:
+      - native_sim/native/64
+    tags:
+      - fsm

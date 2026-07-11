@@ -34,7 +34,8 @@ BUILD_DEFINES := -DCONFIG_TRACKER_SERVER_HOST=\"$(TRACKER_SERVER_HOST)\" \
 endif
 
 .PHONY: setup setup-system setup-zephyr setup-tools windows-usb-passthrough \
-        build flash recover uart gdb clean sim run-sim check-workspace proto
+        build flash recover uart gdb clean sim run-sim check-workspace proto \
+        fsmtest
 
 # Regenerate both ends of the wire protocol from proto/tracker.proto:
 #   firmware -> apps/tracker/src/proto/tracker.pb.{c,h}  (nanopb)
@@ -132,3 +133,14 @@ sim: | check-workspace
 run-sim:
 > @test -f $(SIM_BUILD)/tracker/zephyr/zephyr.exe || { echo "Run 'make sim' first"; exit 1; }
 > $(SIM)
+
+# Unit-test the location FSM against docs/loc-fsm-decision-table.md (ztest on
+# native_sim; the FSM's clock is a parameter, so the 300 s timeout is instant).
+FSMTEST_BUILD := build/fsmtest
+fsmtest: | check-workspace
+> $(WEST) build -p auto -b native_sim/native/64 tests/fsm -d $(FSMTEST_BUILD)
+> @exe=$$(find $(FSMTEST_BUILD) -name zephyr.exe | head -1); \
+>  test -n "$$exe" || { echo "no test binary built"; exit 1; }; \
+>  out=$$(timeout 60 "$$exe"); status=$$?; echo "$$out"; \
+>  test $$status -eq 0 || { echo "fsmtest: binary exited $$status"; exit 1; }; \
+>  echo "$$out" | grep -q "PROJECT EXECUTION SUCCESSFUL" || { echo "fsmtest FAILED"; exit 1; }

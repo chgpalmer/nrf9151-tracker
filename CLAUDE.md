@@ -10,6 +10,7 @@ module pins have no wheels for newer Pythons; 26.04 breaks `make setup-zephyr`).
 - `make build` / `make flash` / `make uart` — hardware (`nrf9151dk/nrf9151/ns`)
 - `make sim` → `make demo` — native_sim + local CoAP server + web map on :8080
 - `./smoke.sh` — build + demo e2e; `make webtest` — headless-Chromium UI test
+- `make fsmtest` — loc_fsm unit test vs `docs/loc-fsm-decision-table.md`
 - `make proto` — regen nanopb C + server `tracker_pb2.py` after editing
   `proto/tracker.proto` (generated code is committed; never hand-edit it)
 
@@ -35,6 +36,9 @@ module pins have no wheels for newer Pythons; 26.04 breaks `make setup-zephyr`).
 4. **`loc_fsm` owns the GNSS/LTE radio arbitration.** Single `next_state()`
    writer; every transition logs `A -> B (reason)`. Timers only where no
    event exists, and each one needs a written justification.
+   `docs/loc-fsm-decision-table.md` is normative and `tests/fsm/` encodes it
+   row by row: change the FSM, the table, and the test together — `make
+   fsmtest` is mandatory for any loc_fsm change.
 5. **Verify before claiming done.** Firmware: build BOTH targets (sim +
    hardware). Webapp: `make webtest` is mandatory — parse checks and curl are
    not tests (a page can serve fine and die at runtime). End-to-end: smoke.sh.
@@ -51,8 +55,8 @@ module pins have no wheels for newer Pythons; 26.04 breaks `make setup-zephyr`).
   fixes, log batches. Mixed-month ≈ 1.7 MB + logs.
 - Known unsolved data cost: **parked devices** — CELL_LOOP samples a cell
   every 30 s (~7.4 MB/mo if parked in it all month) and failed-acquire churn
-  narrates ~1 KB/cycle. Fix = adaptive cadence / quiescent mode (queued;
-  prerequisite: the FSM decision-table review + ztest).
+  narrates ~1 KB/cycle. Fix = adaptive cadence / quiescent mode (queued; its
+  prerequisite — the FSM decision-table review + ztest — is DONE).
 - Phase 2 (specced, queued): flash flight recorder + obs spill on the DK's
   32 MB NOR, epoch timestamps, log byte-budget backstop.
 - GNSS acquisition-while-moving is weak (ephemeris demodulation needs steady

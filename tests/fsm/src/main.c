@@ -1,0 +1,476 @@
+/*
+ * loc_fsm unit test: encodes docs/loc-fsm-decision-table.md row by row.
+ *
+ * The table is normative. Every test names the row(s) it pins (A1, B1, ...).
+ * If a test fails after an FSM change, either the change is wrong or the
+ * table needs a deliberate edit — never silently adjust the test.
+ *
+ * The FSM takes its clock as a parameter, so time here is a plain variable:
+ * the 300 s acquire timeout costs one addition, not five minutes.
+ */
+#include <string.h>
+#include <zephyr/ztest.h>
+#include <nrf_modem_gnss.h>
+#include "loc_fsm.h"
+
+/* Internal loc_fsm.c constants without Kconfig symbols, mirrored here.
+ * If one changes there, the corresponding row test fails — intended. */
+#define SKY_GRACE_MS    30000
+#define VISIBLE_LOST_MS 10000
+#define CHOPPED_EPOCHS  10
+#define EPHE_POLL_MS    5000
+
+#define ACQUIRE_CAP_MS (CONFIG_TRACKER_LOC_ACQUIRE_TIMEOUT_S * 1000)
+#define STALE_MS       (CONFIG_TRACKER_GPS_STALE_S * 1000)
+#define EMPTY_EPOCHS   CONFIG_TRACKER_LOC_SKY_EMPTY_EPOCHS
+#define POST_MS        (CONFIG_TRACKER_POST_INTERVAL_S * 1000)
+#define CELL_POST_MS   (CONFIG_TRACKER_CELL_POST_INTERVAL_S * 1000)
+
+#define CN0_STRONG ((CONFIG_TRACKER_LOC_CN0_MIN_DBHZ + 13) * 10)
+#define CN0_WEAK   ((CONFIG_TRACKER_LOC_CN0_MIN_DBHZ - 7) * 10)
+
+/* ── fake clock ─────────────────────────────────────────────────────────── */
+
+static int64_t t;
+
+/* ── fake modem: the one call loc_fsm.c makes ───────────────────────────── */
+
+static struct nrf_modem_gnss_agnss_expiry fake_ephe;
+static int32_t fake_ephe_ret;
+
+int32_t nrf_modem_gnss_agnss_expiry_get(struct nrf_modem_gnss_agnss_expiry *out)
+{
+	if (fake_ephe_ret != 0) {
+		return fake_ephe_ret;
+	}
+	*out = fake_ephe;
+	return 0;
+}
+
+/* Inventory of n satellites (IDs 1..n) each holding an ephemeris that expires
+ * in expiry_min minutes. The FSM polls this at most every EPHE_POLL_MS;
+ * set it BEFORE driving (init backdates the poll clock, so the first update
+ * always reads it). */
+static void set_ephe(int n, uint16_t expiry_min)
+{
+	memset(&fake_ephe, 0, sizeof(fake_ephe));
+	fake_ephe.sv_count = n;
+	for (int i = 0; i < n; i++) {
+		fake_ephe.sv[i].sv_id = i + 1;
+		fake_ephe.sv[i].ephe_expiry = expiry_min;
+	}
+}
+
+/* ── one 1 Hz epoch ─────────────────────────────────────────────────────── */
+
+#define OBSERVED 0
+#define BLANKED  NRF_MODEM_GNSS_PVT_FLAG_DEADLINE_MISSED
+#define CHOPPED  NRF_MODEM_GNSS_PVT_FLAG_NOT_ENOUGH_WINDOW_TIME
+
+/* Advance the clock one second and feed one PVT frame. Satellites get IDs
+ * 1..tracked so they line up with set_ephe()'s inventory. */
+static struct loc_status step_full(bool fix, int tracked, uint16_t cn0,
+				   uint32_t flags, bool lte)
+{
+	struct nrf_modem_gnss_pvt_data_frame pvt = { 0 };
+	struct loc_status st;
+
+	pvt.flags = flags | (fix ? NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID : 0);
+	for (int i = 0; i < tracked && i < NRF_MODEM_GNSS_MAX_SATELLITES; i++) {
+		pvt.sv[i].sv = i + 1;
+		pvt.sv[i].cn0 = cn0;
+	}
+
+	t += 1000;
+	loc_fsm_update(&pvt, t, lte, &st);
+	return st;
+}
+
+static struct loc_status step(bool fix, int tracked, uint32_t flags)
+{
+	return step_full(fix, tracked, CN0_STRONG, flags, true);
+}
+
+/* Evaluate the status expression exactly once: zassert's message args are
+ * function arguments, evaluated even on pass — a bare step() in them would
+ * silently run every epoch twice. */
+#define ASSERT_STATE(expr, want) do { \
+	struct loc_status _st = (expr); \
+	zassert_equal(_st.state, (want), "in %s, expected %s", \
+		      loc_state_str(_st.state), loc_state_str(want)); \
+} while (0)
+
+/* ── drivers: shortest table-sanctioned path to each state ──────────────── */
+
+static void reset_fsm(void)
+{
+	t = 1000000;
+	fake_ephe_ret = 0;
+	set_ephe(0, 0);
+	loc_fsm_init(t);
+	/* read_sky()'s ephemeris_visible carries the last OBSERVED value in a
+	 * function-static that init cannot reset; every scenario below feeds
+	 * tracked > 0 before depending on it, which recomputes it. */
+}
+
+static void to_report_cell(void)
+{
+	ASSERT_STATE(step(false, 0, OBSERVED), LOC_REPORT_CELL); /* A1 */
+}
+
+static void to_acquire(void)
+{
+	to_report_cell();
+	loc_fsm_note_cell_sent();
+	ASSERT_STATE(step(false, 0, OBSERVED), LOC_GNSS_ACQUIRE); /* B2 */
+}
+
+static void to_report_gnss(void)
+{
+	to_report_cell();
+	ASSERT_STATE(step(true, 4, OBSERVED), LOC_REPORT_GNSS); /* B1 */
+}
+
+static void to_exclusive(void)
+{
+	to_acquire();
+	for (int i = 0; i < CHOPPED_EPOCHS - 1; i++) {
+		ASSERT_STATE(step(false, 0, CHOPPED), LOC_GNSS_ACQUIRE);
+	}
+	ASSERT_STATE(step(false, 0, CHOPPED), LOC_GNSS_EXCLUSIVE); /* C2 */
+}
+
+static void to_cell_loop(void)
+{
+	to_acquire();
+	t += ACQUIRE_CAP_MS;
+	ASSERT_STATE(step(false, 1, OBSERVED), LOC_CELL_LOOP); /* C3 */
+}
+
+/* ── LTE_ATTACH / REPORT_CELL ───────────────────────────────────────────── */
+
+ZTEST(loc_fsm, test_a1_registered)
+{
+	ASSERT_STATE(step_full(false, 0, 0, OBSERVED, false), LOC_LTE_ATTACH);
+	ASSERT_STATE(step(false, 0, OBSERVED), LOC_REPORT_CELL);
+}
+
+/* A1 clears cell_sent on entry: a latch left over from a previous cycle must
+ * not satisfy B2 (F-3 documents that a *queued-stale* cell can; a latch from
+ * before this registration cannot). */
+ZTEST(loc_fsm, test_a1_clears_stale_cell_sent)
+{
+	loc_fsm_note_cell_sent();
+	to_report_cell();
+	ASSERT_STATE(step(false, 0, OBSERVED), LOC_REPORT_CELL);
+	ASSERT_STATE(step(false, 0, OBSERVED), LOC_REPORT_CELL);
+}
+
+ZTEST(loc_fsm, test_b1_beats_b2)
+{
+	to_report_cell();
+	loc_fsm_note_cell_sent();
+	/* Both rows armed: B1 (fix) must win over B2 (cell reported). */
+	ASSERT_STATE(step(true, 4, OBSERVED), LOC_REPORT_GNSS);
+}
+
+ZTEST(loc_fsm, test_b2_cell_reported)
+{
+	to_acquire();
+}
+
+/* ── GNSS_ACQUIRE ───────────────────────────────────────────────────────── */
+
+ZTEST(loc_fsm, test_c1_fix)
+{
+	to_acquire();
+	ASSERT_STATE(step(true, 4, OBSERVED), LOC_REPORT_GNSS);
+}
+
+ZTEST(loc_fsm, test_c2_chopped_escalates)
+{
+	to_exclusive();
+}
+
+/* One observed clean window resets the chopped streak: escalation needs
+ * CHOPPED_EPOCHS *consecutive* chopped epochs. */
+ZTEST(loc_fsm, test_c2_clean_window_resets_streak)
+{
+	to_acquire();
+	for (int i = 0; i < CHOPPED_EPOCHS - 1; i++) {
+		ASSERT_STATE(step(false, 0, CHOPPED), LOC_GNSS_ACQUIRE);
+	}
+	ASSERT_STATE(step(false, 1, OBSERVED), LOC_GNSS_ACQUIRE);
+	for (int i = 0; i < CHOPPED_EPOCHS - 1; i++) {
+		ASSERT_STATE(step(false, 0, CHOPPED), LOC_GNSS_ACQUIRE);
+	}
+	ASSERT_STATE(step(false, 0, CHOPPED), LOC_GNSS_EXCLUSIVE);
+}
+
+/* F-4: a blanked epoch (DEADLINE_MISSED, GNSS never had the radio) neither
+ * advances nor resets the chopped streak. */
+ZTEST(loc_fsm, test_c2_blanked_carries_chopped_streak)
+{
+	to_acquire();
+	for (int i = 0; i < CHOPPED_EPOCHS - 1; i++) {
+		ASSERT_STATE(step(false, 0, CHOPPED), LOC_GNSS_ACQUIRE);
+	}
+	ASSERT_STATE(step(false, 0, BLANKED), LOC_GNSS_ACQUIRE);
+	ASSERT_STATE(step(false, 0, CHOPPED), LOC_GNSS_EXCLUSIVE);
+}
+
+ZTEST(loc_fsm, test_c3_acquire_timeout)
+{
+	/* tracked=1 the whole way: a teasing sky must ride out the FULL cap
+	 * (sky-empty never fires), then C3 takes it to CELL_LOOP. */
+	to_cell_loop();
+}
+
+ZTEST(loc_fsm, test_c4_sky_empty_after_grace)
+{
+	to_acquire();
+	/* The streak accumulates during the cold-start grace but must not
+	 * exit inside it... */
+	for (int i = 0; i < EMPTY_EPOCHS + 2; i++) {
+		ASSERT_STATE(step(false, 0, OBSERVED), LOC_GNSS_ACQUIRE);
+	}
+	/* ...and the first empty epoch past the grace completes the exit. */
+	t += SKY_GRACE_MS;
+	ASSERT_STATE(step(false, 0, OBSERVED), LOC_CELL_LOOP);
+}
+
+/* F-4, the core case: blanked epochs pause the empty-sky count — absence of
+ * observation is not observation of absence. */
+ZTEST(loc_fsm, test_c4_blanked_pauses_empty_streak)
+{
+	to_acquire();
+	t += SKY_GRACE_MS; /* past the grace; only the streak matters now */
+	for (int i = 0; i < EMPTY_EPOCHS - 1; i++) {
+		ASSERT_STATE(step(false, 0, OBSERVED), LOC_GNSS_ACQUIRE);
+	}
+	for (int i = 0; i < 20; i++) {
+		ASSERT_STATE(step(false, 0, BLANKED), LOC_GNSS_ACQUIRE);
+	}
+	ASSERT_STATE(step(false, 0, OBSERVED), LOC_CELL_LOOP);
+}
+
+/* A sighting resets the empty streak: giving up needs CONSECUTIVE observed
+ * emptiness. */
+ZTEST(loc_fsm, test_c4_sighting_resets_empty_streak)
+{
+	to_acquire();
+	t += SKY_GRACE_MS;
+	for (int i = 0; i < EMPTY_EPOCHS - 1; i++) {
+		ASSERT_STATE(step(false, 0, OBSERVED), LOC_GNSS_ACQUIRE);
+	}
+	ASSERT_STATE(step(false, 1, OBSERVED), LOC_GNSS_ACQUIRE);
+	for (int i = 0; i < EMPTY_EPOCHS - 1; i++) {
+		ASSERT_STATE(step(false, 0, OBSERVED), LOC_GNSS_ACQUIRE);
+	}
+	ASSERT_STATE(step(false, 0, OBSERVED), LOC_CELL_LOOP);
+}
+
+/* ── GNSS_EXCLUSIVE ─────────────────────────────────────────────────────── */
+
+/* D-rows run with lte_registered=false throughout — registration lapsing is
+ * the point of the state, and the global override must NOT bounce it. */
+
+ZTEST(loc_fsm, test_d1_fix)
+{
+	to_exclusive();
+	ASSERT_STATE(step_full(false, 0, 0, OBSERVED, false), LOC_GNSS_EXCLUSIVE);
+	ASSERT_STATE(step_full(true, 4, CN0_STRONG, OBSERVED, false),
+		     LOC_REPORT_GNSS);
+}
+
+ZTEST(loc_fsm, test_d2_timeout)
+{
+	to_exclusive();
+	t += ACQUIRE_CAP_MS;
+	ASSERT_STATE(step_full(false, 1, CN0_WEAK, OBSERVED, false),
+		     LOC_CELL_LOOP);
+}
+
+ZTEST(loc_fsm, test_d3_sky_empty)
+{
+	to_exclusive();
+	t += SKY_GRACE_MS;
+	for (int i = 0; i < EMPTY_EPOCHS - 1; i++) {
+		ASSERT_STATE(step_full(false, 0, 0, OBSERVED, false),
+			     LOC_GNSS_EXCLUSIVE);
+	}
+	ASSERT_STATE(step_full(false, 0, 0, OBSERVED, false), LOC_CELL_LOOP);
+}
+
+/* ── global override ────────────────────────────────────────────────────── */
+
+ZTEST(loc_fsm, test_override_from_report_cell)
+{
+	to_report_cell();
+	ASSERT_STATE(step_full(false, 0, 0, OBSERVED, false), LOC_LTE_ATTACH);
+}
+
+ZTEST(loc_fsm, test_override_from_acquire)
+{
+	to_acquire();
+	ASSERT_STATE(step_full(false, 0, 0, OBSERVED, false), LOC_LTE_ATTACH);
+}
+
+ZTEST(loc_fsm, test_override_from_report_gnss)
+{
+	to_report_gnss();
+	ASSERT_STATE(step_full(true, 4, CN0_STRONG, OBSERVED, false),
+		     LOC_LTE_ATTACH);
+}
+
+ZTEST(loc_fsm, test_override_from_cell_loop)
+{
+	to_cell_loop();
+	ASSERT_STATE(step_full(false, 0, 0, OBSERVED, false), LOC_LTE_ATTACH);
+}
+
+/* ── REPORT_GNSS ────────────────────────────────────────────────────────── */
+
+ZTEST(loc_fsm, test_e1_sky_lost)
+{
+	to_report_gnss();
+	/* Observed-empty epochs: the streak passes EMPTY_EPOCHS long before
+	 * the fix goes stale, so the moment it does, E1 (not E2) fires. */
+	for (int i = 1; i < STALE_MS / 1000; i++) {
+		ASSERT_STATE(step(false, 0, OBSERVED), LOC_REPORT_GNSS);
+	}
+	ASSERT_STATE(step(false, 0, OBSERVED), LOC_CELL_LOOP);
+}
+
+ZTEST(loc_fsm, test_e2_stale_hotstart_dead)
+{
+	/* No ephemeris inventory at all: satellites are tracked (so the sky
+	 * is not empty) but none can seed a hot start. */
+	to_report_gnss();
+	for (int i = 1; i < STALE_MS / 1000; i++) {
+		ASSERT_STATE(step(false, 3, OBSERVED), LOC_REPORT_GNSS);
+	}
+	ASSERT_STATE(step(false, 3, OBSERVED), LOC_GNSS_ACQUIRE);
+}
+
+ZTEST(loc_fsm, test_e3_stale_but_hotstart_viable_waits)
+{
+	struct loc_status st;
+
+	/* 4 tracked satellites with valid ephemeris: a re-fix is a hot start,
+	 * so REPORT_GNSS waits — indefinitely — instead of disturbing LTE. */
+	set_ephe(4, 120);
+	to_report_gnss();
+	for (int i = 1; i <= STALE_MS / 1000 + 10; i++) {
+		st = step(false, 4, OBSERVED);
+		ASSERT_STATE(st, LOC_REPORT_GNSS);
+	}
+	zassert_false(st.gps_current, "fix should be stale by now");
+	zassert_true(st.prefer_cell, "stale fix must fall back to cell");
+	/* The awaited re-fix arrives: still REPORT_GNSS, GPS preferred again. */
+	st = step(true, 4, OBSERVED);
+	ASSERT_STATE(st, LOC_REPORT_GNSS);
+	zassert_false(st.prefer_cell, "current fix must prefer GPS");
+}
+
+/* F-1 regression: a current fix with ephemeris about to expire must STAY in
+ * REPORT_GNSS. The deleted E4 transition bounced to ACQUIRE and back at 1 Hz
+ * for the whole refresh window — two INF lines per second onto the uplink. */
+ZTEST(loc_fsm, test_f1_expiring_ephemeris_never_exits)
+{
+	struct loc_status st;
+
+	set_ephe(4, 5); /* well under the old 15 min refresh threshold */
+	to_report_gnss();
+	for (int i = 0; i < 3 * EPHE_POLL_MS / 1000; i++) {
+		st = step(true, 4, OBSERVED);
+		ASSERT_STATE(st, LOC_REPORT_GNSS);
+	}
+	/* Prove the trap was actually armed, not vacuously green. */
+	zassert_equal(st.ephemeris_held, 4, "expected 4 held, got %u",
+		      st.ephemeris_held);
+	zassert_equal(st.min_ephe_expiry_min, 5, "expected expiry 5, got %u",
+		      st.min_ephe_expiry_min);
+}
+
+/* ── CELL_LOOP ──────────────────────────────────────────────────────────── */
+
+ZTEST(loc_fsm, test_g1_fix_returned)
+{
+	to_cell_loop();
+	ASSERT_STATE(step(true, 4, OBSERVED), LOC_REPORT_GNSS);
+}
+
+/* G2: ONE tracked satellite — however weak, even in a chopped window —
+ * earns a real acquisition attempt. Chopped windows understate the sky. */
+ZTEST(loc_fsm, test_g2_single_weak_sighting)
+{
+	to_cell_loop();
+	ASSERT_STATE(step(false, 0, OBSERVED), LOC_CELL_LOOP);
+	ASSERT_STATE(step(false, 0, BLANKED), LOC_CELL_LOOP);
+	ASSERT_STATE(step_full(false, 1, CN0_WEAK, CHOPPED, true),
+		     LOC_GNSS_ACQUIRE);
+}
+
+/* ── outputs table ──────────────────────────────────────────────────────── */
+
+static void check_outputs(struct loc_status st, bool gnss, bool lte,
+			  bool publish, uint32_t interval)
+{
+	zassert_equal(st.gnss_wanted, gnss, "%s: gnss_wanted",
+		      loc_state_str(st.state));
+	zassert_equal(st.lte_wanted, lte, "%s: lte_wanted",
+		      loc_state_str(st.state));
+	zassert_equal(st.publish_allowed, publish, "%s: publish_allowed",
+		      loc_state_str(st.state));
+	zassert_equal(st.publish_interval_ms, interval, "%s: interval",
+		      loc_state_str(st.state));
+}
+
+ZTEST(loc_fsm, test_outputs_by_state)
+{
+	struct loc_status st;
+
+	st = step_full(false, 0, 0, OBSERVED, false); /* LTE_ATTACH */
+	check_outputs(st, false, true, false, POST_MS);
+
+	st = step(false, 0, OBSERVED); /* -> REPORT_CELL */
+	check_outputs(st, true, true, true, POST_MS);
+	zassert_true(st.prefer_cell, "REPORT_CELL: prefer_cell");
+
+	loc_fsm_note_cell_sent();
+	st = step(false, 0, OBSERVED); /* -> GNSS_ACQUIRE */
+	check_outputs(st, true, true, false, POST_MS);
+
+	for (int i = 0; i < CHOPPED_EPOCHS; i++) {
+		st = step(false, 0, CHOPPED); /* -> GNSS_EXCLUSIVE */
+	}
+	ASSERT_STATE(st, LOC_GNSS_EXCLUSIVE);
+	/* gnss_wanted holds even though registration lapses: the exception
+	 * written into the output rule. */
+	st = step_full(false, 0, 0, OBSERVED, false);
+	check_outputs(st, true, false, false, POST_MS);
+
+	st = step_full(true, 4, CN0_STRONG, OBSERVED, false); /* -> REPORT_GNSS */
+	ASSERT_STATE(st, LOC_REPORT_GNSS);
+	st = step(true, 4, OBSERVED);
+	check_outputs(st, true, true, true, POST_MS);
+	zassert_false(st.prefer_cell, "REPORT_GNSS+fix: prefer_cell");
+
+	reset_fsm();
+	to_cell_loop();
+	st = step(false, 0, OBSERVED);
+	ASSERT_STATE(st, LOC_CELL_LOOP);
+	check_outputs(st, true, true, true, CELL_POST_MS);
+	zassert_true(st.prefer_cell, "CELL_LOOP: prefer_cell");
+}
+
+/* ── suite ──────────────────────────────────────────────────────────────── */
+
+static void before_each(void *fixture)
+{
+	ARG_UNUSED(fixture);
+	reset_fsm();
+}
+
+ZTEST_SUITE(loc_fsm, NULL, NULL, before_each, NULL, NULL);
