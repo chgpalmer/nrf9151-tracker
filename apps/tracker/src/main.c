@@ -538,7 +538,9 @@ int main(void)
 		prev_state = loc.state;
 		if (obs_queue_len() > 0 && loc.publish_allowed && coap_pub_ready() &&
 		    (state_changed || loc.state == LOC_REPORT_CELL ||
-		     obs_queue_len() >= 20 ||
+		     /* 50 = one full track segment (an MTU-sized datagram); at 1 Hz
+	      * this wakes the radio every ~50 s while moving. */
+	     obs_queue_len() >= 50 ||
 		     now - last_flush_ms >= FLUSH_INTERVAL_MS)) {
 			bool had_cell = obs_queue_has_cell();
 

@@ -6,9 +6,13 @@ config TRACKER_LOG_LEVEL
 	range 0 4
 
 config TRACKER_POST_INTERVAL_S
-	int "Publish interval in seconds"
-	default 10
+	int "GPS sample interval in seconds"
+	default 1
 	range 1 3600
+	help
+	  How often a GPS fix is queued while reporting. 1 Hz matches the GNSS
+	  PVT rate and costs ~7 B/point on the wire as track-segment deltas;
+	  the flush cadence, not this, decides how often the radio wakes.
 
 config TRACKER_GPS_STALE_S
 	int "Seconds since last GPS fix before it's considered stale (use cell)"
