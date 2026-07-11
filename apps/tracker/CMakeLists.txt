@@ -7,8 +7,8 @@ target_sources(app PRIVATE
   src/loc/loc_fsm.c
   src/net/coap_pub.c
   src/net/obs_queue.c
-  # Generated from proto/tracker.cddl by `make proto` — do not edit.
-  src/proto/tracker_encode.c
+  # Generated from proto/tracker.proto by `make proto` — do not edit.
+  src/proto/tracker.pb.c
 )
 target_include_directories(app PRIVATE src/loc src/net src/proto)
 

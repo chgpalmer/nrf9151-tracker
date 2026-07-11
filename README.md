@@ -17,7 +17,7 @@ board's USB is brought across the WSL2 boundary once with
 curl -fsSL https://raw.githubusercontent.com/chgpalmer/nrf9151-tracker/main/setup.sh | bash
 cd nrf9151-tracker-ws/nrf9151-tracker
 make setup-tools               # host tools: nrfutil, usbip, tio
-make setup-host                # server tools: Python deps (aiocoap, zcbor)
+make setup-host                # server tools: Python deps (aiocoap, protobuf)
 make build                     # build the default app (tracker), non-secure
 make windows-usb-passthrough   # attach the J-Link into WSL (usbipd)
 make flash
@@ -30,6 +30,12 @@ make demo                      # run local CoAP server + web map + sim
 venv, runs `west init -m <this repo>`, then `make setup-zephyr` (system build deps +
 west update + minimal Zephyr SDK). The workspace is created **under the current
 directory** — override with `WS=~/my-path bash <(curl ...)`. Idempotent.
+
+**Supported host: Ubuntu 24.04 LTS (Python 3.12).** The NCS modules pin exact
+Python package versions (nanopb pins `grpcio-tools==1.68.0`, nrf pins `hidapi`)
+that ship prebuilt wheels only up to Python 3.13 — on a newer Python (e.g. 3.14
+on Ubuntu 26.04) pip falls back to building them from source and `make
+setup-zephyr` dies mid-pip. Stick to an LTS release.
 
 ## Configuration (`.env`)
 
@@ -126,38 +132,52 @@ the domain must resolve to this host, and OCI/cloud security lists must allow
 
 ## Wire protocol
 
-Reports go as **CBOR in non-confirmable CoAP POSTs over UDP** (`coap://server:5683/obs`).
-The schema lives in one place — `proto/tracker.cddl` — and both sides consume it:
-the firmware's encoders are generated from it ([zcbor](https://github.com/NordicSemiconductor/zcbor),
-already a west module of this workspace), and the CoAP server decodes/validates
-against the same file at runtime, so the two cannot drift apart silently.
+Reports go as **protobuf in non-confirmable CoAP POSTs over UDP**
+(`coap://server:5683/obs`). The schema lives in one place —
+`proto/tracker.proto` (+ `tracker.options` for nanopb) — and both sides consume
+generated code from it: the firmware encodes with
+[nanopb](https://github.com/nanopb/nanopb) (a west module of this workspace),
+the server decodes with the committed `server/tracker_pb2.py`, so the two cannot
+drift apart silently.
 
 ```sh
-vi proto/tracker.cddl          # edit the schema (never the generated C)
-make proto                     # regenerate apps/tracker/src/proto/  (committed)
+vi proto/tracker.proto         # edit the schema (never the generated code)
+make proto                     # regen apps/tracker/src/proto/ + server/tracker_pb2.py
 ```
 
-Why this transport: a GPS report is **96 B on air with no downlink** (49 B CBOR +
-19 B CoAP + UDP/IP) vs ~161 B up + a ~40 B TCP ACK down for the old MQTT/JSON path.
+The unit of GPS data is a **track segment**: one absolute anchor fix plus packed
+delta arrays (`dlat`/`dlon`/`spd_dms` as zigzag varints) at a fixed cadence, so
+per-point time is implicit (anchor age + i×dt) and a moving point costs ~5–7 B
+instead of ~33 B. Speed is the GNSS Doppler measurement, sent per point — NOT
+derived from position deltas on the server, which carries ~8 km/h of jitter at
+1 Hz and is unusable at higher rates. A stationary run is zero-deltas (~3 B per
+point). The firmware caps a segment at 50 points *before* encoding (packed
+arrays are written field-by-field, so a mid-encode cap would desync them) and
+that keeps every datagram under the ~512 B safe cellular MTU; longer flushes
+just emit several datagrams. Adding a per-point field later (e.g. lean angle) is
+a new packed array — old decoders skip it, no version bump.
 
 ### Data budget (against a 10 MB/month IoT plan)
 
-| Scenario | Per day | Per 30 days |
-|---|---|---|
-| 24 h GPS reporting @ 10 s (96 B each) | 810 KB | **24.9 MB — over budget** |
-| 24 h cell reporting @ 30 s (86 B each) | 242 KB | 7.4 MB |
-| Mixed day: 20 h indoors + 4 h moving | 337 KB | **10.3 MB — at the edge** |
+Measured wire sizes (payload + 47 B UDP/IP + CoAP per datagram, IPv4):
 
-Half of every report is per-datagram overhead (47 of 96 B), so batching ~10
-observations into one datagram cuts ~44%. The bigger lever is not re-reporting
-an unmoved position at all: a stationary tracker on a slow heartbeat spends
-10–60× less. (Carrier accounting may round per-session; treat these as floors.)
-Reports carry the RFC 7967 No-Response option, and the firmware sets `SO_RAI`
-(`RAI_LAST`) before each send — with nothing coming back, the modem releases the
-radio connection immediately after the datagram, which is also what keeps GNSS
-acquisition windows intact. Note the ingest is **anonymous and unauthenticated**
-(as the MQTT broker was); DTLS-PSK via the modem's offloaded sockets is the
-upgrade path when that starts to matter.
+| Scenario | Per datagram | 30 days |
+|---|---|---|
+| 1 Hz driving, flushed every 60 s | ~395 B (60 pts, ~6.6 B/pt) | — |
+| Cell keepalive | ~86 B | — |
+| Mixed month: 2 h/day 1 Hz driving + keepalives /15 min | — | **~1.7 MB** |
+| 10 Hz race-telemetry burst | ~4.8 B/pt | ~150 KB per hour |
+
+The levers, in measured order of impact: flush interval (2.5×), delta-vs-full
+representation (4×), per-datagram overhead, and only then the encoding container
+(<5% between protobuf / CBOR / hand-packed — protobuf was chosen for hot-path
+extensibility, not bytes). Carrier accounting may round per-session; treat these
+as floors. Reports carry the RFC 7967 No-Response option, and the firmware sets
+`SO_RAI` (`RAI_LAST`) before each send — with nothing coming back, the modem
+releases the radio connection immediately after the datagram, which is also what
+keeps GNSS acquisition windows intact. Note the ingest is **anonymous and
+unauthenticated** (as the MQTT broker was); DTLS-PSK via the modem's offloaded
+sockets is the upgrade path when that starts to matter.
 
 ## Apps
 
@@ -178,12 +198,13 @@ nrf9151-tracker-ws/          workspace root (created by setup.sh)
     smoke.sh            smoke test: make build + make demo end-to-end
     env.template        copy to .env for host-specific config (server, domain)
     proto/
-      tracker.cddl      wire schema — single source for fw encoders + server decode
+      tracker.proto     wire schema — single source for fw + server codecs
+      tracker.options   nanopb field options (callbacks, not fixed arrays)
     mk/
       fw.mk             firmware/Zephyr targets (build, flash, debug, sim, proto)
       server.mk         server/host services (CoAP ingest, web, Caddy)
     apps/<name>/        CMakeLists.txt, prj.conf, src/main.c
-    server/             Python CoAP ingest (aiocoap + zcbor), FastAPI web map
+    server/             Python CoAP ingest (aiocoap + protobuf), FastAPI web map
     scripts/
       setup-system.sh   installs the Zephyr apt build deps
       setup-tools.sh    installs nrfutil / usbip / tio

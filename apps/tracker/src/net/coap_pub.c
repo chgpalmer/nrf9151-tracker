@@ -107,7 +107,7 @@ int coap_pub_send(const uint8_t *payload, size_t len)
 		return err;
 	}
 	err = coap_append_option_int(&pkt, COAP_OPTION_CONTENT_FORMAT,
-				     COAP_CONTENT_FORMAT_APP_CBOR);
+				     COAP_CONTENT_FORMAT_APP_OCTET_STREAM);
 	if (err) {
 		return err;
 	}

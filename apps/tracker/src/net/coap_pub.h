@@ -1,8 +1,8 @@
 /*
  * CoAP/UDP publisher: fire-and-forget observation reports.
  *
- * One connected UDP socket, non-confirmable POSTs to /obs with a CBOR payload
- * (see proto/tracker.cddl). Non-confirmable matches the old MQTT QoS 0
+ * One connected UDP socket, non-confirmable POSTs to /obs with a protobuf
+ * payload (see proto/tracker.proto). Non-confirmable matches the old MQTT QoS 0
  * semantics: a lost report is superseded by the next one, and no reply means
  * RAI can release RRC immediately after the send -- this is where UDP beats
  * the old TCP path, whose broker ACK kept the radio up seconds longer.

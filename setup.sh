@@ -68,7 +68,7 @@ cat <<EOF
 == bootstrap complete ==
   cd $REPO_DIR
   make setup-tools               # host tools: nrfutil, usbip, tio
-  make setup-host                # server tools: mosquitto, Python deps
+  make setup-host                # server tools: Python deps (aiocoap, protobuf)
   make build                     # build firmware
   make demo                      # run local server + sim
 EOF

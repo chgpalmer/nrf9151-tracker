@@ -2,7 +2,7 @@
 # Smoke test: the two flows that must never break.
 #
 #   1. make build   firmware for the DK (default APP/BOARD)
-#   2. make demo    localhost end-to-end: broker + ingest + web + sim
+#   2. make demo    localhost end-to-end: CoAP ingest + web + sim
 #
 # `make demo` runs in the foreground forever, so we background it, wait for the
 # web map to answer, check the sim's data actually reached the API, then tear
@@ -39,7 +39,7 @@ curl -fsS "http://127.0.0.1:$HTTP_PORT/" | grep -q '<title>' \
 echo "web map OK"
 
 step "waiting for the sim's observations to reach the API"
-# The sim publishes over MQTT -> ingest -> SQLite -> /api/devices.
+# The sim publishes over CoAP/protobuf -> ingest -> SQLite -> /api/devices.
 for _ in $(seq "$TIMEOUT"); do
   if curl -fsS "http://127.0.0.1:$HTTP_PORT/api/devices" | grep -q '"device_id"'; then
     echo "device data OK"

@@ -121,8 +121,8 @@ clean:
 > rm -rf $(BUILD)
 
 # Build the tracker for native_sim (host Linux process). The sim always talks
-# to the local broker on $(BROKER_HOST) (localhost) — that is independent of the
-# hardware TRACKER_BROKER_HOST used by `make build APP=tracker`.
+# to the local CoAP server on $(SIM_SERVER_HOST) (localhost) — independent of the
+# hardware TRACKER_SERVER_HOST used by `make build APP=tracker`.
 sim: | check-workspace
 > $(WEST) build -p auto -b native_sim/native/64 apps/tracker -d $(SIM_BUILD) \
 >   -DCONFIG_TRACKER_SERVER_HOST=\"$(SIM_SERVER_HOST)\"

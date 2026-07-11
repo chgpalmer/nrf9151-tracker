@@ -2,7 +2,7 @@
 #
 # Split across:
 #   mk/fw.mk      firmware: build/flash/debug on the DK + native_sim (Zephyr)
-#   mk/server.mk  server/host services: broker, ingest, web map, Caddy
+#   mk/server.mk  server/host services: CoAP ingest, web map, Caddy
 # This file owns shared config and the cross-cutting entry points (demo).
 #
 # Main targets:
@@ -10,10 +10,10 @@
 #   make build        build APP for BOARD  (default APP=tracker)
 #   make flash        flash APP to the DK
 #   make setup-host   one-time server setup (mosquitto + Python deps)
-#   make demo         localhost end-to-end: broker + ingest + web + sim
-#   make serve        real server: broker + ingest + web (no sim)
+#   make demo         localhost end-to-end: CoAP ingest + web + sim
+#   make serve        real server: CoAP ingest + web (no sim)
 #
-# Host-specific config (broker host, HTTPS domain) lives in a git-ignored .env;
+# Host-specific config (server host, HTTPS domain) lives in a git-ignored .env;
 # copy env.template to .env and edit. Precedence: CLI > .env > built-in default.
 
 # Use bash everywhere: recipes rely on /dev/tcp, `trap`, and other bashisms.
@@ -113,7 +113,7 @@ help:
 > @echo "  make stop                     stop coap + server + sims (free ports)"
 > @echo ""
 > @echo "PROTOCOL"
-> @echo "  make proto                    regen CBOR encoders from proto/tracker.cddl"
+> @echo "  make proto                    regen protobuf codecs from proto/tracker.proto"
 > @echo ""
 > @echo "Current: APP=$(APP)  BOARD=$(BOARD)  PORT=$(PORT)  RUNNER=$(RUNNER)"
 > @echo "Apps available: $$(ls apps 2>/dev/null | tr '\n' ' ')"

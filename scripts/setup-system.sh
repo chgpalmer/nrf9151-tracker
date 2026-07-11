@@ -13,12 +13,6 @@ PKGS=(
   git cmake ninja-build gperf ccache dfu-util device-tree-compiler wget
   python3-dev python3-venv python3-pip python3-tk
   xz-utils file make gcc gcc-multilib g++-multilib libsdl2-dev libmagic1
-  # `west packages pip --install` pulls hidapi (pinned by nrf's
-  # requirements-fixed.txt). On Pythons with no prebuilt hidapi wheel -- 3.14 on
-  # Ubuntu 26.04, for one -- pip builds it from source, and that build shells out
-  # to pkg-config looking for libusb-1.0 headers. Without these, setup-zephyr
-  # dies at the pip step with "pkg-config package 'libusb-1.0 >= 1.0.9' not found".
-  pkg-config libusb-1.0-0-dev
 )
 
 if ! command -v apt-get >/dev/null 2>&1; then
