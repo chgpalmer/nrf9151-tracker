@@ -46,9 +46,11 @@ module pins have no wheels for newer Pythons; 26.04 breaks `make setup-zephyr`).
    make setup-host`, restart), then flash. Static assets are served
    `Cache-Control: no-cache`; after structural JS renames, hard-refresh once.
 7. **Design before feature code.** Brainstorm with the user first (they want
-   discussion, not option menus); approved designs live in
-   `docs/superpowers/specs/`. Grade ideas against measured evidence; record
-   rejected ideas with reasons.
+   discussion, not option menus). Design specs are working documents: write
+   them to `docs/superpowers/specs/` (git-ignored) and follow them, but
+   NEVER commit them — durable knowledge belongs in code comments, module
+   docs, or the decision table. Grade ideas against measured evidence;
+   record rejected ideas with reasons.
 
 ## State of play (update when it changes)
 - Wire: protobuf v3 — anchor+delta track segments (~5-7 B/pt @1 Hz), cell

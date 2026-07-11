@@ -6,3 +6,5 @@ server/*.db
 server/opencellid/
 server/__pycache__/
 apps/tracker/boards/native_sim.conf
+# Design-session working documents (superpowers plugin) — followed, not shipped.
+docs/superpowers/
