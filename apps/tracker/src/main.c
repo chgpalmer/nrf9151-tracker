@@ -330,12 +330,32 @@ static void print_status(const struct nrf_modem_gnss_pvt_data_frame *p,
 		 *                          is transmitting; only backing off LTE helps.
 		 *   NOT_ENOUGH_WINDOW_TIME windows exist but are too short — the case
 		 *                          nrf_modem_gnss_prio_mode_enable() is for.
-		 * The old code tested only the first, so the two looked identical. */
-		if (p->flags & NRF_MODEM_GNSS_PVT_FLAG_DEADLINE_MISSED) {
-			LOG_WRN("GNSS: no window since last PVT (LTE active)");
+		 *
+		 * Both are CONDITIONS, not events: they persist for minutes during
+		 * LTE/GNSS contention, and per-pass WRNs would flood the uplink
+		 * (dozens of lines per episode). Log the edges — onset at WRN,
+		 * clear at INF — and leave the per-pass view to the DBG flags line
+		 * above. Same pattern as the gnss_blocked edge. */
+		static bool no_window_prev, short_window_prev;
+		bool no_window = p->flags & NRF_MODEM_GNSS_PVT_FLAG_DEADLINE_MISSED;
+		bool short_window =
+			p->flags & NRF_MODEM_GNSS_PVT_FLAG_NOT_ENOUGH_WINDOW_TIME;
+
+		if (no_window != no_window_prev) {
+			no_window_prev = no_window;
+			if (no_window) {
+				LOG_WRN("GNSS: no window since last PVT (LTE active)");
+			} else {
+				LOG_INF("GNSS: windows back");
+			}
 		}
-		if (p->flags & NRF_MODEM_GNSS_PVT_FLAG_NOT_ENOUGH_WINDOW_TIME) {
-			LOG_WRN("GNSS: windows too short (no PSM/eDRX?)");
+		if (short_window != short_window_prev) {
+			short_window_prev = short_window;
+			if (short_window) {
+				LOG_WRN("GNSS: windows too short (no PSM/eDRX?)");
+			} else {
+				LOG_INF("GNSS: window length ok");
+			}
 		}
 	}
 	loc_fsm_log(loc, p);
@@ -534,11 +554,16 @@ int main(void)
 				obs_queue_add_gps(&fix_pvt, fix_pvt_ms);
 			} else if (lte_connected) {
 				struct serving_cell sc;
+				/* Condition, not event: don't repeat the WRN every
+				 * cell interval while XMONITOR keeps failing. */
+				static bool cell_unavail;
 
 				if (read_serving_cell(&sc) == 0 && sc.valid) {
+					cell_unavail = false;
 					obs_queue_add_cell(sc.mcc, sc.mnc, sc.tac,
 							   sc.cid, sc.rsrp_dbm, now);
-				} else {
+				} else if (!cell_unavail) {
+					cell_unavail = true;
 					LOG_WRN("serving cell unavailable");
 				}
 			}
