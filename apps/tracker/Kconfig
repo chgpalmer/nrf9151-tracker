@@ -150,6 +150,33 @@ config TRACKER_QUIESCENT_FLUSH_S
 	  vs ~600 KB/day at the moving cadence. Motion still flushes
 	  urgently via the FSM state change.
 
+config TRACKER_REST_HEARTBEAT_S
+	int "Parked-no-fix heartbeat interval (seconds)"
+	default 1200
+	range 120 7200
+	help
+	  A cell fix at this cadence is the only traffic while resting: it
+	  says "alive, still on this tower". ~72/day ~= 5 KB/day. Anything
+	  denser is negative information next to the last known GPS position.
+
+config TRACKER_REST_BACKOFF_MIN_S
+	int "First GNSS retry delay in REST (seconds)"
+	default 300
+	range 60 3600
+	help
+	  The periodic-mode interval on entering REST; doubles after each
+	  empty check up to TRACKER_REST_BACKOFF_MAX_S. A cell-set change or
+	  motion resets it.
+
+config TRACKER_REST_BACKOFF_MAX_S
+	int "Backoff ceiling for GNSS retries in REST (seconds)"
+	default 1800
+	range 300 14400
+	help
+	  Worst-case delay before a parked-indoors tracker notices the sky
+	  returned on its own (carrying it outside usually exits sooner via
+	  the cell change).
+
 config TRACKER_SIM_DEVICE_ID
 	string "native_sim fallback device ID"
 	default "sim-dev-1"

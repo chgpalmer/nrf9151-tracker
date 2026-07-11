@@ -613,7 +613,8 @@ int main(void)
 		 * raw verdict) so shipping only slows once actually quiesced;
 		 * the QUIESCENT->REPORT_GNSS transition urgent-flushes above,
 		 * so motion still reaches the map in seconds. */
-		uplink_set_flush_interval(loc.state == LOC_QUIESCENT
+		uplink_set_flush_interval(
+			(loc.state == LOC_QUIESCENT || loc.state == LOC_REST)
 			? (uint32_t)CONFIG_TRACKER_QUIESCENT_FLUSH_S * 1000
 			: (uint32_t)CONFIG_TRACKER_FLUSH_INTERVAL_S * 1000);
 		uplink_set_allowed(loc.publish_allowed);

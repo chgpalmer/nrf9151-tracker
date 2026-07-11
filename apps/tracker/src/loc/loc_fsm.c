@@ -44,6 +44,7 @@ static const char *const loc_state_names[] = {
 	[LOC_REPORT_GNSS] = "REPORT_GNSS",
 	[LOC_CELL_LOOP]   = "CELL_LOOP",
 	[LOC_QUIESCENT]   = "QUIESCENT",
+	[LOC_REST]        = "REST",
 };
 BUILD_ASSERT(ARRAY_SIZE(loc_state_names) == LOC_STATE_COUNT,
 	     "loc_state_names out of step with enum loc_state");
@@ -65,6 +66,15 @@ static uint8_t chopped_streak;
 /* Last *observed* epoch with enough ephemeris-bearing satellites in view. */
 static int64_t last_visible_ok_ms;
 static bool cell_sent;
+
+/* Consecutive ACQUIRE/EXCLUSIVE attempts since the last fix that ended in
+ * timeout or an empty sky. Unlike the sky streaks this survives state
+ * changes: it is the "stop trying so hard" evidence for REST. Reset by any
+ * fix and by leaving REST on motion. */
+static uint8_t acquire_failures;
+/* REST's current retry interval and when it last grew. */
+static uint32_t rest_backoff_s;
+static int64_t rest_backoff_bumped_ms;
 
 /* Cached ephemeris inventory, refreshed at most every EPHE_POLL_MS. Kept as the
  * raw frame so `visible` can be recomputed against every PVT frame. ~800 B, so
@@ -108,6 +118,9 @@ void loc_fsm_init(int64_t now_ms)
 	last_visible_ok_ms = now_ms;
 	cell_sent = false;
 	ephe_valid = false;
+	acquire_failures = 0;
+	rest_backoff_s = CONFIG_TRACKER_REST_BACKOFF_MIN_S;
+	rest_backoff_bumped_ms = now_ms;
 }
 
 void loc_fsm_note_cell_sent(void)
@@ -218,6 +231,7 @@ void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 
 	if (fix) {
 		last_fix_ms = now_ms;
+		acquire_failures = 0;
 	}
 
 	poll_ephemeris(now_ms);
@@ -308,8 +322,14 @@ void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 			 * radio outright; the re-attach is paid post-fix. */
 			next_state(LOC_GNSS_EXCLUSIVE, now_ms, "LTE chops GNSS");
 		} else if (in_state > ACQUIRE_CAP_MS) {
+			if (acquire_failures < UINT8_MAX) {
+				acquire_failures++;
+			}
 			next_state(LOC_CELL_LOOP, now_ms, "acquire timeout");
 		} else if (in_state > SKY_GRACE_MS && sky_empty) {
+			if (acquire_failures < UINT8_MAX) {
+				acquire_failures++;
+			}
 			next_state(LOC_CELL_LOOP, now_ms, "sky empty");
 		}
 		break;
@@ -322,8 +342,14 @@ void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 		if (fix) {
 			next_state(LOC_REPORT_GNSS, now_ms, "fix acquired");
 		} else if (in_state > ACQUIRE_CAP_MS) {
+			if (acquire_failures < UINT8_MAX) {
+				acquire_failures++;
+			}
 			next_state(LOC_CELL_LOOP, now_ms, "acquire timeout");
 		} else if (in_state > SKY_GRACE_MS && sky_empty) {
+			if (acquire_failures < UINT8_MAX) {
+				acquire_failures++;
+			}
 			next_state(LOC_CELL_LOOP, now_ms, "sky empty");
 		}
 		break;
@@ -376,8 +402,39 @@ void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 		 * next publish always interrupted before evidence could build. */
 		if (fix) {
 			next_state(LOC_REPORT_GNSS, now_ms, "fix returned");
+		} else if (stationary && acquire_failures >= 2) {
+			/* Parked and failing: a teasing satellite must not
+			 * restart the churn -- REST's own sighting row still
+			 * reacts, but at the backoff cadence. */
+			rest_backoff_s = CONFIG_TRACKER_REST_BACKOFF_MIN_S;
+			rest_backoff_bumped_ms = now_ms;
+			next_state(LOC_REST, now_ms, "parked, repeated failures");
 		} else if (sats_in_view) {
 			next_state(LOC_GNSS_ACQUIRE, now_ms, "satellites sighted");
+		}
+		break;
+
+	case LOC_REST:
+		/* The periodic GNSS wake IS the retry: interval = backoff.
+		 * Sky streaks are 1 Hz bookkeeping and are not consulted. */
+		if (fix) {
+			next_state(LOC_REPORT_GNSS, now_ms, "fix on check");
+		} else if (!stationary) {
+			/* Cell-set change or (later) IMU: worth a real try. */
+			acquire_failures = 0;
+			next_state(LOC_GNSS_ACQUIRE, now_ms, "motion");
+		} else if (sats_in_view) {
+			next_state(LOC_GNSS_ACQUIRE, now_ms, "satellites sighted");
+		} else if (observed_window &&
+			   (now_ms - rest_backoff_bumped_ms) >=
+				(int64_t)rest_backoff_s * 1000) {
+			/* An empty check completed: back off. Guarded by the
+			 * elapsed interval so one wake's several PVT frames
+			 * bump only once. */
+			rest_backoff_bumped_ms = now_ms;
+			rest_backoff_s = MIN(rest_backoff_s * 2,
+				(uint32_t)CONFIG_TRACKER_REST_BACKOFF_MAX_S);
+			LOG_DBG("loc: REST backoff -> %u s", rest_backoff_s);
 		}
 		break;
 
@@ -388,24 +445,28 @@ void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 	out->state = state;
 	if (!lte_registered && state != LOC_GNSS_EXCLUSIVE) {
 		out->gnss_mode = LOC_GNSS_OFF;
-	} else if (state == LOC_QUIESCENT) {
+	} else if (state == LOC_QUIESCENT || state == LOC_REST) {
 		out->gnss_mode = LOC_GNSS_PERIODIC;
 	} else {
 		out->gnss_mode = LOC_GNSS_CONTINUOUS;
 	}
-	out->gnss_interval_s = (state == LOC_QUIESCENT)
-		? CONFIG_TRACKER_QUIESCENT_CHECK_S : 0;
+	out->gnss_interval_s =
+		(state == LOC_QUIESCENT) ? CONFIG_TRACKER_QUIESCENT_CHECK_S :
+		(state == LOC_REST)      ? rest_backoff_s : 0;
 	out->lte_wanted = (state != LOC_GNSS_EXCLUSIVE);
 	out->publish_allowed = (state == LOC_REPORT_CELL ||
 				state == LOC_REPORT_GNSS ||
 				state == LOC_QUIESCENT ||
-				state == LOC_CELL_LOOP);
+				state == LOC_CELL_LOOP ||
+				state == LOC_REST);
 	out->prefer_cell = (state != LOC_REPORT_GNSS &&
 			    state != LOC_QUIESCENT) || !out->gps_current;
 	out->publish_interval_ms =
 		(state == LOC_CELL_LOOP)  ? CELL_POST_MS :
 		(state == LOC_QUIESCENT)
-			? (uint32_t)CONFIG_TRACKER_QUIESCENT_CHECK_S * 1000
+			? (uint32_t)CONFIG_TRACKER_QUIESCENT_CHECK_S * 1000 :
+		(state == LOC_REST)
+			? (uint32_t)CONFIG_TRACKER_REST_HEARTBEAT_S * 1000
 			: POST_MS;
 }
 

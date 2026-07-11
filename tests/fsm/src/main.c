@@ -29,6 +29,9 @@
 #define CN0_STRONG ((CONFIG_TRACKER_LOC_CN0_MIN_DBHZ + 13) * 10)
 #define CN0_WEAK   ((CONFIG_TRACKER_LOC_CN0_MIN_DBHZ - 7) * 10)
 
+#define REST_MIN_S CONFIG_TRACKER_REST_BACKOFF_MIN_S
+#define REST_MAX_S CONFIG_TRACKER_REST_BACKOFF_MAX_S
+
 /* ── fake clock ─────────────────────────────────────────────────────────── */
 
 static int64_t t;
@@ -157,6 +160,18 @@ static void to_cell_loop(void)
 	to_acquire();
 	t += ACQUIRE_CAP_MS;
 	ASSERT_STATE(step(false, 1, OBSERVED), LOC_CELL_LOOP); /* C3 */
+}
+
+/* Two failed acquisitions while cell-stationary: the REST entry evidence.
+ * (to_cell_loop() is the first failure — acquire timeout.) */
+static void to_rest(void)
+{
+	to_cell_loop();
+	ASSERT_STATE(step(false, 1, OBSERVED), LOC_GNSS_ACQUIRE); /* sighted */
+	t += ACQUIRE_CAP_MS;
+	ASSERT_STATE(step(false, 1, OBSERVED), LOC_CELL_LOOP); /* failure #2 */
+	g_stationary = true;
+	ASSERT_STATE(step(false, 0, OBSERVED), LOC_REST);
 }
 
 /* ── LTE_ATTACH / REPORT_CELL ───────────────────────────────────────────── */
@@ -479,6 +494,126 @@ ZTEST(loc_fsm, test_g2_single_weak_sighting)
 	ASSERT_STATE(step(false, 0, BLANKED), LOC_CELL_LOOP);
 	ASSERT_STATE(step_full(false, 1, CN0_WEAK, CHOPPED, true),
 		     LOC_GNSS_ACQUIRE);
+}
+
+/* ── REST ───────────────────────────────────────────────────────────────── */
+
+ZTEST(loc_fsm, test_rest_entry_needs_two_failures)
+{
+	to_cell_loop(); /* one failure only */
+	g_stationary = true;
+	ASSERT_STATE(step(false, 0, OBSERVED), LOC_CELL_LOOP);
+}
+
+ZTEST(loc_fsm, test_rest_entry_needs_stationary)
+{
+	to_cell_loop();
+	ASSERT_STATE(step(false, 1, OBSERVED), LOC_GNSS_ACQUIRE);
+	t += ACQUIRE_CAP_MS;
+	ASSERT_STATE(step(false, 1, OBSERVED), LOC_CELL_LOOP);
+	/* two failures but moving: keep trying, never rest */
+	ASSERT_STATE(step(false, 0, OBSERVED), LOC_CELL_LOOP);
+}
+
+ZTEST(loc_fsm, test_rest_fix_on_check)
+{
+	to_rest();
+	ASSERT_STATE(step(true, 4, OBSERVED), LOC_REPORT_GNSS);
+}
+
+ZTEST(loc_fsm, test_rest_sighting_earns_acquire)
+{
+	to_rest();
+	ASSERT_STATE(step(false, 1, OBSERVED), LOC_GNSS_ACQUIRE);
+}
+
+ZTEST(loc_fsm, test_rest_motion_exits_and_resets_backoff)
+{
+	struct loc_status st;
+
+	to_rest();
+	/* grow the backoff first */
+	t += (int64_t)REST_MIN_S * 1000;
+	st = step(false, 0, OBSERVED);
+	ASSERT_STATE(st, LOC_REST);
+	zassert_equal(st.gnss_interval_s, 2 * REST_MIN_S, "doubled");
+	g_stationary = false;
+	ASSERT_STATE(step(false, 0, OBSERVED), LOC_GNSS_ACQUIRE);
+	/* fail again twice, re-enter REST: backoff starts at MIN again */
+	t += ACQUIRE_CAP_MS;
+	ASSERT_STATE(step(false, 1, OBSERVED), LOC_CELL_LOOP);
+	ASSERT_STATE(step(false, 1, OBSERVED), LOC_GNSS_ACQUIRE);
+	t += ACQUIRE_CAP_MS;
+	ASSERT_STATE(step(false, 1, OBSERVED), LOC_CELL_LOOP);
+	g_stationary = true;
+	st = step(false, 0, OBSERVED);
+	ASSERT_STATE(st, LOC_REST);
+	zassert_equal(st.gnss_interval_s, (uint32_t)REST_MIN_S, "backoff reset");
+}
+
+ZTEST(loc_fsm, test_rest_backoff_doubles_to_cap)
+{
+	struct loc_status st;
+	uint32_t expect = REST_MIN_S;
+
+	to_rest();
+	while (expect < REST_MAX_S) {
+		t += (int64_t)expect * 1000;
+		st = step(false, 0, OBSERVED);
+		ASSERT_STATE(st, LOC_REST);
+		expect = MIN(expect * 2, (uint32_t)REST_MAX_S);
+		zassert_equal(st.gnss_interval_s, expect, "backoff step");
+	}
+	/* at the cap it stays there */
+	t += (int64_t)REST_MAX_S * 1000;
+	st = step(false, 0, OBSERVED);
+	zassert_equal(st.gnss_interval_s, (uint32_t)REST_MAX_S, "capped");
+}
+
+/* One wake delivers several PVT frames (the retry window); the backoff
+ * must double once per wake, not once per frame. */
+ZTEST(loc_fsm, test_rest_backoff_once_per_wake)
+{
+	struct loc_status st;
+
+	to_rest();
+	t += (int64_t)REST_MIN_S * 1000;
+	st = step(false, 0, OBSERVED); /* first frame of the wake: doubles */
+	zassert_equal(st.gnss_interval_s, 2 * REST_MIN_S, "first frame");
+	st = step(false, 0, OBSERVED); /* second frame, 1 s later: no change */
+	zassert_equal(st.gnss_interval_s, 2 * REST_MIN_S, "second frame");
+}
+
+ZTEST(loc_fsm, test_rest_outputs)
+{
+	struct loc_status st;
+
+	to_rest();
+	st = step(false, 0, OBSERVED);
+	ASSERT_STATE(st, LOC_REST);
+	check_outputs(st, LOC_GNSS_PERIODIC, true, true,
+		      (uint32_t)CONFIG_TRACKER_REST_HEARTBEAT_S * 1000);
+	zassert_true(st.prefer_cell, "REST publishes heartbeat cells");
+}
+
+ZTEST(loc_fsm, test_rest_override_registration_loss)
+{
+	to_rest();
+	ASSERT_STATE(step_full(false, 0, 0, OBSERVED, false), LOC_LTE_ATTACH);
+}
+
+ZTEST(loc_fsm, test_failures_reset_on_fix)
+{
+	/* A successful fix clears the failure count: after losing it again,
+	 * CELL_LOOP needs two FRESH failures before resting. */
+	to_rest();
+	ASSERT_STATE(step(true, 4, OBSERVED), LOC_REPORT_GNSS);
+	ASSERT_STATE(step(true, 4, OBSERVED), LOC_QUIESCENT); /* still stationary */
+	t += 3 * (int64_t)CONFIG_TRACKER_QUIESCENT_CHECK_S * 1000;
+	ASSERT_STATE(step(false, 0, OBSERVED), LOC_GNSS_ACQUIRE);
+	t += ACQUIRE_CAP_MS;
+	ASSERT_STATE(step(false, 1, OBSERVED), LOC_CELL_LOOP); /* failure #1 */
+	ASSERT_STATE(step(false, 0, OBSERVED), LOC_CELL_LOOP); /* not REST */
 }
 
 /* ── outputs table ──────────────────────────────────────────────────────── */

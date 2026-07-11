@@ -18,6 +18,7 @@ row by row. If code and table disagree, one of them is wrong — fix whichever.
 | `lte_chops_gnss` | ≥ 10 consecutive epochs with NOT_ENOUGH_WINDOW_TIME (`CHOPPED_EPOCHS`) | modem's own testimony that idle-mode LTE is slicing GNSS |
 | `hotstart_dead` | > 10 s (`VISIBLE_LOST_MS`) since an observed epoch had ≥ 4 ephemeris-bearing satellites in view | visible ≠ held: held ephemerides may have set |
 | `stationary` | motion.c verdict (GPS centroid / cell-set LRU) | an input, like `lte_registered`; consumed by QUIESCENT/REST |
+| `acquire_failures` | consecutive ACQUIRE/EXCLUSIVE give-ups (timeout or sky-empty) since the last fix | SURVIVES state changes; reset by any fix, and by leaving REST on motion |
 
 Streaks and `last_visible_ok` reset on every state change: each state judges
 the sky on its own evidence.
@@ -82,7 +83,27 @@ than 3 × QUIESCENT_CHECK_S", not 30 s.
 | # | Condition | Next | |
 |---|---|---|---|
 | G1 | `fix` | REPORT_GNSS | "fix returned" |
-| G2 | `sats_in_view` (one epoch, any strength) | GNSS_ACQUIRE | "satellites sighted" |
+| G2 | `stationary` and `acquire_failures ≥ 2` | REST | "parked, repeated failures" |
+| G3 | `sats_in_view` (one epoch, any strength) | GNSS_ACQUIRE | "satellites sighted" |
+
+G2 before G3 on purpose: once parked-and-failing, a teasing satellite must
+not restart the churn — REST's own sighting row still reacts, but at the
+backoff cadence.
+
+### REST — parked, no fix; the anti-churn state (resolves F-2)
+The periodic GNSS wake IS the retry: the modem's periodic interval is set to
+the current backoff (starts REST_BACKOFF_MIN_S, doubles per empty check,
+capped at REST_BACKOFF_MAX_S; reset on entry and on motion).
+
+| # | Condition | Next | |
+|---|---|---|---|
+| R1 | `fix` | REPORT_GNSS | "fix on check" |
+| R2 | `!stationary` (cell-set change; IMU later) | GNSS_ACQUIRE | "motion" (resets failures + backoff) |
+| R3 | `sats_in_view` | GNSS_ACQUIRE | "satellites sighted" |
+| R4 | empty observed check, backoff elapsed | stay | doubles the backoff (once per wake) |
+
+Sky-evidence streaks are not consulted. Only traffic: a heartbeat cell fix
+every REST_HEARTBEAT_S.
 
 ## Outputs by state
 
@@ -95,6 +116,7 @@ than 3 × QUIESCENT_CHECK_S", not 30 s.
 | REPORT_GNSS | CONT | yes | yes | only if fix stale | 1 s |
 | CELL_LOOP | CONT | yes | yes | yes | 30 s |
 | QUIESCENT | PERIODIC(check) | yes | yes | no (yes if stale) | check interval |
+| REST | PERIODIC(backoff) | yes | yes | yes | heartbeat interval |
 
 \* gnss_mode is OFF whenever `!lte_registered`, except in EXCLUSIVE where
 being unregistered is deliberate — so GNSS is off while attaching.
@@ -129,8 +151,9 @@ timeout → … a ~6–7 min churn cycle, forever, narrating ~1 KB of logs per l
 satellite with no rate limit, and the 30 s cell cadence ships ~7.4 MB/mo.
 Nothing here is individually wrong; what's missing is backoff/quiescence for
 "stationary and repeatedly failing". This is the adaptive-cadence work; it
-should build on this table. **Partially addressed:** QUIESCENT covers the
-parked-with-fix half; REST covers the no-fix half.
+should build on this table. **Resolved:** QUIESCENT (parked with fix) +
+REST (parked without) — see those sections. The 30 s CELL_LOOP cadence now
+only runs while genuinely between states, not as a parking orbit.
 
 **F-3 — `cell_sent` can be satisfied by a stale cell.** The uplink kinds-mask
 latches on *any* delivered cell entry, including one queued in a previous

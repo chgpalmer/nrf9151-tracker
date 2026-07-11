@@ -138,6 +138,12 @@ enum loc_state {
 	 * the check that lands outside the parked radius flips the stationary
 	 * verdict, which snaps us back to REPORT_GNSS at 1 Hz. */
 	LOC_QUIESCENT,
+	/* Parked with no fix to hold (indoors, garage). The anti-churn state:
+	 * GNSS periodic checks with exponential backoff instead of the old
+	 * ATTACH->ACQUIRE->EXCLUSIVE->timeout loop, and a slow cell heartbeat
+	 * as the only traffic. Motion evidence here is cell-grade only (~km)
+	 * until an IMU exists -- the accepted limit. */
+	LOC_REST,
 
 	LOC_STATE_COUNT,
 };
