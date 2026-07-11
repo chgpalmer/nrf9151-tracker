@@ -62,5 +62,11 @@ module pins have no wheels for newer Pythons; 26.04 breaks `make setup-zephyr`).
   no churn logs. Board must be REFLASHED to get this + the F-1 fix.
 - Phase 2 (specced, queued): flash flight recorder + obs spill on the DK's
   32 MB NOR, epoch timestamps, log byte-budget backstop.
-- GNSS acquisition-while-moving is weak (ephemeris demodulation needs steady
-  signal); A-GNSS is the eventual fix. LED2 solid = fix held = safe to move.
+- A-GNSS LIVE: server pulls IGS broadcast ephemeris (BKG BRDC00WRD_S, free
+  anonymous HTTPS, 30 min refresh) and serves POST /agnss; device fetches
+  ~1 KB when its inventory is thin and injects via agnss_write. All scaling
+  is server-side (server/agnss.py, `make servertest`). Best-effort: server
+  down = old behaviour. VM carries ONE local commit (login gating) rebased
+  onto main — never reset --hard the VM checkout.
+- KNOWN FLAKE: `make webtest` fails 00:00–03:00 local — seed-testday.py
+  seeds `now-3h`, which straddles midnight. Fix = anchor the seed mid-day.
