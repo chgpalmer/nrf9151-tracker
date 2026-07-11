@@ -57,7 +57,8 @@ void leds_update(const struct loc_status *loc, bool lte_up)
 	set(LED_LTE, lte_up || (loc->lte_wanted && blink_phase));
 
 	/* GPS: solid on a current fix; blink while acquiring; dark when off. */
-	set(LED_GPS, loc->gps_current || (loc->gnss_wanted && blink_phase));
+	set(LED_GPS, loc->gps_current ||
+		     (loc->gnss_mode != LOC_GNSS_OFF && blink_phase));
 
 	/* TX: pulse armed by leds_tx_pulse(), cleared here once it expires. */
 	set(LED_TX, k_uptime_get() < tx_until_ms);

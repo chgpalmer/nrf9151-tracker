@@ -209,9 +209,12 @@ static void read_sky(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 }
 
 void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
-		    int64_t now_ms, bool lte_registered, struct loc_status *out)
+		    int64_t now_ms, bool lte_registered, bool stationary,
+		    struct loc_status *out)
 {
 	bool fix = pvt->flags & NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID;
+
+	ARG_UNUSED(stationary); /* consumed from the QUIESCENT state onward */
 
 	if (fix) {
 		last_fix_ms = now_ms;
@@ -361,7 +364,9 @@ void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 	}
 
 	out->state = state;
-	out->gnss_wanted = lte_registered || (state == LOC_GNSS_EXCLUSIVE);
+	out->gnss_mode = (lte_registered || state == LOC_GNSS_EXCLUSIVE)
+			 ? LOC_GNSS_CONTINUOUS : LOC_GNSS_OFF;
+	out->gnss_interval_s = 0;
 	out->lte_wanted = (state != LOC_GNSS_EXCLUSIVE);
 	out->publish_allowed = (state == LOC_REPORT_CELL ||
 				state == LOC_REPORT_GNSS ||

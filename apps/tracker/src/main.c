@@ -36,7 +36,12 @@ LOG_MODULE_REGISTER(tracker, CONFIG_TRACKER_LOG_LEVEL);
 #define SERVER_HOST       CONFIG_TRACKER_SERVER_HOST
 #define SERVER_PORT       CONFIG_TRACKER_SERVER_PORT
 
-#define GNSS_INTERVAL_S   1   /* PVT event rate */
+#define GNSS_INTERVAL_S   1   /* PVT event rate in continuous mode */
+/* In periodic mode, how long each check may hunt before giving up and
+ * sleeping. Bounds the awake time (the whole point of periodic mode); a hot
+ * start needs 1-3 s, so 30 s also covers a warm start without burning
+ * minutes indoors where no fix is coming. */
+#define GNSS_CHECK_RETRY_S 30
 #define POST_INTERVAL_MS  (CONFIG_TRACKER_POST_INTERVAL_S * 1000)
 #define STATUS_INTERVAL_MS 5000
 /* GPS staleness now lives in loc_fsm, which owns the fix bookkeeping. */
@@ -442,7 +447,11 @@ int main(void)
 		LOG_ERR("gnss configure: %d", err);
 		return err;
 	}
-	bool gnss_running = false;
+	/* The GNSS mode actually applied to the modem. Reconfiguring requires a
+	 * stop/set/start cycle; a failed start leaves this at OFF so the next
+	 * loop pass retries rather than latching a wrong mode. */
+	enum loc_gnss_mode gnss_mode_applied = LOC_GNSS_OFF;
+	uint16_t gnss_interval_applied = 0;
 	bool gnss_blocked_prev = false;
 	/* lte_lc_connect_async() below turns the stack on; GNSS_EXCLUSIVE is the
 	 * only thing that turns it off. */
@@ -476,21 +485,39 @@ int main(void)
 		}
 
 		/* Policy first: it owns the fix-staleness and ephemeris bookkeeping. */
-		loc_fsm_update(&pvt, now, lte_connected, &loc);
+		loc_fsm_update(&pvt, now, lte_connected, false, &loc);
 		leds_update(&loc, lte_connected);
 
-		/* Run GNSS only when the FSM says so. While the modem is searching
-		 * for a network the search owns the radio, and GNSS alongside it just
-		 * flip-flops between a few tracked satellites and none. */
-		if (loc.gnss_wanted && !gnss_running) {
-			LOG_INF("starting GNSS");
-			if (gnss_start() == 0) {
-				gnss_running = true;
+		/* Apply the FSM's GNSS mode. Runs GNSS only when the FSM says
+		 * so (a searching modem owns the radio), and switches between
+		 * continuous 1 Hz and the modem's periodic-navigation mode
+		 * when the parked states ask for it. */
+		if (loc.gnss_mode != gnss_mode_applied ||
+		    (loc.gnss_mode == LOC_GNSS_PERIODIC &&
+		     loc.gnss_interval_s != gnss_interval_applied)) {
+			if (gnss_mode_applied != LOC_GNSS_OFF) {
+				(void)nrf_modem_gnss_stop();
 			}
-		} else if (!loc.gnss_wanted && gnss_running) {
-			LOG_INF("LTE lost — stopping GNSS until re-registered");
-			(void)nrf_modem_gnss_stop();
-			gnss_running = false;
+			gnss_mode_applied = LOC_GNSS_OFF;
+			if (loc.gnss_mode == LOC_GNSS_OFF) {
+				LOG_INF("GNSS off (modem unregistered)");
+			} else {
+				bool cont = (loc.gnss_mode == LOC_GNSS_CONTINUOUS);
+				uint16_t ivl = cont ? GNSS_INTERVAL_S
+						    : loc.gnss_interval_s;
+
+				nrf_modem_gnss_fix_interval_set(ivl);
+				nrf_modem_gnss_fix_retry_set(
+					cont ? 0 : GNSS_CHECK_RETRY_S);
+				if (gnss_start() == 0) {
+					LOG_INF("GNSS %s (interval %u s)",
+						cont ? "continuous" : "periodic",
+						ivl);
+					gnss_mode_applied = loc.gnss_mode;
+					gnss_interval_applied =
+						loc.gnss_interval_s;
+				} /* else: stays OFF, retried next pass */
+			}
 		}
 
 		/* GNSS_EXCLUSIVE: take the LTE stack down entirely so idle-mode

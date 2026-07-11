@@ -137,13 +137,25 @@ enum loc_state {
 	LOC_STATE_COUNT,
 };
 
+/* How GNSS should run. PERIODIC uses the modem's native periodic-navigation
+ * mode (fix_interval > 1): the modem duty-cycles itself and schedules its
+ * own ephemeris upkeep, so a parked tracker idles at uA instead of the
+ * ~40 mA of continuous tracking. */
+enum loc_gnss_mode {
+	LOC_GNSS_OFF,
+	LOC_GNSS_CONTINUOUS,
+	LOC_GNSS_PERIODIC,
+};
+
 struct loc_status {
 	enum loc_state state;
 
-	/* Should GNSS be running at all? False while unregistered (a searching
+	/* How GNSS should run right now. OFF while unregistered (a searching
 	 * modem owns the radio) -- except in GNSS_EXCLUSIVE, where being
-	 * unregistered is the whole point. */
-	bool gnss_wanted;
+	 * unregistered is the whole point. PERIODIC only in the parked states;
+	 * gnss_interval_s is the seconds between position checks then. */
+	enum loc_gnss_mode gnss_mode;
+	uint16_t gnss_interval_s;
 	/* Should the LTE stack be active? False only in GNSS_EXCLUSIVE; main.c
 	 * maps edges to LTE_LC_FUNC_MODE_{DE,}ACTIVATE_LTE. */
 	bool lte_wanted;
@@ -195,7 +207,8 @@ void loc_fsm_note_cell_sent(void);
  * current policy back. Call at the PVT rate; it is cheap and has no side
  * effects beyond its own state. */
 void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
-		    int64_t now_ms, bool lte_registered, struct loc_status *out);
+		    int64_t now_ms, bool lte_registered, bool stationary,
+		    struct loc_status *out);
 
 /* Human-readable progress: which stage of the cold start we are at, plus C/N0
  * per satellite. Drive it from the status block, not the PVT rate. */

@@ -17,6 +17,7 @@ row by row. If code and table disagree, one of them is wrong — fix whichever.
 | `sky_empty` | ≥ 5 consecutive **observed** epochs with tracked == 0 (`SKY_EMPTY_EPOCHS`) | blanked epochs pause the count |
 | `lte_chops_gnss` | ≥ 10 consecutive epochs with NOT_ENOUGH_WINDOW_TIME (`CHOPPED_EPOCHS`) | modem's own testimony that idle-mode LTE is slicing GNSS |
 | `hotstart_dead` | > 10 s (`VISIBLE_LOST_MS`) since an observed epoch had ≥ 4 ephemeris-bearing satellites in view | visible ≠ held: held ephemerides may have set |
+| `stationary` | motion.c verdict (GPS centroid / cell-set LRU) | an input, like `lte_registered`; consumed by QUIESCENT/REST |
 
 Streaks and `last_visible_ok` reset on every state change: each state judges
 the sky on its own evidence.
@@ -74,16 +75,17 @@ override typically bounces CELL_LOOP → LTE_ATTACH within seconds (see F-2).
 
 ## Outputs by state
 
-| State | gnss_wanted | lte_wanted | publish_allowed | prefer_cell | interval |
+| State | gnss_mode | lte_wanted | publish_allowed | prefer_cell | interval |
 |---|---|---|---|---|---|
-| LTE_ATTACH | no* | yes | no | — | — |
-| REPORT_CELL | yes | yes | yes | yes | 1 s |
-| GNSS_ACQUIRE | yes | yes | **no** | — | — |
-| GNSS_EXCLUSIVE | yes | **no** | **no** | — | — |
-| REPORT_GNSS | yes | yes | yes | only if fix stale | 1 s |
-| CELL_LOOP | yes | yes | yes | yes | 30 s |
+| LTE_ATTACH | OFF* | yes | no | — | — |
+| REPORT_CELL | CONT | yes | yes | yes | 1 s |
+| GNSS_ACQUIRE | CONT | yes | **no** | — | — |
+| GNSS_EXCLUSIVE | CONT | **no** | **no** | — | — |
+| REPORT_GNSS | CONT | yes | yes | only if fix stale | 1 s |
+| CELL_LOOP | CONT | yes | yes | yes | 30 s |
 
-\* `gnss_wanted = lte_registered || EXCLUSIVE`, so GNSS is off while attaching.
+\* gnss_mode is OFF whenever `!lte_registered`, except in EXCLUSIVE where
+being unregistered is deliberate — so GNSS is off while attaching.
 
 ## Findings
 

@@ -32,6 +32,7 @@
 /* ── fake clock ─────────────────────────────────────────────────────────── */
 
 static int64_t t;
+static bool g_stationary;
 
 /* ── fake modem: the one call loc_fsm.c makes ───────────────────────────── */
 
@@ -82,7 +83,7 @@ static struct loc_status step_full(bool fix, int tracked, uint16_t cn0,
 	}
 
 	t += 1000;
-	loc_fsm_update(&pvt, t, lte, &st);
+	loc_fsm_update(&pvt, t, lte, g_stationary, &st);
 	return st;
 }
 
@@ -105,6 +106,7 @@ static struct loc_status step(bool fix, int tracked, uint32_t flags)
 static void reset_fsm(void)
 {
 	t = 1000000;
+	g_stationary = false;
 	fake_ephe_ret = 0;
 	set_ephe(0, 0);
 	loc_fsm_init(t);
@@ -414,10 +416,10 @@ ZTEST(loc_fsm, test_g2_single_weak_sighting)
 
 /* ── outputs table ──────────────────────────────────────────────────────── */
 
-static void check_outputs(struct loc_status st, bool gnss, bool lte,
-			  bool publish, uint32_t interval)
+static void check_outputs(struct loc_status st, enum loc_gnss_mode mode,
+			  bool lte, bool publish, uint32_t interval)
 {
-	zassert_equal(st.gnss_wanted, gnss, "%s: gnss_wanted",
+	zassert_equal(st.gnss_mode, mode, "%s: gnss_mode",
 		      loc_state_str(st.state));
 	zassert_equal(st.lte_wanted, lte, "%s: lte_wanted",
 		      loc_state_str(st.state));
@@ -432,36 +434,36 @@ ZTEST(loc_fsm, test_outputs_by_state)
 	struct loc_status st;
 
 	st = step_full(false, 0, 0, OBSERVED, false); /* LTE_ATTACH */
-	check_outputs(st, false, true, false, POST_MS);
+	check_outputs(st, LOC_GNSS_OFF, true, false, POST_MS);
 
 	st = step(false, 0, OBSERVED); /* -> REPORT_CELL */
-	check_outputs(st, true, true, true, POST_MS);
+	check_outputs(st, LOC_GNSS_CONTINUOUS, true, true, POST_MS);
 	zassert_true(st.prefer_cell, "REPORT_CELL: prefer_cell");
 
 	loc_fsm_note_cell_sent();
 	st = step(false, 0, OBSERVED); /* -> GNSS_ACQUIRE */
-	check_outputs(st, true, true, false, POST_MS);
+	check_outputs(st, LOC_GNSS_CONTINUOUS, true, false, POST_MS);
 
 	for (int i = 0; i < CHOPPED_EPOCHS; i++) {
 		st = step(false, 0, CHOPPED); /* -> GNSS_EXCLUSIVE */
 	}
 	ASSERT_STATE(st, LOC_GNSS_EXCLUSIVE);
-	/* gnss_wanted holds even though registration lapses: the exception
-	 * written into the output rule. */
+	/* gnss stays CONTINUOUS even though registration lapses: the
+	 * exception written into the output rule. */
 	st = step_full(false, 0, 0, OBSERVED, false);
-	check_outputs(st, true, false, false, POST_MS);
+	check_outputs(st, LOC_GNSS_CONTINUOUS, false, false, POST_MS);
 
 	st = step_full(true, 4, CN0_STRONG, OBSERVED, false); /* -> REPORT_GNSS */
 	ASSERT_STATE(st, LOC_REPORT_GNSS);
 	st = step(true, 4, OBSERVED);
-	check_outputs(st, true, true, true, POST_MS);
+	check_outputs(st, LOC_GNSS_CONTINUOUS, true, true, POST_MS);
 	zassert_false(st.prefer_cell, "REPORT_GNSS+fix: prefer_cell");
 
 	reset_fsm();
 	to_cell_loop();
 	st = step(false, 0, OBSERVED);
 	ASSERT_STATE(st, LOC_CELL_LOOP);
-	check_outputs(st, true, true, true, CELL_POST_MS);
+	check_outputs(st, LOC_GNSS_CONTINUOUS, true, true, CELL_POST_MS);
 	zassert_true(st.prefer_cell, "CELL_LOOP: prefer_cell");
 }
 
