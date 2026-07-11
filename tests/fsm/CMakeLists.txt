@@ -15,7 +15,9 @@ set(TRACKER_SRC ${CMAKE_CURRENT_SOURCE_DIR}/../../apps/tracker/src)
 # controllable fake, and ztest provides main().
 target_sources(app PRIVATE
   src/main.c
+  src/motion_test.c
   ${TRACKER_SRC}/loc/loc_fsm.c
+  ${TRACKER_SRC}/loc/motion.c
 )
 target_include_directories(app PRIVATE
   ${TRACKER_SRC}/loc
