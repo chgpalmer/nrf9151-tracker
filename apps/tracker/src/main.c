@@ -466,6 +466,8 @@ int main(void)
 	int64_t fix_pvt_ms = 0; /* when fix_pvt was captured, for the age field */
 
 	int64_t last_post_ms   = 0;
+	int64_t queued_fix_ms  = 0;
+	int64_t last_acq_log_ms = 0;
 	int64_t last_status_ms = 0;
 	int64_t next_net_ms    = 0;
 	enum loc_state prev_state = LOC_LTE_ATTACH;
@@ -570,6 +572,24 @@ int main(void)
 			}
 		}
 
+		/* Acquisition forensics: while hunting (or waiting on a stale
+		 * fix), ship one compact sky snapshot at INF every 30 s so a
+		 * drive-time acquisition failure is diagnosable from the server
+		 * — the per-satellite DBG table never leaves UART. Bounded:
+		 * ~70 B/line only while unfixed, so a 5-min episode is ~700 B.
+		 * ephe V/H: V of the H satellites we hold ephemeris for are
+		 * currently visible; a fix needs 4 visible. */
+		bool hunting = (loc.state == LOC_GNSS_ACQUIRE ||
+				loc.state == LOC_GNSS_EXCLUSIVE ||
+				(loc.state == LOC_REPORT_GNSS && !loc.gps_current));
+		if (hunting && now - last_acq_log_ms >= 30000) {
+			last_acq_log_ms = now;
+			LOG_INF("acq: %s tracked %u strong %u ephe %u/%u empty %u pdop %.1f",
+				loc_state_str(loc.state), loc.tracked, loc.strong,
+				loc.ephemeris_visible, loc.ephemeris_held,
+				loc.sky_empty, (double)loc.pdop);
+		}
+
 		/* Status block every STATUS_INTERVAL_MS */
 		if (now - last_status_ms >= STATUS_INTERVAL_MS) {
 			last_status_ms = now;
@@ -582,7 +602,14 @@ int main(void)
 		if (loc.publish_allowed && now - last_post_ms >= loc.publish_interval_ms) {
 			last_post_ms = now;
 			if (!loc.prefer_cell) {
-				obs_queue_add_gps(&fix_pvt, fix_pvt_ms);
+				/* Only if the snapshot is NEW: while LTE holds the
+				 * radio GNSS produces no PVT, and re-queueing the
+				 * same snapshot each interval shipped identical
+				 * points 10x (seen in the server DB). */
+				if (fix_pvt_ms != queued_fix_ms) {
+					queued_fix_ms = fix_pvt_ms;
+					obs_queue_add_gps(&fix_pvt, fix_pvt_ms);
+				}
 			} else if (lte_connected) {
 				struct serving_cell sc;
 				/* Condition, not event: don't repeat the WRN every
