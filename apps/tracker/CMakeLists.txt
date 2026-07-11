@@ -7,10 +7,11 @@ target_sources(app PRIVATE
   src/loc/loc_fsm.c
   src/net/coap_pub.c
   src/net/obs_queue.c
+  src/ui/leds.c
   # Generated from proto/tracker.proto by `make proto` — do not edit.
   src/proto/tracker.pb.c
 )
-target_include_directories(app PRIVATE src/loc src/net src/proto)
+target_include_directories(app PRIVATE src/loc src/net src/proto src/ui)
 
 if(NOT CONFIG_NRF_MODEM_LIB)
   # Nordic headers are not on the include path when NRF_MODEM_LIB=n.

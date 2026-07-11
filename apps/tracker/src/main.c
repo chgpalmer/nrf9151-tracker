@@ -26,6 +26,7 @@
 #include "loc_fsm.h"
 #include "coap_pub.h"
 #include "obs_queue.h"
+#include "leds.h"
 
 LOG_MODULE_REGISTER(tracker, CONFIG_TRACKER_LOG_LEVEL);
 
@@ -378,6 +379,7 @@ int main(void)
 	/* GPS samples land at the publish interval; a track segment's time model
 	 * (anchor + i*dt) is built on that cadence. */
 	obs_queue_init(device_id, POST_INTERVAL_MS);
+	leds_init();
 
 	/* Start LTE async — don't block, status loop shows progress */
 	LOG_INF("starting LTE (async)...");
@@ -443,6 +445,7 @@ int main(void)
 
 		/* Policy first: it owns the fix-staleness and ephemeris bookkeeping. */
 		loc_fsm_update(&pvt, now, lte_connected, &loc);
+		leds_update(&loc, lte_connected);
 
 		/* Run GNSS only when the FSM says so. While the modem is searching
 		 * for a network the search owns the radio, and GNSS alongside it just
@@ -545,6 +548,7 @@ int main(void)
 			bool had_cell = obs_queue_has_cell();
 
 			if (obs_queue_flush(now) == 0) {
+				leds_tx_pulse();
 				last_flush_ms = now;
 				last_pub_ms = now; /* RRC-tail measurement */
 				if (had_cell) {

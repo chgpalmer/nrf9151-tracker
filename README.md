@@ -179,6 +179,19 @@ keeps GNSS acquisition windows intact. Note the ingest is **anonymous and
 unauthenticated** (as the MQTT broker was); DTLS-PSK via the modem's offloaded
 sockets is the upgrade path when that starts to matter.
 
+## LEDs (state at a glance)
+
+| LED | Meaning | Off | Blink | Solid |
+|---|---|---|---|---|
+| 1 | LTE | radio off on purpose (exclusive) | attaching | registered |
+| 2 | GPS | GNSS not running | acquiring | **fix current** |
+| 3 | TX | — | — | ~½ s pulse per successful send |
+| 4 | help | normal | CELL_LOOP (retrying on sight) | GNSS_EXCLUSIVE (radio dark) |
+
+Glance rules: **LED2 solid = safe to start moving** (hot re-fix from here is
+seconds). LED4 lit = GPS is struggling, and explains a dark LED1. LED3
+flickering every ~50 s while moving = track segments are flowing.
+
 ## Apps
 
 - `apps/hello` — secure `printk` loop. Verified working.
