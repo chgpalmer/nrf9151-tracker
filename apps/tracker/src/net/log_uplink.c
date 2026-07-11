@@ -26,7 +26,7 @@
 #include <zephyr/logging/log_ctrl.h>
 #include <zephyr/logging/log_output.h>
 
-#define RING_CAP 64
+#define RING_CAP CONFIG_TRACKER_LOG_UPLINK_RING_LINES
 #define TEXT_MAX 96
 #define MOD_MAX  16
 

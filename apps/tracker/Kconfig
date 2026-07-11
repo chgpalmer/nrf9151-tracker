@@ -1,9 +1,16 @@
 menu "Tracker"
 
 config TRACKER_LOG_LEVEL
-	int "Log level"
-	default 3
+	int "Compiled-in log level (0=off 1=ERR 2=WRN 3=INF 4=DBG)"
+	default 4
 	range 0 4
+	help
+	  The ceiling COMPILED INTO the binary for the tracker's own modules —
+	  levels above it do not exist at runtime and no backend or shell
+	  command can bring them back. 4 keeps the DBG chatter (status blocks,
+	  satellite tables, RRC edges) available: UART shows it by default and
+	  the shell can silence it; the uplink backend has its own quieter
+	  threshold (TRACKER_LOG_UPLINK_LEVEL) so none of it hits the wire.
 
 config TRACKER_POST_INTERVAL_S
 	int "GPS sample interval in seconds"
@@ -65,6 +72,16 @@ config TRACKER_LOG_WAKE_MIN_S
 	help
 	  A WRN+ log line requests an urgent uplink flush; this rate limit
 	  stops an error loop from chattering the radio (and starving GNSS).
+
+config TRACKER_LOG_UPLINK_RING_LINES
+	int "Log-uplink ring capacity (lines)"
+	default 128
+	range 16 1024
+	help
+	  How many log lines queue in RAM while the radio is unavailable
+	  (LTE outage, GNSS_EXCLUSIVE). ~120 B per line. Overflow drops the
+	  oldest and reports the count in-band; the flash flight recorder
+	  (phase 2) is the durable tier.
 
 config TRACKER_CELL_POST_INTERVAL_S
 	int "Cell publish interval while GNSS has no usable sky (seconds)"
