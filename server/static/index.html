@@ -54,13 +54,9 @@
     <!-- Sidebar -->
     <aside class="sidebar">
       <nav class="nav" role="navigation" aria-label="Main navigation">
-        <a href="#live"     class="nav-item" data-page="live">
+        <a href="#map"      class="nav-item" data-page="map">
           <span class="nav-icon">◉</span>
-          <span class="nav-label">Live</span>
-        </a>
-        <a href="#history"  class="nav-item" data-page="history">
-          <span class="nav-icon">⊡</span>
-          <span class="nav-label">History</span>
+          <span class="nav-label">Map</span>
         </a>
         <a href="#events"   class="nav-item" data-page="events">
           <span class="nav-icon">◈</span>
@@ -82,18 +78,18 @@
     <!-- Main Content -->
     <main class="main-content" id="main-content">
 
-      <!-- ── LIVE PAGE ── -->
-      <section class="page" id="page-live" data-page="live">
+      <!-- ── MAP PAGE (live + history, unified) ── -->
+      <section class="page" id="page-map" data-page="map">
         <div class="page-controls">
           <div class="control-group">
-            <span class="control-label">WINDOW</span>
-            <div class="pill-group" id="time-window">
-              <button class="pill" data-minutes="15">15m</button>
-              <button class="pill active" data-minutes="60">1h</button>
-              <button class="pill" data-minutes="360">6h</button>
-              <button class="pill" data-minutes="1440">24h</button>
-              <button class="pill" data-minutes="0">All</button>
-            </div>
+            <label class="control-label" for="map-date">DATE</label>
+            <input type="date" id="map-date" class="date-input" />
+          </div>
+          <div class="control-group">
+            <span class="control-label">SHOW</span>
+            <!-- populated by JS: LIVE (today only), DAY, then one chip per trip -->
+            <div class="chip-group trip-chips" id="trip-chips"></div>
+            <span class="hist-range-label" id="range-label">—</span>
           </div>
           <div class="control-group">
             <span class="control-label">SOURCES</span>
@@ -122,9 +118,24 @@
           </div>
         </div>
 
-        <div class="map-container" id="map-live"></div>
+        <div class="map-container" id="map-main"></div>
 
-        <div class="chart-strip" id="chart-strip-live">
+        <!-- Day timeline: trip bands are clickable; drag the handles or band
+             for a custom window; click empty track to center the window. -->
+        <div class="timeline" id="timeline">
+          <div class="timeline-axis" id="tl-axis"></div>
+          <div class="timeline-track" id="tl-track">
+            <canvas class="tl-density" id="tl-density"></canvas>
+            <div class="tl-trips" id="tl-trips"></div>
+            <div class="tl-selection" id="tl-sel"></div>
+            <div class="tl-handle tl-handle-start" id="tl-start" tabindex="0" role="slider"
+                 aria-label="Window start"></div>
+            <div class="tl-handle tl-handle-end" id="tl-end" tabindex="0" role="slider"
+                 aria-label="Window end"></div>
+          </div>
+        </div>
+
+        <div class="chart-strip" id="chart-strip">
           <div class="chart-wrap">
             <div class="chart-header">SPEED (km/h)</div>
             <canvas id="chart-speed" height="70"></canvas>
@@ -135,67 +146,9 @@
           </div>
         </div>
 
-        <div id="fix-table-live"></div>
-      </section>
+        <div class="hist-summary" id="summary"></div>
 
-      <!-- ── HISTORY PAGE ── -->
-      <section class="page hidden" id="page-history" data-page="history">
-        <div class="page-controls">
-          <div class="control-group">
-            <label class="control-label" for="hist-date">DATE</label>
-            <input type="date" id="hist-date" class="date-input" />
-          </div>
-          <div class="control-group">
-            <span class="control-label">WINDOW</span>
-            <div class="pill-group" id="hist-window">
-              <button class="pill" data-minutes="15">15m</button>
-              <button class="pill" data-minutes="60">1h</button>
-              <button class="pill" data-minutes="360">6h</button>
-              <button class="pill active" data-minutes="1440">Day</button>
-            </div>
-            <span class="hist-range-label" id="hist-range">—</span>
-          </div>
-          <div class="control-group">
-            <span class="control-label">SOURCES</span>
-            <div class="chip-group">
-              <button class="src-chip src-gps active" id="filter-gps-hist" type="button" aria-pressed="true">
-                <span class="src-glyph src-glyph-gps"></span>GPS
-              </button>
-              <button class="src-chip src-cell active" id="filter-cell-hist" type="button" aria-pressed="true">
-                <span class="src-glyph src-glyph-cell"></span>CELL
-              </button>
-            </div>
-          </div>
-          <div class="control-group">
-            <label class="toggle-label">
-              <input type="checkbox" id="show-accuracy-hist" class="toggle-input" />
-              <span class="toggle-track"></span>
-              <span class="toggle-text">Accuracy radii</span>
-            </label>
-          </div>
-        </div>
-
-        <div class="map-container" id="map-history"></div>
-
-        <!-- Timeline scrubber: drag the handles to trim, drag the band to move
-             the window, or click the track to center the window there. The
-             WINDOW pills set the width. Fix-density ticks show where data
-             exists so you aim straight at it (video-editor style). -->
-        <div class="timeline" id="hist-timeline">
-          <div class="timeline-axis" id="tl-axis"></div>
-          <div class="timeline-track" id="tl-track">
-            <div class="tl-density" id="tl-density"></div>
-            <div class="tl-selection" id="tl-sel"></div>
-            <div class="tl-handle tl-handle-start" id="tl-start" tabindex="0" role="slider"
-                 aria-label="Window start"></div>
-            <div class="tl-handle tl-handle-end" id="tl-end" tabindex="0" role="slider"
-                 aria-label="Window end"></div>
-          </div>
-        </div>
-
-        <div class="hist-summary" id="hist-summary"></div>
-
-        <div id="fix-table-history"></div>
+        <div id="fix-table"></div>
       </section>
 
       <!-- ── EVENTS PAGE ── -->

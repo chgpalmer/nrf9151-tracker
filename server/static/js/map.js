@@ -1,0 +1,410 @@
+/**
+ * map.js — the unified map page (live + history).
+ *
+ * Model: load one whole local day, segment it into trips (trips.js), then all
+ * selection is client-side and instant. The SHOW chips pick what the map,
+ * charts, summary and table describe:
+ *
+ *   LIVE   (today only) follow the device: the current/latest trip plus the
+ *          live position, auto-refreshing every few seconds. The map fits
+ *          once on selection, then holds still while the blue dot moves.
+ *   DAY    the full day.
+ *   T1..Tn one detected trip (stationary >2 min or a gap >5 min splits trips).
+ *
+ * The timeline shows fix density (canvas — a 1 Hz day is thousands of fixes)
+ * with clickable trip bands; the drag handles/band still allow any custom
+ * window, which switches the selection to "range". Hovering the charts or
+ * table rings the same point on the map.
+ */
+
+import { fetchPositions }  from '/js/api.js';
+import { createMapView }   from '/js/mapview.js';
+import { createFixTable }  from '/js/fixtable.js';
+import { initCharts, updateCharts } from '/js/charts.js';
+import { open as openDrawer } from '/js/drawer.js';
+import { currentDevice, setStatus } from '/js/devices.js';
+import { fmtAcc, mpsToKph, deviceStatus } from '/js/format.js';
+import { segmentTrips, haversineM, fmtDistM } from '/js/trips.js';
+
+const DAY        = 86400;
+const MIN_FRAC   = 0.002;
+const REFRESH_MS = 5000;
+const DAY_LIMIT  = 50000; // API rows per day-load; a full 1 Hz day can exceed this
+
+let mapView  = null;
+let fixTable = null;
+let isInitialized = false;
+let timer    = null;
+
+let dayStart = 0;      // epoch of 00:00 local for the selected day
+let isToday  = false;
+let dayFixes = [];     // chronological
+let trips    = [];
+let sel      = { mode: 'day' };   // 'live' | 'day' | {mode:'trip', i} | 'range'
+let selFrac  = [0, 1]; // current window as day fractions (source of truth for 'range')
+let dragging = null;
+let grabOffset = 0;
+
+// ── controls ────────────────────────────────────────────────
+const dateInput = document.getElementById('map-date');
+const chipsEl   = document.getElementById('trip-chips');
+const rangeEl   = document.getElementById('range-label');
+const summaryEl = document.getElementById('summary');
+const accToggle   = document.getElementById('show-accuracy');
+const arrowToggle = document.getElementById('show-arrows');
+const gpsChip     = document.getElementById('filter-gps');
+const cellChip    = document.getElementById('filter-cell');
+
+const track     = document.getElementById('tl-track');
+const densityEl = document.getElementById('tl-density');
+const tripsEl   = document.getElementById('tl-trips');
+const selEl     = document.getElementById('tl-sel');
+const startH    = document.getElementById('tl-start');
+const endH      = document.getElementById('tl-end');
+const axisEl    = document.getElementById('tl-axis');
+
+function todayStr() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+dateInput.value = todayStr();
+dateInput.addEventListener('change', loadDay);
+
+accToggle.addEventListener('change', () => mapView && mapView.setShowAccuracy(accToggle.checked));
+arrowToggle.addEventListener('change', () => mapView && mapView.setShowArrows(arrowToggle.checked));
+
+[gpsChip, cellChip].forEach(chip => {
+  chip.addEventListener('click', () => {
+    chip.classList.toggle('active');
+    chip.setAttribute('aria-pressed', String(chip.classList.contains('active')));
+    applyView(false);
+  });
+});
+
+// ── timeline drag (custom window = 'range' selection) ───────
+function fracFromEvent(clientX) {
+  const r = track.getBoundingClientRect();
+  return Math.min(1, Math.max(0, (clientX - r.left) / r.width));
+}
+
+function onPointerMove(e) {
+  if (!dragging) return;
+  const f = fracFromEvent(e.clientX);
+  if (dragging === 'start')    selFrac[0] = Math.min(f, selFrac[1] - MIN_FRAC);
+  else if (dragging === 'end') selFrac[1] = Math.max(f, selFrac[0] + MIN_FRAC);
+  else setWindowFrac(f - grabOffset, selFrac[1] - selFrac[0]);
+  sel = { mode: 'range' };
+  renderChips();
+  applyView(false);  // no re-fit mid-drag
+}
+
+function endDrag() {
+  if (!dragging) return;
+  dragging = null;
+  applyView(true);
+}
+
+function setWindowFrac(start, width) {
+  const s = Math.min(Math.max(0, start), 1 - width);
+  selFrac = [s, s + width];
+}
+
+startH.addEventListener('pointerdown', e => { dragging = 'start'; startH.setPointerCapture(e.pointerId); });
+endH.addEventListener('pointerdown',   e => { dragging = 'end';   endH.setPointerCapture(e.pointerId); });
+selEl.addEventListener('pointerdown',  e => {
+  dragging = 'move';
+  grabOffset = fracFromEvent(e.clientX) - selFrac[0];
+  selEl.setPointerCapture(e.pointerId);
+});
+track.addEventListener('pointermove', onPointerMove);
+window.addEventListener('pointerup', endDrag);
+
+// Click empty track: center the current window there.
+track.addEventListener('pointerdown', e => {
+  if (e.target === startH || e.target === endH || e.target === selEl ||
+      e.target.classList.contains('tl-trip-band')) return;
+  setWindowFrac(fracFromEvent(e.clientX) - (selFrac[1] - selFrac[0]) / 2,
+                selFrac[1] - selFrac[0]);
+  sel = { mode: 'range' };
+  renderChips();
+  applyView(true);
+});
+
+function keyNudge(e, which) {
+  const step = (e.shiftKey ? 60 : 300) / DAY;
+  const dir = e.key === 'ArrowLeft' ? -1 : e.key === 'ArrowRight' ? 1 : 0;
+  if (!dir) return;
+  e.preventDefault();
+  if (which === 'start') selFrac[0] = Math.min(Math.max(0, selFrac[0] + dir * step), selFrac[1] - MIN_FRAC);
+  else                   selFrac[1] = Math.max(Math.min(1, selFrac[1] + dir * step), selFrac[0] + MIN_FRAC);
+  sel = { mode: 'range' };
+  renderChips();
+  applyView(true);
+}
+startH.addEventListener('keydown', e => keyNudge(e, 'start'));
+endH.addEventListener('keydown',   e => keyNudge(e, 'end'));
+
+// ── lifecycle ───────────────────────────────────────────────
+export function init() {
+  if (isInitialized) return;
+  isInitialized = true;
+
+  mapView = createMapView('map-main', fix => openDrawer(fix));
+  window._mapView = mapView;
+  fixTable = createFixTable('fix-table', {
+    onRowClick: fix => { mapView.focusFix(fix); openDrawer(fix); },
+    onRowHover: fix => mapView.hoverFix(fix),
+  });
+  initCharts({ onHover: fix => mapView.hoverFix(fix) });
+  buildAxis();
+  loadDay();
+}
+
+export function start() {
+  init();
+  scheduleTimer();
+}
+
+export function stop() {
+  clearInterval(timer);
+  timer = null;
+}
+
+export function onDeviceChange() {
+  if (isInitialized) loadDay();
+}
+
+function scheduleTimer() {
+  clearInterval(timer);
+  timer = isToday ? setInterval(refresh, REFRESH_MS) : null;
+}
+
+// ── data ────────────────────────────────────────────────────
+async function loadDay() {
+  const deviceId = currentDevice();
+  dayStart = Math.floor(new Date(`${dateInput.value}T00:00:00`).getTime() / 1000);
+  isToday  = dateInput.value === todayStr();
+
+  if (!deviceId) {
+    dayFixes = []; trips = [];
+    summaryEl.innerHTML = `<span class="hist-hint">Select a device.</span>`;
+    return;
+  }
+
+  try {
+    dayFixes = await fetchPositions(deviceId, {
+      from_ts: dayStart, to_ts: dayStart + DAY, limit: DAY_LIMIT,
+    });
+  } catch (e) {
+    console.error('Day load error:', e);
+    summaryEl.innerHTML = `<span class="hist-hint err">Failed to load: ${e.message}</span>`;
+    return;
+  }
+
+  // Live must always show where the device is: an empty *today* falls back to
+  // the single most recent fix so the device never vanishes from the map.
+  if (dayFixes.length === 0 && isToday) {
+    try { dayFixes = await fetchPositions(deviceId, { limit: 1 }); } catch (e) { /* keep empty */ }
+  }
+
+  trips = segmentTrips(dayFixes);
+  sel = isToday ? { mode: 'live' } : { mode: 'day' };
+  renderDensity();
+  renderTripBands();
+  renderChips();
+  applyView(true);
+  scheduleTimer();
+}
+
+// Incremental refresh (today only): append what's new, keep the view still.
+async function refresh() {
+  const deviceId = currentDevice();
+  if (!deviceId || dragging) return;
+
+  const last = dayFixes.length ? dayFixes[dayFixes.length - 1].received_ts : dayStart;
+  let fresh;
+  try {
+    fresh = await fetchPositions(deviceId, {
+      from_ts: last + 0.001, to_ts: dayStart + DAY, limit: DAY_LIMIT,
+    });
+  } catch (e) {
+    return; // transient; next tick retries
+  }
+  if (fresh.length > 0) {
+    dayFixes = dayFixes.concat(fresh);
+    trips = segmentTrips(dayFixes);
+    renderDensity();
+    renderTripBands();
+    renderChips();
+    applyView(false);
+  }
+  if (dayFixes.length > 0) {
+    setStatus(deviceStatus(dayFixes[dayFixes.length - 1].received_ts));
+  }
+}
+
+// ── selection → window ──────────────────────────────────────
+function windowTs() {
+  const dayEnd = dayStart + DAY;
+  if (sel.mode === 'live') {
+    const lastTs = dayFixes.length ? dayFixes[dayFixes.length - 1].received_ts
+                                   : Date.now() / 1000;
+    const t = trips[trips.length - 1];
+    // On (or just off) a trip: show it from its start. Otherwise trail 15 min.
+    const from = (t && lastTs - t.end_ts < 300) ? t.start_ts - 30 : lastTs - 900;
+    return [Math.max(dayStart, from), dayEnd];
+  }
+  if (sel.mode === 'trip' && trips[sel.i]) {
+    return [trips[sel.i].start_ts - 30, trips[sel.i].end_ts + 30];
+  }
+  if (sel.mode === 'range') {
+    return [dayStart + selFrac[0] * DAY, dayStart + selFrac[1] * DAY];
+  }
+  return [dayStart, dayEnd];
+}
+
+function applyView(fit) {
+  const [fromTs, toTs] = windowTs();
+  selFrac = [(fromTs - dayStart) / DAY, Math.min(1, (toTs - dayStart) / DAY)];
+
+  // selection band + handles
+  startH.style.left = (selFrac[0] * 100) + '%';
+  endH.style.left   = (selFrac[1] * 100) + '%';
+  selEl.style.left  = (selFrac[0] * 100) + '%';
+  selEl.style.width = ((selFrac[1] - selFrac[0]) * 100) + '%';
+  rangeEl.textContent = `${hhmm(fromTs)} – ${hhmm(toTs)} · ${durLabel(toTs - fromTs)}`;
+
+  const gps  = gpsChip.classList.contains('active');
+  const cell = cellChip.classList.contains('active');
+  const win = dayFixes.filter(f =>
+    f.received_ts >= fromTs && f.received_ts <= toTs &&
+    (f.source === 'gps' ? gps : cell));
+
+  const filtered = win.length === 0 && dayFixes.length > 0 && !(gps && cell);
+  mapView.render(win, {
+    fitBounds: fit,
+    showAccuracy: accToggle.checked,
+    showArrows: arrowToggle.checked,
+    liveDot: sel.mode === 'live',
+    emptyMsg: filtered ? 'All fixes hidden by source filter' : undefined,
+    emptySub: filtered ? 'Re-enable GPS or CELL above.' : undefined,
+  });
+  updateCharts(win);
+  fixTable.render(win);
+  renderSummary(win);
+}
+
+// ── chips ───────────────────────────────────────────────────
+function chipActive(c) {
+  if (c.mode !== sel.mode) return false;
+  return c.mode !== 'trip' || c.i === sel.i;
+}
+
+function renderChips() {
+  const chips = [];
+  if (isToday) chips.push({ mode: 'live', label: '● LIVE' });
+  chips.push({ mode: 'day', label: 'DAY' });
+  trips.forEach((t, i) => chips.push({
+    mode: 'trip', i,
+    label: `T${i + 1} ${hhmm(t.start_ts)} · ${fmtDistM(t.dist_m)}`,
+  }));
+
+  chipsEl.innerHTML = '';
+  for (const c of chips) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'trip-chip' + (c.mode === 'live' ? ' live' : '') +
+                  (chipActive(c) ? ' active' : '');
+    b.textContent = c.label;
+    b.addEventListener('click', () => {
+      sel = c.mode === 'trip' ? { mode: 'trip', i: c.i } : { mode: c.mode };
+      renderChips();
+      applyView(true);
+    });
+    chipsEl.appendChild(b);
+  }
+}
+
+// ── timeline rendering ──────────────────────────────────────
+function renderDensity() {
+  const dpr = window.devicePixelRatio || 1;
+  const w = densityEl.clientWidth, h = densityEl.clientHeight;
+  if (!w) return;
+  densityEl.width = w * dpr; densityEl.height = h * dpr;
+  const ctx = densityEl.getContext('2d');
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, w, h);
+  for (const f of dayFixes) {
+    const frac = (f.received_ts - dayStart) / DAY;
+    if (frac < 0 || frac > 1) continue;
+    ctx.fillStyle = f.source === 'cell' ? 'rgba(245,166,35,0.7)' : 'rgba(0,229,160,0.55)';
+    ctx.fillRect(frac * w, h * 0.18, 1, h * 0.64);
+  }
+}
+
+function renderTripBands() {
+  tripsEl.innerHTML = '';
+  trips.forEach((t, i) => {
+    const band = document.createElement('div');
+    band.className = 'tl-trip-band';
+    band.style.left  = ((t.start_ts - dayStart) / DAY * 100) + '%';
+    band.style.width = (Math.max(0.004, (t.end_ts - t.start_ts) / DAY) * 100) + '%';
+    band.title = `T${i + 1}  ${hhmm(t.start_ts)}–${hhmm(t.end_ts)}  ${fmtDistM(t.dist_m)}`;
+    band.addEventListener('click', () => {
+      sel = { mode: 'trip', i };
+      renderChips();
+      applyView(true);
+    });
+    tripsEl.appendChild(band);
+  });
+}
+
+function buildAxis() {
+  axisEl.innerHTML = '';
+  for (let h = 0; h <= 24; h += 6) {
+    const m = document.createElement('span');
+    m.className = 'tl-axis-mark';
+    m.style.left = (h / 24 * 100) + '%';
+    m.textContent = String(h).padStart(2, '0') + ':00';
+    axisEl.appendChild(m);
+  }
+}
+
+// ── summary ─────────────────────────────────────────────────
+function renderSummary(fixes) {
+  if (fixes.length === 0) {
+    summaryEl.innerHTML = `<span class="hist-hint">No fixes in this window.</span>`;
+    return;
+  }
+  const gps  = fixes.filter(f => f.source === 'gps');
+  const cell = fixes.length - gps.length;
+  let dist = 0;
+  for (let i = 1; i < gps.length; i++) {
+    dist += haversineM(gps[i - 1].lat, gps[i - 1].lon, gps[i].lat, gps[i].lon);
+  }
+  const spds = gps.filter(f => f.spd != null).map(f => f.spd);
+  const maxSpd = spds.length ? Math.max(...spds) : null;
+  const avgAcc = fixes.reduce((s, f) => s + f.acc, 0) / fixes.length;
+  const spanMin = Math.round((fixes[fixes.length - 1].received_ts - fixes[0].received_ts) / 60);
+
+  const stat = (l, v) => `<div class="hist-stat"><span class="hist-stat-label">${l}</span><span class="hist-stat-val">${v}</span></div>`;
+  summaryEl.innerHTML =
+    stat('FIXES', fixes.length) + stat('GPS', gps.length) + stat('CELL', cell)
+    + stat('SPAN', spanMin > 0 ? durLabel(spanMin * 60) : '<1m')
+    + (dist > 20 ? stat('DIST', fmtDistM(dist)) : '')
+    + (maxSpd != null ? stat('MAX SPEED', `${mpsToKph(maxSpd)} km/h`) : '')
+    + stat('AVG ACCURACY', fmtAcc(avgAcc));
+}
+
+// ── helpers ─────────────────────────────────────────────────
+function hhmm(ts) {
+  return new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function durLabel(secs) {
+  const m = Math.round(secs / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60), rm = m % 60;
+  return rm > 0 ? `${h}h ${String(rm).padStart(2, '0')}m` : `${h}h`;
+}

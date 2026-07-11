@@ -52,6 +52,7 @@ export function createMapView(containerId, onFixClick) {
   const arrowLayer     = L.layerGroup().addTo(map);
   const accuracyLayer  = L.layerGroup().addTo(map);
   const selectedLayer  = L.layerGroup().addTo(map);
+  const hoverLayer     = L.layerGroup().addTo(map);
 
   let currentFixes    = [];
   let showAccuracy    = false;
@@ -339,5 +340,21 @@ export function createMapView(containerId, onFixClick) {
     map.panTo([fix.lat, fix.lon]);
   }
 
-  return { render, setShowAccuracy, setShowArrows, focusFix, invalidate, map };
+  /**
+   * Transient crosshair ring for chart/table hover — independent of the click
+   * selection so hovering doesn't clobber it. Pass null to clear.
+   */
+  function hoverFix(fix) {
+    hoverLayer.clearLayers();
+    if (!fix) return;
+    L.circleMarker([fix.lat, fix.lon], {
+      radius: 9,
+      color: fix.source === 'gps' ? TOKEN.signal : TOKEN.amber,
+      weight: 2.5,
+      fill: false,
+      interactive: false,
+    }).addTo(hoverLayer);
+  }
+
+  return { render, setShowAccuracy, setShowArrows, focusFix, hoverFix, invalidate, map };
 }

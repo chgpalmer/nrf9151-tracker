@@ -52,7 +52,7 @@ async def devices():
 
 @app.get("/api/positions")
 async def positions(device: str, since: int = 0,
-                    from_ts: int = 0, to_ts: int = 0, limit: int = 5000):
+                    from_ts: float = 0, to_ts: float = 0, limit: int = 5000):
     """Position history for one device, chronological.
 
     Live uses `since` (minutes back from now). Replay uses absolute epoch

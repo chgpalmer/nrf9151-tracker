@@ -1,5 +1,11 @@
 /**
- * charts.js — Chart.js mini-charts for speed and accuracy
+ * charts.js — Chart.js mini-charts for speed and accuracy.
+ *
+ * Cross-referencing: hovering either chart snaps to the nearest-x point,
+ * shows a dot, and reports the underlying fix via the onHover callback so the
+ * map can ring the same point. 1 Hz days carry thousands of points, so the
+ * series is decimated (stride sampling) above MAX_PTS — each chart point
+ * keeps a reference to its original fix, so hover always maps back exactly.
  */
 
 const TOKEN = {
@@ -11,10 +17,13 @@ const TOKEN = {
   panel:     '#1C2230',
 };
 
+const MAX_PTS = 1500;
+
 const CHART_DEFAULTS = {
   animation: false,
   responsive: true,
   maintainAspectRatio: false,
+  interaction: { mode: 'index', intersect: false },
   plugins: {
     legend:  { display: false },
     tooltip: {
@@ -45,6 +54,11 @@ const CHART_DEFAULTS = {
   },
 };
 
+let speedChart  = null;
+let accChart    = null;
+let chartFixes  = [];   // decimated series; parallel to both charts' data
+let onHoverCb   = null; // (fix|null) => void
+
 function makeChart(canvasId, color, unit) {
   const ctx = document.getElementById(canvasId);
   if (!ctx) return null;
@@ -58,6 +72,9 @@ function makeChart(canvasId, color, unit) {
         borderColor:  color,
         borderWidth:  1.5,
         pointRadius:  0,
+        pointHoverRadius: 4,
+        pointHoverBackgroundColor: color,
+        pointHoverBorderColor: '#0F1117',
         fill:         true,
         backgroundColor: color + '18',
         tension:      0.3,
@@ -65,6 +82,10 @@ function makeChart(canvasId, color, unit) {
     },
     options: {
       ...CHART_DEFAULTS,
+      onHover: (evt, elements) => {
+        if (!onHoverCb) return;
+        onHoverCb(elements.length ? chartFixes[elements[0].index] : null);
+      },
       plugins: {
         ...CHART_DEFAULTS.plugins,
         tooltip: {
@@ -78,12 +99,15 @@ function makeChart(canvasId, color, unit) {
   });
 }
 
-let speedChart  = null;
-let accChart    = null;
-
-export function initCharts() {
+export function initCharts({ onHover } = {}) {
+  onHoverCb  = onHover || null;
   speedChart = makeChart('chart-speed', TOKEN.signal, 'km/h');
   accChart   = makeChart('chart-acc',   TOKEN.amber,  'm');
+
+  // Hover ends when the pointer leaves the canvas, not just the line.
+  for (const c of [speedChart, accChart]) {
+    if (c) c.canvas.addEventListener('mouseleave', () => onHoverCb && onHoverCb(null));
+  }
 }
 
 /**
@@ -92,33 +116,26 @@ export function initCharts() {
  */
 export function updateCharts(fixes) {
   if (!speedChart || !accChart) return;
-  if (!fixes || fixes.length === 0) {
-    speedChart.data.labels   = [];
-    speedChart.data.datasets[0].data = [];
-    accChart.data.labels     = [];
-    accChart.data.datasets[0].data  = [];
-    speedChart.update();
-    accChart.update();
-    return;
-  }
 
-  const labels = fixes.map(f => {
+  // Decimate: even stride keeps the shape; hover still resolves to a real fix.
+  let pts = fixes || [];
+  if (pts.length > MAX_PTS) {
+    const stride = Math.ceil(pts.length / MAX_PTS);
+    pts = pts.filter((_, i) => i % stride === 0);
+  }
+  chartFixes = pts;
+
+  const labels = pts.map(f => {
     const d = new Date(f.received_ts * 1000);
     return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   });
 
-  const speeds = fixes.map(f =>
-    f.spd != null ? parseFloat((f.spd * 3.6).toFixed(1)) : null
-  );
-
-  const accs = fixes.map(f =>
-    f.acc != null ? Math.round(f.acc) : null
-  );
-
   speedChart.data.labels = labels;
-  speedChart.data.datasets[0].data = speeds;
-  accChart.data.labels   = labels;
-  accChart.data.datasets[0].data  = accs;
+  speedChart.data.datasets[0].data = pts.map(f =>
+    f.spd != null ? parseFloat((f.spd * 3.6).toFixed(1)) : null);
+  accChart.data.labels = labels;
+  accChart.data.datasets[0].data = pts.map(f =>
+    f.acc != null ? Math.round(f.acc) : null);
 
   speedChart.update('none');
   accChart.update('none');

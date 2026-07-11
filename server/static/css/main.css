@@ -1063,13 +1063,21 @@ button { cursor: pointer; }
   border-radius: var(--radius, 4px);
   touch-action: none;
 }
-.tl-density { position: absolute; inset: 0; }
-.tl-tick {
-  position: absolute; top: 6px; bottom: 6px; width: 2px;
-  transform: translateX(-1px);
+/* Fix-density strip: a canvas — a 1 Hz day holds thousands of fixes, far too
+ * many for one DOM node each. */
+.tl-density { position: absolute; inset: 0; width: 100%; height: 100%; }
+
+/* Detected trips: clickable translucent bands over the density strip. */
+.tl-trips { position: absolute; inset: 0; }
+.tl-trip-band {
+  position: absolute; top: 0; bottom: 0;
+  background: rgba(0, 229, 160, 0.10);
+  border: 1px solid rgba(0, 229, 160, 0.35);
+  border-radius: 2px;
+  cursor: pointer;
+  transition: background 0.12s;
 }
-.tl-tick-gps  { background: var(--signal); opacity: 0.75; }
-.tl-tick-cell { background: var(--amber);  opacity: 0.7; }
+.tl-trip-band:hover { background: rgba(0, 229, 160, 0.22); }
 
 .tl-selection {
   position: absolute; top: 0; bottom: 0;
@@ -1112,6 +1120,45 @@ button { cursor: pointer; }
 /* ── Source filter chips (GPS / CELL) ───────────────────────
    Active chip glows in its source colour; inactive is dimmed. */
 .chip-group { display: flex; gap: 4px; }
+
+/* ── Trip / view selection chips (LIVE, DAY, T1…) ─────────── */
+.trip-chips {
+  max-width: 46vw;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  padding-bottom: 2px;
+}
+
+.trip-chip {
+  flex-shrink: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-sec);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  padding: 3px 9px;
+  white-space: nowrap;
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+
+.trip-chip:hover { border-color: var(--border-hi); color: var(--text); }
+
+.trip-chip.active {
+  color: var(--ink);
+  background: var(--signal);
+  border-color: var(--signal);
+  font-weight: 700;
+}
+
+.trip-chip.live { color: var(--live); border-color: var(--live); }
+.trip-chip.live.active {
+  color: #fff;
+  background: var(--live);
+  border-color: var(--live);
+}
 
 .src-chip {
   display: flex;

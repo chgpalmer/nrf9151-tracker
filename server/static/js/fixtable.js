@@ -10,7 +10,7 @@ import { fmtTime, fmtAcc, mpsToKph, fmtCoord } from '/js/format.js';
 
 const MAX_ROWS = 500;
 
-export function createFixTable(containerId, { onRowClick, startOpen = false } = {}) {
+export function createFixTable(containerId, { onRowClick, onRowHover, startOpen = false } = {}) {
   const root = document.getElementById(containerId);
   root.classList.add('ftable');
   root.innerHTML = `
@@ -51,6 +51,14 @@ export function createFixTable(containerId, { onRowClick, startOpen = false } = 
     const fix = fixes[parseInt(tr.dataset.i, 10)];
     if (fix && onRowClick) onRowClick(fix);
   });
+
+  if (onRowHover) {
+    tbody.addEventListener('mouseover', e => {
+      const tr = e.target.closest('tr[data-i]');
+      onRowHover(tr ? fixes[parseInt(tr.dataset.i, 10)] : null);
+    });
+    tbody.addEventListener('mouseleave', () => onRowHover(null));
+  }
 
   function renderBody() {
     dirty = false;
