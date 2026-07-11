@@ -165,3 +165,10 @@ stop:
 > @pkill -f '[z]ephyr.exe' 2>/dev/null && echo "stopped sim(s)" || true
 > @pkill -f '[c]oap_server.py' 2>/dev/null && echo "stopped coap ingest" || true
 > @echo "cleanup done"
+
+# Server-side unit tests: A-GNSS RINEX parsing, ICD scaling, orbit math,
+# payload assembly — pure Python against a committed real BRDC fixture.
+.PHONY: servertest
+servertest:
+> @test -x $(VENV)/bin/pytest || $(VENV)/bin/pip install --quiet pytest
+> cd server && $(VENV)/bin/python3 -m pytest tests/ -q

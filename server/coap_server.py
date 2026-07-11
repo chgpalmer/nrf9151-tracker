@@ -35,6 +35,7 @@ import aiocoap
 import aiocoap.resource as resource
 
 import tracker_pb2 as pb
+from agnss import AgnssCache, assemble
 
 DB_DEFAULT = Path(__file__).parent / "tracker.db"
 
@@ -260,6 +261,55 @@ class ObsResource(resource.Resource):
         return aiocoap.Message(code=aiocoap.Code.CHANGED)
 
 
+class AgnssResource(resource.Resource):
+    """POST /agnss: AgnssRequest in, AgnssData out — the system's one
+    request/response exchange. The device's last DB position drives the
+    elevation filter and the coarse-location seed."""
+
+    def __init__(self, conn, cache):
+        super().__init__()
+        self.conn = conn
+        self.cache = cache
+
+    def _last_pos(self, dev):
+        row = self.conn.execute(
+            """SELECT lat, lon, acc, received_ts FROM positions
+               WHERE device_id=? AND lat IS NOT NULL
+               ORDER BY received_ts DESC LIMIT 1""", (dev,)).fetchone()
+        if row is None:
+            return None
+        lat, lon, acc, ts = row
+        # Inflate uncertainty with age: parked it's honest, driven it still
+        # bounds the search (100 km covers ~1 h of driving).
+        age_h = max(0.0, (time.time() - ts) / 3600.0)
+        unc = min(1_000_000.0, (acc or 2000.0) + age_h * 100_000.0)
+        return lat, lon, unc
+
+    async def render_post(self, request):
+        try:
+            req = pb.AgnssRequest.FromString(request.payload)
+        except Exception as e:
+            print(f"[agnss] rejected request ({len(request.payload)} B): {e}",
+                  file=sys.stderr)
+            return aiocoap.Message(code=aiocoap.Code.BAD_REQUEST)
+        payload = assemble(self.cache, self._last_pos(req.device_id))
+        data = pb.AgnssData.FromString(payload)
+        print(f"[agnss] {req.device_id}: served {len(data.ephemeris)} ephe, "
+              f"{len(payload)} B (flags 0x{req.data_flags:02x})")
+        return aiocoap.Message(code=aiocoap.Code.CONTENT, payload=payload)
+
+
+async def agnss_refresh(cache):
+    """Keep the ephemeris cache ~15-30 min fresh, forever. Failures keep the
+    last good data (assistance is an accelerator, never a dependency)."""
+    while True:
+        try:
+            await asyncio.get_running_loop().run_in_executor(None, cache.fetch)
+        except Exception as exc:
+            print(f"[agnss] refresh error: {exc}", file=sys.stderr)
+        await asyncio.sleep(1800)
+
+
 async def serve(args):
     conn = init_db(Path(args.db))
     print(f"[coap] db: {args.db}")
@@ -274,11 +324,15 @@ async def serve(args):
         print(f"[coap] no cell DB at {args.cells_db} — cell fixes won't "
               f"resolve (run: make cells)")
 
+    cache = AgnssCache(persist=Path(args.db).parent / "agnss_cache.json")
+    asyncio.create_task(agnss_refresh(cache))
+
     site = resource.Site()
     site.add_resource(["obs"], ObsResource(conn, cells))
+    site.add_resource(["agnss"], AgnssResource(conn, cache))
 
     await aiocoap.Context.create_server_context(site, bind=("::", args.port))
-    print(f"[coap] listening on UDP {args.port} (POST /obs, protobuf)")
+    print(f"[coap] listening on UDP {args.port} (POST /obs + /agnss, protobuf)")
     await asyncio.get_running_loop().create_future()  # run forever
 
 
