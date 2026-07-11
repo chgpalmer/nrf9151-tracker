@@ -89,6 +89,22 @@ def main():
                 page.click(tid)
                 page.wait_for_timeout(400)
 
+        # Logs page: rows render, WRN filter narrows, ALL widens.
+        page.goto(args.url + "/#logs", wait_until="networkidle")
+        page.wait_for_timeout(600)
+        n_inf = page.locator("#log-tbody tr").count()
+        if n_inf == 0:
+            problems.append("logs page rendered no rows at +INF")
+        page.click('#logs-level .pill[data-level="2"]')
+        page.wait_for_timeout(600)
+        n_wrn = page.locator("#log-tbody tr").count()
+        if not (0 < n_wrn < n_inf):
+            problems.append(f"level filter broken: {n_inf} rows at INF, {n_wrn} at WRN")
+        page.click('#logs-level .pill[data-level="4"]')
+        page.wait_for_timeout(600)
+        if page.locator("#log-tbody tr").count() <= n_inf:
+            problems.append("ALL level filter did not widen the row set")
+
         page.wait_for_timeout(500)
 
         if args.screenshot:

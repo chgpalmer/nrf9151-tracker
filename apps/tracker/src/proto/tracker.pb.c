@@ -15,6 +15,12 @@ PB_BIND(TrackSegment, TrackSegment, AUTO)
 PB_BIND(CellFix, CellFix, AUTO)
 
 
+PB_BIND(LogLine, LogLine, AUTO)
+
+
+PB_BIND(LogBatch, LogBatch, AUTO)
+
+
 PB_BIND(Entry, Entry, AUTO)
 
 

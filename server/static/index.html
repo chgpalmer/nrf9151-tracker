@@ -58,6 +58,10 @@
           <span class="nav-icon">◉</span>
           <span class="nav-label">Map</span>
         </a>
+        <a href="#logs"     class="nav-item" data-page="logs">
+          <span class="nav-icon">≣</span>
+          <span class="nav-label">Logs</span>
+        </a>
         <a href="#events"   class="nav-item" data-page="events">
           <span class="nav-icon">◈</span>
           <span class="nav-label">Events</span>
@@ -151,6 +155,37 @@
         <div class="hist-summary" id="summary"></div>
 
         <div id="fix-table"></div>
+      </section>
+
+      <!-- ── LOGS PAGE (device log lines shipped over the uplink) ── -->
+      <section class="page hidden" id="page-logs" data-page="logs">
+        <div class="page-controls">
+          <div class="control-group">
+            <label class="control-label" for="logs-date">DATE</label>
+            <button class="date-step" id="logs-date-prev" type="button" aria-label="Previous day">‹</button>
+            <input type="date" id="logs-date" class="date-input" />
+            <button class="date-step" id="logs-date-next" type="button" aria-label="Next day">›</button>
+          </div>
+          <div class="control-group">
+            <span class="control-label">LEVEL</span>
+            <div class="pill-group" id="logs-level">
+              <button class="pill" data-level="1">ERR</button>
+              <button class="pill" data-level="2">+WRN</button>
+              <button class="pill active" data-level="3">+INF</button>
+              <button class="pill" data-level="4">ALL</button>
+            </div>
+          </div>
+          <span class="hist-hint" id="logs-count"></span>
+        </div>
+
+        <div class="log-scroll" id="log-scroll">
+          <table class="log-table">
+            <thead>
+              <tr><th>Time</th><th>Lvl</th><th>Module</th><th>Message</th></tr>
+            </thead>
+            <tbody id="log-tbody"></tbody>
+          </table>
+        </div>
       </section>
 
       <!-- ── EVENTS PAGE ── -->

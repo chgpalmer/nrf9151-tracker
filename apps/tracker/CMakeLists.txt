@@ -7,6 +7,8 @@ target_sources(app PRIVATE
   src/loc/loc_fsm.c
   src/net/coap_pub.c
   src/net/obs_queue.c
+  src/net/uplink.c
+  src/net/log_uplink.c
   src/ui/leds.c
   # Generated from proto/tracker.proto by `make proto` — do not edit.
   src/proto/tracker.pb.c

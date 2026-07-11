@@ -79,12 +79,29 @@ message CellFix {
   sint32 rsrp_dbm = 5;
 }
 
-// One item in a batch. age_s ages the anchor (track) or the fix (cell).
+// One device log line. level uses Zephyr's numbering (1=ERR 2=WRN 3=INF
+// 4=DBG); age_s dates the line the same way observations are dated. Text
+// stays plain text: log volume at the uplink threshold is small, and a
+// greppable wire beats a tokenizer toolchain.
+message LogLine {
+  uint32 age_s  = 1;
+  uint32 level  = 2;
+  string module = 3;
+  string text   = 4;
+}
+
+message LogBatch {
+  repeated LogLine lines = 1;
+}
+
+// One item in a batch. age_s ages the anchor (track) or the fix (cell);
+// log lines carry their own ages (a batch spans time).
 message Entry {
   uint32 age_s = 1;
   oneof kind {
     TrackSegment track = 2;
     CellFix      cell  = 3;
+    LogBatch     log   = 4;
   }
 }
 

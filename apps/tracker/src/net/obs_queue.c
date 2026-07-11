@@ -1,5 +1,5 @@
 #include "obs_queue.h"
-#include "coap_pub.h"
+#include "uplink.h"
 #include "tracker.pb.h"
 
 #include <pb_encode.h>
@@ -11,60 +11,48 @@
 
 LOG_MODULE_REGISTER(obs_queue, CONFIG_TRACKER_LOG_LEVEL);
 
-/* One flush's worth of samples, plus headroom for cell interludes. */
-#define QUEUE_CAP 64
+/* ~34 minutes of 1 Hz sampling (~96 KB): rides out LTE dropouts in RAM.
+ * Beyond that the ring drops oldest — the flash spill tier is phase 2. */
+#define GPS_RING_CAP 2048
+#define CELL_RING_CAP 8
 
-/* Points in one track segment. Sized so the worst case (~7.7 B/point at highway
- * speed) stays inside the ~512 B safe cellular MTU even on IPv6, so UDP never
- * fragments. The count is fixed BEFORE pb_encode runs and never trimmed during
- * it: packed arrays are length-prefixed and written field-by-field, so stopping
- * a callback on a byte budget would truncate dlat and desync it from dlon/spd.
- * A longer flush simply emits several datagrams, each with its own anchor. */
+/* Points in one track segment (one datagram): worst case ~7.7 B/point keeps
+ * the datagram inside uplink's budget; the exact-size check below enforces
+ * it precisely, this is just the search ceiling. */
 #define MAX_SEG_POINTS 50
 
 /* A sample this far off the nominal cadence breaks the run: a segment's time
- * model is anchor + i*dt, so a gap (GNSS dropout, state change) must start a new
- * anchor rather than silently smear every timestamp after it. */
+ * model is anchor + i*dt, so a gap must start a new anchor rather than smear
+ * every timestamp after it. */
 #define DT_SLACK(dt) ((int64_t)(dt) / 2)
 
-enum obs_kind { OBS_GPS, OBS_CELL };
-
-struct obs {
-	enum obs_kind kind;
-	int64_t t_ms; /* uptime when observed */
-	union {
-		struct {
-			int32_t lat_e7, lon_e7, alt_dm;
-			uint32_t acc_dm, spd_dms, hdg_ddeg, sats;
-		} gps;
-		struct {
-			uint32_t mcc, mnc, tac, cid;
-			int32_t rsrp;
-		} cell;
-	};
+struct gps_obs {
+	int64_t t_ms;
+	int32_t lat_e7, lon_e7, alt_dm;
+	uint32_t acc_dm, spd_dms, hdg_ddeg, sats;
 };
 
-static struct obs queue[QUEUE_CAP];
-static size_t q_len;
-static const char *dev_id;
+struct cell_obs {
+	int64_t t_ms;
+	uint32_t mcc, mnc, tac, cid;
+	int32_t rsrp;
+};
+
+/* Circular rings with a transactional read cursor: `taken` marks entries
+ * handed to uplink for the in-flight datagram; commit() pops them, rollback()
+ * re-offers them. push() never blocks — full means drop-oldest. */
+static struct gps_obs gps_ring[GPS_RING_CAP];
+static size_t gps_start, gps_count, gps_taken;
+static uint32_t gps_dropped;
+
+static struct cell_obs cell_ring[CELL_RING_CAP];
+static size_t cell_start, cell_count, cell_taken;
+
 static uint32_t sample_dt_ms = 1000;
 
-void obs_queue_init(const char *device_id, uint32_t dt_ms)
+static inline struct gps_obs *gps_at(size_t i)
 {
-	dev_id = device_id;
-	q_len = 0;
-	sample_dt_ms = dt_ms ? dt_ms : 1000;
-}
-
-static void push(const struct obs *o)
-{
-	if (q_len == QUEUE_CAP) {
-		/* Keep the newest data: the oldest sample is the least useful and
-		 * its age field would be the least precise anyway. */
-		memmove(&queue[0], &queue[1], (QUEUE_CAP - 1) * sizeof(queue[0]));
-		q_len--;
-	}
-	queue[q_len++] = *o;
+	return &gps_ring[(gps_start + i) % GPS_RING_CAP];
 }
 
 void obs_queue_add_gps(const struct nrf_modem_gnss_pvt_data_frame *p,
@@ -79,268 +67,301 @@ void obs_queue_add_gps(const struct nrf_modem_gnss_pvt_data_frame *p,
 		}
 	}
 
-	struct obs o = {
-		.kind = OBS_GPS,
-		.t_ms = fix_uptime_ms,
-		.gps = {
-			.lat_e7 = (int32_t)llround(p->latitude * 1e7),
-			.lon_e7 = (int32_t)llround(p->longitude * 1e7),
-			.alt_dm = (int32_t)lroundf(p->altitude * 10.0f),
-			.acc_dm = (uint32_t)lroundf(p->accuracy * 10.0f),
-			.spd_dms = vel ? (uint32_t)lroundf(p->speed * 10.0f) : 0,
-			.hdg_ddeg = vel ? (uint32_t)lroundf(p->heading * 10.0f) : 0,
-			.sats = used,
-		},
-	};
+	if (gps_count == GPS_RING_CAP) {
+		/* Keep the newest data; the oldest is the least useful. Say so
+		 * once per burst — the line itself travels by uplink later. */
+		if (gps_dropped++ == 0) {
+			LOG_WRN("gps ring full — dropping oldest");
+		}
+		gps_start = (gps_start + 1) % GPS_RING_CAP;
+		gps_count--;
+		if (gps_taken > 0) {
+			gps_taken--; /* the in-flight cursor moved with it */
+		}
+	}
 
-	push(&o);
+	*gps_at(gps_count) = (struct gps_obs){
+		.t_ms = fix_uptime_ms,
+		.lat_e7 = (int32_t)llround(p->latitude * 1e7),
+		.lon_e7 = (int32_t)llround(p->longitude * 1e7),
+		.alt_dm = (int32_t)lroundf(p->altitude * 10.0f),
+		.acc_dm = (uint32_t)lroundf(p->accuracy * 10.0f),
+		.spd_dms = vel ? (uint32_t)lroundf(p->speed * 10.0f) : 0,
+		.hdg_ddeg = vel ? (uint32_t)lroundf(p->heading * 10.0f) : 0,
+		.sats = used,
+	};
+	gps_count++;
+
+	if (gps_count - gps_taken >= MAX_SEG_POINTS) {
+		uplink_request_flush(UPLINK_FLUSH_FULL);
+	}
 }
 
 void obs_queue_add_cell(int mcc, int mnc, uint32_t tac, uint32_t cid,
 			int rsrp_dbm, int64_t obs_uptime_ms)
 {
-	struct obs o = {
-		.kind = OBS_CELL,
-		.t_ms = obs_uptime_ms,
-		.cell = { .mcc = mcc, .mnc = mnc, .tac = tac, .cid = cid,
-			  .rsrp = rsrp_dbm },
-	};
-
-	push(&o);
-}
-
-size_t obs_queue_len(void)
-{
-	return q_len;
-}
-
-bool obs_queue_has_cell(void)
-{
-	for (size_t i = 0; i < q_len; i++) {
-		if (queue[i].kind == OBS_CELL) {
-			return true;
+	if (cell_count == CELL_RING_CAP) {
+		cell_start = (cell_start + 1) % CELL_RING_CAP;
+		cell_count--;
+		if (cell_taken > 0) {
+			cell_taken--;
 		}
 	}
-	return false;
+	cell_ring[(cell_start + cell_count) % CELL_RING_CAP] = (struct cell_obs){
+		.t_ms = obs_uptime_ms,
+		.mcc = mcc, .mnc = mnc, .tac = tac, .cid = cid,
+		.rsrp = rsrp_dbm,
+	};
+	cell_count++;
+
+	/* A cell fix gates the FSM's move to GNSS acquisition: urgent. */
+	uplink_request_flush(UPLINK_FLUSH_URGENT);
 }
 
-/* ---- segment building --------------------------------------------------- */
+static uint32_t age_of(int64_t t_ms)
+{
+	int64_t age = (k_uptime_get() - t_ms) / 1000;
 
-/* How many consecutive GNSS samples from `start` form one segment: GPS kind,
- * cadence within tolerance, capped at MAX_SEG_POINTS. */
-static size_t seg_span(size_t start)
+	return (uint32_t)CLAMP(age, 0, 7200);
+}
+
+/* ---- gps segment source (prio 1) ----------------------------------------
+ * Encodes one TrackSegment Entry per encode_next() call, sized EXACTLY via a
+ * nanopb sizing pass and shrunk until it fits the offered budget. */
+
+/* Which run of the ring the packed-array callbacks emit: points
+ * [seg_base, seg_base + seg_count) in unconsumed-ring coordinates. */
+static size_t seg_base, seg_count;
+
+/* How many consecutive samples from `from` form one segment: cadence within
+ * tolerance, capped at MAX_SEG_POINTS. */
+static size_t seg_span(size_t from)
 {
 	size_t n = 1;
 
-	while (start + n < q_len && n < MAX_SEG_POINTS &&
-	       queue[start + n].kind == OBS_GPS) {
-		int64_t gap = queue[start + n].t_ms - queue[start + n - 1].t_ms;
+	while (from + n < gps_count && n < MAX_SEG_POINTS) {
+		int64_t gap = gps_at(from + n)->t_ms - gps_at(from + n - 1)->t_ms;
 
 		if (gap < (int64_t)sample_dt_ms - DT_SLACK(sample_dt_ms) ||
 		    gap > (int64_t)sample_dt_ms + DT_SLACK(sample_dt_ms)) {
-			break; /* cadence broke -- the next point needs a new anchor */
+			break;
 		}
 		n++;
 	}
 	return n;
 }
 
-/* Which run of the ring a packed-array callback should emit. */
-struct seg_ctx {
-	size_t start; /* index of the anchor (point 0) */
-	size_t count; /* points including the anchor */
-};
-
-/* A packed repeated field encoded from a callback must write its own tag and
- * length prefix, and the length is only known once the payload has been sized --
- * hence the two passes (nanopb's PB_OSTREAM_SIZING just counts bytes).
- *
- * Deltas are sint32 varints, so a large GNSS jump merely costs an extra byte or
- * two: unlike a fixed-width packed layout there is no overflow to guard against,
- * and a segment only ever breaks for a real reason (a cadence gap). */
 #define ENCODE_PACKED(fn_name, emit)                                            \
 	static bool fn_name(pb_ostream_t *stream, const pb_field_t *field,      \
-			    void *const *arg)                                   \
-	{                                                                       \
-		const struct seg_ctx *s = *arg;                                 \
-		pb_ostream_t sizer = PB_OSTREAM_SIZING;                         \
-                                                                                \
-		for (size_t i = 1; i < s->count; i++) {                         \
-			if (!emit(&sizer, s, i)) {                              \
-				return false;                                   \
-			}                                                       \
-		}                                                               \
+			    void *const *arg)                                    \
+	{                                                                        \
+		pb_ostream_t sizer = PB_OSTREAM_SIZING;                          \
+                                                                                 \
+		ARG_UNUSED(arg);                                                 \
+		for (size_t i = 1; i < seg_count; i++) {                         \
+			if (!emit(&sizer, i)) {                                  \
+				return false;                                    \
+			}                                                        \
+		}                                                                \
 		if (!pb_encode_tag(stream, PB_WT_STRING, field->tag) ||         \
 		    !pb_encode_varint(stream, sizer.bytes_written)) {           \
-			return false;                                           \
-		}                                                               \
-		for (size_t i = 1; i < s->count; i++) {                         \
-			if (!emit(stream, s, i)) {                              \
-				return false;                                   \
-			}                                                       \
-		}                                                               \
-		return true;                                                    \
+			return false;                                            \
+		}                                                                \
+		for (size_t i = 1; i < seg_count; i++) {                         \
+			if (!emit(stream, i)) {                                  \
+				return false;                                    \
+			}                                                        \
+		}                                                                \
+		return true;                                                     \
 	}
 
-static bool emit_dlat(pb_ostream_t *st, const struct seg_ctx *s, size_t i)
+static bool emit_dlat(pb_ostream_t *st, size_t i)
 {
-	return pb_encode_svarint(st, queue[s->start + i].gps.lat_e7 -
-					     queue[s->start + i - 1].gps.lat_e7);
+	return pb_encode_svarint(st, gps_at(seg_base + i)->lat_e7 -
+					     gps_at(seg_base + i - 1)->lat_e7);
 }
 
-static bool emit_dlon(pb_ostream_t *st, const struct seg_ctx *s, size_t i)
+static bool emit_dlon(pb_ostream_t *st, size_t i)
 {
-	return pb_encode_svarint(st, queue[s->start + i].gps.lon_e7 -
-					     queue[s->start + i - 1].gps.lon_e7);
+	return pb_encode_svarint(st, gps_at(seg_base + i)->lon_e7 -
+					     gps_at(seg_base + i - 1)->lon_e7);
 }
 
-static bool emit_spd(pb_ostream_t *st, const struct seg_ctx *s, size_t i)
+static bool emit_spd(pb_ostream_t *st, size_t i)
 {
-	return pb_encode_varint(st, queue[s->start + i].gps.spd_dms);
+	return pb_encode_varint(st, gps_at(seg_base + i)->spd_dms);
 }
 
 ENCODE_PACKED(encode_dlat, emit_dlat)
 ENCODE_PACKED(encode_dlon, emit_dlon)
 ENCODE_PACKED(encode_spd, emit_spd)
 
-static bool encode_device_id(pb_ostream_t *stream, const pb_field_t *field,
-			     void *const *arg)
+static void fill_track_entry(Entry *e, size_t base)
 {
-	const char *id = *arg;
+	const struct gps_obs *a = gps_at(base);
 
-	return pb_encode_tag(stream, PB_WT_STRING, field->tag) &&
-	       pb_encode_string(stream, (const pb_byte_t *)id, strlen(id));
+	*e = (Entry)Entry_init_zero;
+	e->age_s = age_of(a->t_ms);
+	e->which_kind = Entry_track_tag;
+	e->kind.track.dt_ms = sample_dt_ms;
+	e->kind.track.has_anchor = true;
+	e->kind.track.anchor.lat_e7 = a->lat_e7;
+	e->kind.track.anchor.lon_e7 = a->lon_e7;
+	e->kind.track.anchor.alt_dm = a->alt_dm;
+	e->kind.track.anchor.acc_dm = a->acc_dm;
+	e->kind.track.anchor.spd_dms = a->spd_dms;
+	e->kind.track.anchor.hdg_ddeg = a->hdg_ddeg;
+	e->kind.track.anchor.sats = a->sats;
+	e->kind.track.dlat.funcs.encode = encode_dlat;
+	e->kind.track.dlon.funcs.encode = encode_dlon;
+	e->kind.track.spd_dms.funcs.encode = encode_spd;
 }
 
-/* ---- flush -------------------------------------------------------------- */
-
-/* Which slice of the ring goes into the datagram currently being encoded. */
-struct flush_ctx {
-	int64_t now_ms;
-	size_t to; /* encode queue[0 .. to) */
-};
-
-static uint32_t age_of(size_t i, int64_t now_ms)
+static bool gps_has_pending(void)
 {
-	int64_t age = (now_ms - queue[i].t_ms) / 1000;
-
-	return (uint32_t)CLAMP(age, 0, 7200);
+	return gps_count > gps_taken;
 }
 
-static bool encode_entries(pb_ostream_t *stream, const pb_field_t *field,
-			   void *const *arg)
+static int gps_encode_next(pb_ostream_t *stream, size_t budget, uint32_t *kind)
 {
-	const struct flush_ctx *f = *arg;
-	size_t i = 0;
-
-	while (i < f->to) {
-		/* Must outlive this iteration: the delta callbacks run inside
-		 * pb_encode_submessage() below and dereference it. */
-		static struct seg_ctx seg;
-		Entry e = Entry_init_zero;
-
-		e.age_s = age_of(i, f->now_ms);
-
-		if (queue[i].kind == OBS_CELL) {
-			e.which_kind = Entry_cell_tag;
-			e.kind.cell.mcc = queue[i].cell.mcc;
-			e.kind.cell.mnc = queue[i].cell.mnc;
-			e.kind.cell.tac = queue[i].cell.tac;
-			e.kind.cell.cell_id = queue[i].cell.cid;
-			e.kind.cell.rsrp_dbm = queue[i].cell.rsrp;
-			i++;
-		} else {
-			seg.start = i;
-			seg.count = seg_span(i);
-
-			e.which_kind = Entry_track_tag;
-			e.kind.track.dt_ms = sample_dt_ms;
-			e.kind.track.has_anchor = true;
-			e.kind.track.anchor.lat_e7 = queue[i].gps.lat_e7;
-			e.kind.track.anchor.lon_e7 = queue[i].gps.lon_e7;
-			e.kind.track.anchor.alt_dm = queue[i].gps.alt_dm;
-			e.kind.track.anchor.acc_dm = queue[i].gps.acc_dm;
-			e.kind.track.anchor.spd_dms = queue[i].gps.spd_dms;
-			e.kind.track.anchor.hdg_ddeg = queue[i].gps.hdg_ddeg;
-			e.kind.track.anchor.sats = queue[i].gps.sats;
-			e.kind.track.dlat.funcs.encode = encode_dlat;
-			e.kind.track.dlat.arg = &seg;
-			e.kind.track.dlon.funcs.encode = encode_dlon;
-			e.kind.track.dlon.arg = &seg;
-			e.kind.track.spd_dms.funcs.encode = encode_spd;
-			e.kind.track.spd_dms.arg = &seg;
-			i += seg.count;
-		}
-
-		if (!pb_encode_tag(stream, PB_WT_STRING, field->tag) ||
-		    !pb_encode_submessage(stream, Entry_fields, &e)) {
-			return false;
-		}
-	}
-	return true;
-}
-
-/* How many queue slots the next datagram takes: the cell entries at the head,
- * plus at most one track segment. Decided up front so the encode never has to
- * stop early (see MAX_SEG_POINTS). */
-static size_t next_chunk(void)
-{
-	size_t i = 0;
-
-	while (i < q_len && queue[i].kind == OBS_CELL) {
-		i++;
-	}
-	if (i < q_len) {
-		i += seg_span(i); /* one segment per datagram keeps it under the MTU */
-	}
-	return i;
-}
-
-int obs_queue_flush(int64_t now_ms)
-{
-	/* Static: keeps it off the 4 KB main stack. Larger than the 512 B MTU
-	 * target so an undersized chunk is caught by the network, not by a silent
-	 * buffer overrun here. */
-	static uint8_t buf[640];
-
-	if (q_len == 0) {
-		return -ENODATA;
+	if (!gps_has_pending()) {
+		return 0;
 	}
 
-	while (q_len > 0) {
-		struct flush_ctx f = { .now_ms = now_ms, .to = next_chunk() };
-		Obs obs = Obs_init_zero;
-		pb_ostream_t stream = pb_ostream_from_buffer(buf, sizeof(buf));
+	Entry e;
+	size_t n = seg_span(gps_taken);
 
-		obs.version = 3;
-		obs.device_id.funcs.encode = encode_device_id;
-		obs.device_id.arg = (void *)dev_id;
-		obs.entries.funcs.encode = encode_entries;
-		obs.entries.arg = &f;
+	/* Exact fit: size the submessage (cheap — no output), shrink the
+	 * segment until it fits the budget. Uplink already wrote the tag. */
+	for (;;) {
+		seg_base = gps_taken;
+		seg_count = n;
+		fill_track_entry(&e, gps_taken);
 
-		if (!pb_encode(&stream, Obs_fields, &obs)) {
-			LOG_ERR("pb_encode: %s (dropping %u obs)",
-				PB_GET_ERROR(&stream), (unsigned)q_len);
-			/* An unencodable queue would wedge forever; dropping is
-			 * the lesser evil and the next samples start clean. */
-			q_len = 0;
+		size_t sz;
+
+		if (!pb_get_encoded_size(&sz, Entry_fields, &e)) {
 			return -EINVAL;
 		}
+		size_t total = sz + 2; /* + length prefix (sz < 16384 always) */
 
-		int err = coap_pub_send(buf, stream.bytes_written);
-
-		if (err) {
-			return err; /* keep the queue; retry on the next flush */
+		if (total <= budget) {
+			break;
 		}
-
-		LOG_INF("flushed %u obs (%zu B payload)", (unsigned)f.to,
-			stream.bytes_written);
-
-		q_len -= f.to;
-		if (q_len > 0) {
-			/* Whatever is left goes out in the next datagram. */
-			memmove(&queue[0], &queue[f.to], q_len * sizeof(queue[0]));
+		if (n <= 1) {
+			return 0; /* not even one point fits this datagram */
 		}
+		/* Points are homogeneous: scale down proportionally, retry. */
+		size_t fixed = 40; /* anchor + headers, roughly */
+		size_t per = (sz > fixed && n > 1) ? (sz - fixed) / n : 8;
+		size_t want = per ? (budget > fixed ? (budget - fixed) / per : 1) : 1;
+
+		n = MAX(1, MIN(n - 1, want));
 	}
-	return 0;
+
+	size_t before = stream->bytes_written;
+
+	if (!pb_encode_submessage(stream, Entry_fields, &e)) {
+		return -EIO;
+	}
+	gps_taken += n;
+	*kind = UPLINK_KIND_TRACK;
+	return (int)(stream->bytes_written - before);
+}
+
+static void gps_commit(void)
+{
+	gps_start = (gps_start + gps_taken) % GPS_RING_CAP;
+	gps_count -= gps_taken;
+	gps_taken = 0;
+}
+
+static void gps_rollback(void)
+{
+	gps_taken = 0;
+}
+
+static const struct uplink_source gps_source = {
+	.name = "gps",
+	.has_pending = gps_has_pending,
+	.encode_next = gps_encode_next,
+	.commit = gps_commit,
+	.rollback = gps_rollback,
+};
+
+/* ---- cell source (prio 0) ------------------------------------------------ */
+
+static bool cell_has_pending(void)
+{
+	return cell_count > cell_taken;
+}
+
+static int cell_encode_next(pb_ostream_t *stream, size_t budget, uint32_t *kind)
+{
+	if (!cell_has_pending()) {
+		return 0;
+	}
+
+	const struct cell_obs *c =
+		&cell_ring[(cell_start + cell_taken) % CELL_RING_CAP];
+	Entry e = Entry_init_zero;
+
+	e.age_s = age_of(c->t_ms);
+	e.which_kind = Entry_cell_tag;
+	e.kind.cell.mcc = c->mcc;
+	e.kind.cell.mnc = c->mnc;
+	e.kind.cell.tac = c->tac;
+	e.kind.cell.cell_id = c->cid;
+	e.kind.cell.rsrp_dbm = c->rsrp;
+
+	size_t sz;
+
+	if (!pb_get_encoded_size(&sz, Entry_fields, &e) || sz + 2 > budget) {
+		return sz + 2 > budget ? 0 : -EINVAL;
+	}
+
+	size_t before = stream->bytes_written;
+
+	if (!pb_encode_submessage(stream, Entry_fields, &e)) {
+		return -EIO;
+	}
+	cell_taken++;
+	*kind = UPLINK_KIND_CELL;
+	return (int)(stream->bytes_written - before);
+}
+
+static void cell_commit(void)
+{
+	cell_start = (cell_start + cell_taken) % CELL_RING_CAP;
+	cell_count -= cell_taken;
+	cell_taken = 0;
+}
+
+static void cell_rollback(void)
+{
+	cell_taken = 0;
+}
+
+static const struct uplink_source cell_source = {
+	.name = "cell",
+	.has_pending = cell_has_pending,
+	.encode_next = cell_encode_next,
+	.commit = cell_commit,
+	.rollback = cell_rollback,
+};
+
+/* ---- init ----------------------------------------------------------------- */
+
+void obs_queue_init(uint32_t dt_ms)
+{
+	sample_dt_ms = dt_ms ? dt_ms : 1000;
+	gps_start = gps_count = gps_taken = 0;
+	cell_start = cell_count = cell_taken = 0;
+	uplink_register(&cell_source, 0);
+	uplink_register(&gps_source, 1);
+}
+
+size_t obs_queue_len(void)
+{
+	return gps_count + cell_count;
 }

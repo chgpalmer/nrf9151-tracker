@@ -42,14 +42,29 @@ config TRACKER_LOC_CN0_MIN_DBHZ
 	  decide whether the sky is worth taking the radio away from LTE for.
 
 config TRACKER_FLUSH_INTERVAL_S
-	int "Observation queue flush interval in seconds"
+	int "Uplink flush interval in seconds"
 	default 120
 	range 10 3600
 	help
-	  Samples queue locally (free) and go out as one CBOR batch per interval,
-	  amortizing per-datagram overhead across ~12 entries. State transitions
-	  and a near-full queue flush immediately regardless, so fresh fixes and
-	  boot cell reports are never held back.
+	  The slow-path timer: uplink drains all sources at least this often
+	  when the radio is allowed. Fullness and urgent events flush sooner.
+
+config TRACKER_LOG_UPLINK_LEVEL
+	int "Max log level shipped over LTE (1=ERR 2=WRN 3=INF 4=DBG)"
+	default 3
+	range 1 4
+	help
+	  Lines at or below this level are queued for uplink delivery. INF is
+	  deliberately quiet (a handful of lines per 10 min); DBG would be
+	  chatty and is meant for UART/shell use.
+
+config TRACKER_LOG_WAKE_MIN_S
+	int "Minimum seconds between log-triggered radio wakes"
+	default 60
+	range 5 3600
+	help
+	  A WRN+ log line requests an urgent uplink flush; this rate limit
+	  stops an error loop from chattering the radio (and starving GNSS).
 
 config TRACKER_CELL_POST_INTERVAL_S
 	int "Cell publish interval while GNSS has no usable sky (seconds)"

@@ -35,5 +35,10 @@ TrackSegment.dlat      type:FT_CALLBACK
 TrackSegment.dlon      type:FT_CALLBACK
 TrackSegment.spd_dms   type:FT_CALLBACK
 
+# Log lines stream out of the log ring the same way: no fixed arrays.
+LogBatch.lines         type:FT_CALLBACK
+LogLine.module         type:FT_CALLBACK
+LogLine.text           type:FT_CALLBACK
+
 # The anchor is a single fixed submessage -- fine as a normal nested struct.
 # CellFix / GpsFix scalar fields are fixed-width and need no options.

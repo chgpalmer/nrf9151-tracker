@@ -58,6 +58,22 @@ def init_db(path: Path) -> sqlite3.Connection:
         CREATE INDEX IF NOT EXISTS idx_pos_dev_time
         ON positions(device_id, received_ts)
     """)
+    # Device log lines shipped over the uplink (level uses Zephyr numbering:
+    # 1=ERR 2=WRN 3=INF 4=DBG).
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS logs (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_id   TEXT    NOT NULL,
+            received_ts REAL    NOT NULL,
+            level       INTEGER NOT NULL,
+            module      TEXT,
+            text        TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_log_dev_time
+        ON logs(device_id, received_ts)
+    """)
     # Migrate older DBs created before the source column existed.
     cols = {r[1] for r in conn.execute("PRAGMA table_info(positions)")}
     if "source" not in cols:
@@ -187,15 +203,22 @@ def store_track(conn, dev, base_ts, seg) -> int:
     return count
 
 
-def store_obs(conn, obs, cells, now: int) -> tuple[int, int]:
-    """Store a decoded Obs. Returns (track_points, cell_fixes)."""
+def store_obs(conn, obs, cells, now: int) -> tuple[int, int, int]:
+    """Store a decoded Obs. Returns (track_points, cell_fixes, log_lines)."""
     dev = obs.device_id
-    n_pts = n_cell = 0
+    n_pts = n_cell = n_log = 0
     for e in obs.entries:
         base_ts = now - e.age_s
         kind = e.WhichOneof("kind")
         if kind == "track":
             n_pts += store_track(conn, dev, base_ts, e.track)
+        elif kind == "log":
+            for line in e.log.lines:
+                conn.execute(
+                    """INSERT INTO logs (device_id, received_ts, level, module, text)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (dev, now - line.age_s, line.level, line.module, line.text))
+                n_log += 1
         elif kind == "cell":
             c = e.cell
             fix = resolve_cell(c.mcc, c.mnc, c.tac, c.cell_id, cells)
@@ -211,8 +234,9 @@ def store_obs(conn, obs, cells, now: int) -> tuple[int, int]:
                 (dev, base_ts, lat, lon, acc))
             n_cell += 1
     conn.commit()
-    print(f"[coap] {dev} v{obs.version}: {n_pts} track pts + {n_cell} cell")
-    return n_pts, n_cell
+    print(f"[coap] {dev} v{obs.version}: {n_pts} track pts + {n_cell} cell "
+          f"+ {n_log} log")
+    return n_pts, n_cell, n_log
 
 
 class ObsResource(resource.Resource):

@@ -42,5 +42,22 @@ rows += [(dev, now - 600, 'cell', 51.509, -0.084, None, 1200.0, None, None, None
 db.executemany(
     "INSERT INTO positions (device_id, received_ts, source, lat, lon, alt, acc,"
     " spd, hdg, sats) VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
+
+# Device log lines (level: 1=ERR 2=WRN 3=INF 4=DBG) for the Logs page.
+db.execute("""CREATE TABLE IF NOT EXISTS logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT NOT NULL,
+    received_ts REAL NOT NULL, level INTEGER NOT NULL, module TEXT, text TEXT)""")
+db.execute("DELETE FROM logs")
+log_rows = [
+    (dev, now - 3 * 3600 - 90, 3, 'tracker', 'tracker starting'),
+    (dev, now - 3 * 3600 - 5, 3, 'tracker', 'LTE registered (roaming)'),
+    (dev, now - 3 * 3600, 3, 'loc_fsm', 'loc: LTE_ATTACH -> REPORT_CELL (registered; after 85 s)'),
+    (dev, now - 2 * 3600 + 60, 2, 'obs_queue', 'gps ring full — dropping oldest'),
+    (dev, now - 600, 1, 'coap_pub', 'send: errno 111 (Connection refused)'),
+    (dev, now - 300, 4, 'uplink', 'sent 61 B (kinds 0x2)'),
+]
+db.executemany(
+    "INSERT INTO logs (device_id, received_ts, level, module, text)"
+    " VALUES (?,?,?,?,?)", log_rows)
 db.commit()
-print(f"seeded {len(rows)} rows for {dev} into {sys.argv[1]}")
+print(f"seeded {len(rows)} positions + {len(log_rows)} logs for {dev} into {sys.argv[1]}")

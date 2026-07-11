@@ -34,3 +34,19 @@ export async function fetchPositions(deviceId, opts = {}) {
   if (!r.ok) throw new Error(`/api/positions: ${r.status}`);
   return r.json();
 }
+
+/**
+ * GET /api/logs — device log lines, chronological.
+ * min_level uses Zephyr numbering (1=ERR … 4=DBG); lower = more severe.
+ */
+export async function fetchLogs(deviceId, opts = {}) {
+  const params = new URLSearchParams({ device: deviceId });
+  if (opts.from_ts   != null) params.set('from_ts',   opts.from_ts);
+  if (opts.to_ts     != null) params.set('to_ts',     opts.to_ts);
+  if (opts.min_level != null) params.set('min_level', opts.min_level);
+  if (opts.limit     != null) params.set('limit',     opts.limit);
+
+  const r = await fetch(`/api/logs?${params}`);
+  if (!r.ok) throw new Error(`/api/logs: ${r.status}`);
+  return r.json();
+}

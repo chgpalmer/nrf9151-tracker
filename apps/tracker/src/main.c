@@ -26,6 +26,8 @@
 #include "loc_fsm.h"
 #include "coap_pub.h"
 #include "obs_queue.h"
+#include "uplink.h"
+#include "log_uplink.h"
 #include "leds.h"
 
 LOG_MODULE_REGISTER(tracker, CONFIG_TRACKER_LOG_LEVEL);
@@ -39,9 +41,7 @@ LOG_MODULE_REGISTER(tracker, CONFIG_TRACKER_LOG_LEVEL);
 #define STATUS_INTERVAL_MS 5000
 /* GPS staleness now lives in loc_fsm, which owns the fix bookkeeping. */
 #define NET_RETRY_MS      10000  /* between socket-setup attempts */
-/* Queue flush cadence: one datagram per interval amortizes the ~47 B
- * CoAP/UDP/IP overhead across ~12 samples. State changes flush immediately. */
-#define FLUSH_INTERVAL_MS (CONFIG_TRACKER_FLUSH_INTERVAL_S * 1000)
+/* Flush cadence and all other send policy live in uplink now. */
 
 /* RSRP index → dBm (same formula as modem_info.h RSRP_IDX_TO_DBM). */
 #define RSRP_IDX_TO_DBM(idx) ((idx) < 0 ? (idx) - 140 : (idx) - 141)
@@ -196,7 +196,7 @@ static void lte_handler(const struct lte_lc_evt *const evt)
 	case LTE_LC_EVT_RRC_UPDATE:
 		rrc_connected = (evt->rrc_mode == LTE_LC_RRC_MODE_CONNECTED);
 		if (rrc_connected) {
-			LOG_INF("RRC: connected (GNSS blocked)");
+			LOG_DBG("RRC: connected (GNSS blocked)");
 		} else {
 			/* The tail between our last publish and RRC release is
 			 * radio time GNSS cannot use. RAI exists to shrink it;
@@ -204,10 +204,10 @@ static void lte_handler(const struct lte_lc_evt *const evt)
 			int64_t tail = k_uptime_get() - last_pub_ms;
 
 			if (last_pub_ms > 0 && tail < 30000) {
-				LOG_INF("RRC: idle (%lld ms after publish)",
+				LOG_DBG("RRC: idle (%lld ms after publish)",
 					(long long)tail);
 			} else {
-				LOG_INF("RRC: idle");
+				LOG_DBG("RRC: idle");
 			}
 		}
 		break;
@@ -304,27 +304,27 @@ static int read_serving_cell(struct serving_cell *sc)
 static void print_status(const struct nrf_modem_gnss_pvt_data_frame *p,
 			 const struct loc_status *loc, int64_t uptime_ms)
 {
-	LOG_INF("===== status @ %llds =====", (long long)(uptime_ms / 1000));
+	LOG_DBG("===== status @ %llds =====", (long long)(uptime_ms / 1000));
 
 	/* LTE status: registration state + serving-cell details (same cached
 	 * AT%XMONITOR read used for the cell-location fallback). */
 	struct serving_cell sc;
 
 	if (read_serving_cell(&sc) == 0 && sc.valid) {
-		LOG_INF("LTE:  %s | op %s | band %d | cell %u | RSRP %d dBm",
+		LOG_DBG("LTE:  %s | op %s | band %d | cell %u | RSRP %d dBm",
 			lte_status_str(), sc.op, sc.band, sc.cid, sc.rsrp_dbm);
 	} else {
-		LOG_INF("LTE:  %s", lte_status_str());
+		LOG_DBG("LTE:  %s", lte_status_str());
 	}
 
 	/* GNSS status */
 	if (p->flags & NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID) {
-		LOG_INF("GNSS: FIX  %.6f, %.6f  alt %.1fm  acc %.1fm  sats %u/%u",
+		LOG_DBG("GNSS: FIX  %.6f, %.6f  alt %.1fm  acc %.1fm  sats %u/%u",
 			p->latitude, p->longitude,
 			(double)p->altitude, (double)p->accuracy,
 			loc->used, loc->tracked);
 	} else {
-		LOG_INF("GNSS: searching  flags 0x%02x", p->flags);
+		LOG_DBG("GNSS: searching  flags 0x%02x", p->flags);
 		/* These two mean different things and want different fixes:
 		 *   DEADLINE_MISSED        no window at all since the last PVT — LTE
 		 *                          is transmitting; only backing off LTE helps.
@@ -341,18 +341,30 @@ static void print_status(const struct nrf_modem_gnss_pvt_data_frame *p,
 	loc_fsm_log(loc, p);
 
 	if (psm_active_s < 0) {
-		LOG_INF("LTE:  RRC %s | PSM not granted",
+		LOG_DBG("LTE:  RRC %s | PSM not granted",
 			rrc_connected ? "connected" : "idle");
 	} else {
-		LOG_INF("LTE:  RRC %s | PSM TAU %ds active %ds",
+		LOG_DBG("LTE:  RRC %s | PSM TAU %ds active %ds",
 			rrc_connected ? "connected" : "idle",
 			psm_tau_s, psm_active_s);
 	}
 
 	/* PDN state next to socket state, so a "no socket" that is really
 	 * "PDN not up yet" is obvious in the log. */
-	LOG_INF("net:  %s | pdn %s", coap_pub_ready() ? "ready" : "no socket",
+	LOG_DBG("net:  %s | pdn %s", coap_pub_ready() ? "ready" : "no socket",
 		pdn_active ? "active" : "down");
+}
+
+/* A datagram left the device: pulse the TX LED, stamp the RRC-tail
+ * measurement, and tell the FSM when the coarse position is on the map (it
+ * holds the radio for GNSS until the boot cell report is out). */
+static void on_uplink_sent(uint32_t kinds_mask)
+{
+	leds_tx_pulse();
+	last_pub_ms = k_uptime_get();
+	if (kinds_mask & UPLINK_KIND_CELL) {
+		loc_fsm_note_cell_sent();
+	}
 }
 
 /* ── main ─────────────────────────────────────────────────────────  */
@@ -376,9 +388,13 @@ int main(void)
 	}
 	LOG_INF("device id: %s", device_id);
 	LOG_INF("server: coap://%s:%d/obs", SERVER_HOST, SERVER_PORT);
-	/* GPS samples land at the publish interval; a track segment's time model
-	 * (anchor + i*dt) is built on that cadence. */
-	obs_queue_init(device_id, POST_INTERVAL_MS);
+	/* Uplink owns the envelope + flush policy; obs store and the log ring
+	 * register as its sources. GPS samples land at the publish interval —
+	 * a track segment's time model (anchor + i*dt) is built on it. */
+	uplink_init(device_id);
+	uplink_on_sent(on_uplink_sent);
+	obs_queue_init(POST_INTERVAL_MS);
+	log_uplink_init();
 	leds_init();
 
 	/* Start LTE async — don't block, status loop shows progress */
@@ -422,10 +438,6 @@ int main(void)
 	int64_t last_post_ms   = 0;
 	int64_t last_status_ms = 0;
 	int64_t next_net_ms    = 0;
-	/* Backdated so the FIRST queued observation flushes immediately: a fresh
-	 * boot should appear on the map within seconds, not after a full flush
-	 * interval. Subsequent flushes then pace at FLUSH_INTERVAL_MS. */
-	int64_t last_flush_ms  = -FLUSH_INTERVAL_MS;
 	enum loc_state prev_state = LOC_LTE_ATTACH;
 	struct loc_status loc;
 
@@ -487,7 +499,7 @@ int main(void)
 		/* EVT_BLOCKED/UNBLOCKED arrive in ISR context; log the edge here. */
 		if (gnss_blocked != gnss_blocked_prev) {
 			gnss_blocked_prev = gnss_blocked;
-			LOG_INF("GNSS: %s by LTE",
+			LOG_DBG("GNSS: %s by LTE",
 				gnss_blocked ? "blocked" : "unblocked");
 		}
 
@@ -532,32 +544,16 @@ int main(void)
 			}
 		}
 
-		/* FLUSH the queue as one datagram. Time-based normally; immediately
-		 * on a state change (a fresh fix or a boot cell report must reach
-		 * the map now, not in two minutes) and in REPORT_CELL, whose whole
-		 * purpose is promptness. Radio use needs publish_allowed. */
-		bool state_changed = (loc.state != prev_state);
-
-		prev_state = loc.state;
-		if (obs_queue_len() > 0 && loc.publish_allowed && coap_pub_ready() &&
-		    (state_changed || loc.state == LOC_REPORT_CELL ||
-		     /* 50 = one full track segment (an MTU-sized datagram); at 1 Hz
-	      * this wakes the radio every ~50 s while moving. */
-	     obs_queue_len() >= 50 ||
-		     now - last_flush_ms >= FLUSH_INTERVAL_MS)) {
-			bool had_cell = obs_queue_has_cell();
-
-			if (obs_queue_flush(now) == 0) {
-				leds_tx_pulse();
-				last_flush_ms = now;
-				last_pub_ms = now; /* RRC-tail measurement */
-				if (had_cell) {
-					/* Coarse position is on the map; the FSM
-					 * may now take the radio for GNSS. */
-					loc_fsm_note_cell_sent();
-				}
-			}
+		/* SHIP: uplink owns all flush policy (timer / fullness / urgent).
+		 * We hand it the radio verdict and tick it; a state change is
+		 * the one policy input only this loop can see (a fresh fix or
+		 * boot cell report should reach the map now, not in 2 min). */
+		if (loc.state != prev_state) {
+			prev_state = loc.state;
+			uplink_request_flush(UPLINK_FLUSH_URGENT);
 		}
+		uplink_set_allowed(loc.publish_allowed);
+		(void)uplink_poll(now);
 	}
 
 	return 0;

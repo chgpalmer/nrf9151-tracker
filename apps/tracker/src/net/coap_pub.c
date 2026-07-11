@@ -135,7 +135,7 @@ int coap_pub_send(const uint8_t *payload, size_t len)
 		return -errno;
 	}
 
-	LOG_INF("CoAP → /obs (%u B, %zu B payload)", pkt.offset, len);
+	LOG_DBG("CoAP → /obs (%u B, %zu B payload)", pkt.offset, len);
 	return 0;
 }
 

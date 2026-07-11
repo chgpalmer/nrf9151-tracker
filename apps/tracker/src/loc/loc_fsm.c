@@ -371,7 +371,7 @@ void loc_fsm_log(const struct loc_status *st,
 		 const struct nrf_modem_gnss_pvt_data_frame *pvt)
 {
 	if (st->gps_current) {
-		LOG_INF("loc:  %s | fix | ephemeris %u held / %u visible | next expiry %u min",
+		LOG_DBG("loc:  %s | fix | ephemeris %u held / %u visible | next expiry %u min",
 			loc_state_str(st->state), st->ephemeris_held,
 			st->ephemeris_visible, st->min_ephe_expiry_min);
 		return;
@@ -382,7 +382,7 @@ void loc_fsm_log(const struct loc_status *st,
 	 * Print the whole ladder so a stall is attributable to one rung.
 	 * held != visible: held ephemerides may belong to satellites that have
 	 * set since -- only visible ones can contribute to a fix. */
-	LOG_INF("loc:  %s | gps-time %s | tracked %u strong %u (empty %u/%u) | ephemeris %u held / %u visible (need %d) | pdop %.1f",
+	LOG_DBG("loc:  %s | gps-time %s | tracked %u strong %u (empty %u/%u) | ephemeris %u held / %u visible (need %d) | pdop %.1f",
 		loc_state_str(st->state), st->gps_time_known ? "known" : "UNKNOWN",
 		st->tracked, st->strong, st->sky_empty, (unsigned)SKY_EMPTY_EPOCHS,
 		st->ephemeris_held, st->ephemeris_visible,
@@ -394,7 +394,7 @@ void loc_fsm_log(const struct loc_status *st,
 		if (sv->sv == 0) {
 			continue;
 		}
-		LOG_INF("  sv %3u  C/N0 %.1f dB-Hz%s%s%s", sv->sv,
+		LOG_DBG("  sv %3u  C/N0 %.1f dB-Hz%s%s%s", sv->sv,
 			(double)sv->cn0 / 10.0,
 			sv->cn0 >= CN0_STRONG_01DBHZ ? "  strong" : "  weak",
 			sv_has_ephemeris(sv->sv) ? "  ephe" : "",

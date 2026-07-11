@@ -58,13 +58,30 @@ typedef struct _CellFix {
     int32_t rsrp_dbm;
 } CellFix;
 
-/* One item in a batch. age_s ages the anchor (track) or the fix (cell). */
+/* One device log line. level uses Zephyr's numbering (1=ERR 2=WRN 3=INF
+ 4=DBG); age_s dates the line the same way observations are dated. Text
+ stays plain text: log volume at the uplink threshold is small, and a
+ greppable wire beats a tokenizer toolchain. */
+typedef struct _LogLine {
+    uint32_t age_s;
+    uint32_t level;
+    pb_callback_t module;
+    pb_callback_t text;
+} LogLine;
+
+typedef struct _LogBatch {
+    pb_callback_t lines;
+} LogBatch;
+
+/* One item in a batch. age_s ages the anchor (track) or the fix (cell);
+ log lines carry their own ages (a batch spans time). */
 typedef struct _Entry {
     uint32_t age_s;
     pb_size_t which_kind;
     union _Entry_kind {
         TrackSegment track;
         CellFix cell;
+        LogBatch log;
     } kind;
 } Entry;
 
@@ -84,11 +101,15 @@ extern "C" {
 #define GpsFix_init_default                      {0, 0, 0, 0, 0, 0, 0}
 #define TrackSegment_init_default                {false, GpsFix_init_default, 0, {{NULL}, NULL}, {{NULL}, NULL}, {{NULL}, NULL}}
 #define CellFix_init_default                     {0, 0, 0, 0, 0}
+#define LogLine_init_default                     {0, 0, {{NULL}, NULL}, {{NULL}, NULL}}
+#define LogBatch_init_default                    {{{NULL}, NULL}}
 #define Entry_init_default                       {0, 0, {TrackSegment_init_default}}
 #define Obs_init_default                         {0, {{NULL}, NULL}, {{NULL}, NULL}}
 #define GpsFix_init_zero                         {0, 0, 0, 0, 0, 0, 0}
 #define TrackSegment_init_zero                   {false, GpsFix_init_zero, 0, {{NULL}, NULL}, {{NULL}, NULL}, {{NULL}, NULL}}
 #define CellFix_init_zero                        {0, 0, 0, 0, 0}
+#define LogLine_init_zero                        {0, 0, {{NULL}, NULL}, {{NULL}, NULL}}
+#define LogBatch_init_zero                       {{{NULL}, NULL}}
 #define Entry_init_zero                          {0, 0, {TrackSegment_init_zero}}
 #define Obs_init_zero                            {0, {{NULL}, NULL}, {{NULL}, NULL}}
 
@@ -110,9 +131,15 @@ extern "C" {
 #define CellFix_tac_tag                          3
 #define CellFix_cell_id_tag                      4
 #define CellFix_rsrp_dbm_tag                     5
+#define LogLine_age_s_tag                        1
+#define LogLine_level_tag                        2
+#define LogLine_module_tag                       3
+#define LogLine_text_tag                         4
+#define LogBatch_lines_tag                       1
 #define Entry_age_s_tag                          1
 #define Entry_track_tag                          2
 #define Entry_cell_tag                           3
+#define Entry_log_tag                            4
 #define Obs_version_tag                          1
 #define Obs_device_id_tag                        2
 #define Obs_entries_tag                          3
@@ -148,14 +175,30 @@ X(a, STATIC,   SINGULAR, SINT32,   rsrp_dbm,          5)
 #define CellFix_CALLBACK NULL
 #define CellFix_DEFAULT NULL
 
+#define LogLine_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, UINT32,   age_s,             1) \
+X(a, STATIC,   SINGULAR, UINT32,   level,             2) \
+X(a, CALLBACK, SINGULAR, STRING,   module,            3) \
+X(a, CALLBACK, SINGULAR, STRING,   text,              4)
+#define LogLine_CALLBACK pb_default_field_callback
+#define LogLine_DEFAULT NULL
+
+#define LogBatch_FIELDLIST(X, a) \
+X(a, CALLBACK, REPEATED, MESSAGE,  lines,             1)
+#define LogBatch_CALLBACK pb_default_field_callback
+#define LogBatch_DEFAULT NULL
+#define LogBatch_lines_MSGTYPE LogLine
+
 #define Entry_FIELDLIST(X, a) \
 X(a, STATIC,   SINGULAR, UINT32,   age_s,             1) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (kind,track,kind.track),   2) \
-X(a, STATIC,   ONEOF,    MESSAGE,  (kind,cell,kind.cell),   3)
+X(a, STATIC,   ONEOF,    MESSAGE,  (kind,cell,kind.cell),   3) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (kind,log,kind.log),   4)
 #define Entry_CALLBACK NULL
 #define Entry_DEFAULT NULL
 #define Entry_kind_track_MSGTYPE TrackSegment
 #define Entry_kind_cell_MSGTYPE CellFix
+#define Entry_kind_log_MSGTYPE LogBatch
 
 #define Obs_FIELDLIST(X, a) \
 X(a, STATIC,   SINGULAR, UINT32,   version,           1) \
@@ -168,6 +211,8 @@ X(a, CALLBACK, REPEATED, MESSAGE,  entries,           3)
 extern const pb_msgdesc_t GpsFix_msg;
 extern const pb_msgdesc_t TrackSegment_msg;
 extern const pb_msgdesc_t CellFix_msg;
+extern const pb_msgdesc_t LogLine_msg;
+extern const pb_msgdesc_t LogBatch_msg;
 extern const pb_msgdesc_t Entry_msg;
 extern const pb_msgdesc_t Obs_msg;
 
@@ -175,11 +220,15 @@ extern const pb_msgdesc_t Obs_msg;
 #define GpsFix_fields &GpsFix_msg
 #define TrackSegment_fields &TrackSegment_msg
 #define CellFix_fields &CellFix_msg
+#define LogLine_fields &LogLine_msg
+#define LogBatch_fields &LogBatch_msg
 #define Entry_fields &Entry_msg
 #define Obs_fields &Obs_msg
 
 /* Maximum encoded size of messages (where known) */
 /* TrackSegment_size depends on runtime parameters */
+/* LogLine_size depends on runtime parameters */
+/* LogBatch_size depends on runtime parameters */
 /* Entry_size depends on runtime parameters */
 /* Obs_size depends on runtime parameters */
 #define CellFix_size                             30

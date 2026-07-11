@@ -94,6 +94,25 @@ async def positions(device: str, since: int = 0,
     return JSONResponse([dict(r) for r in reversed(rows)])
 
 
+@app.get("/api/logs")
+async def logs(device: str, from_ts: float = 0, to_ts: float = 0,
+               min_level: int = 4, limit: int = 2000):
+    """Device log lines, chronological. min_level filters by severity
+    (Zephyr numbering: 1=ERR 2=WRN 3=INF 4=DBG — lower is more severe, so
+    min_level=2 returns ERR+WRN)."""
+    db = app.state.db
+    params = [device, min_level]
+    sql = ("SELECT id, received_ts, level, module, text "
+           "FROM logs WHERE device_id = ? AND level <= ?")
+    if from_ts and to_ts:
+        sql += " AND received_ts BETWEEN ? AND ?"
+        params += [from_ts, to_ts]
+    sql += " ORDER BY received_ts DESC LIMIT ?"
+    params.append(limit)
+    rows = db.execute(sql, params).fetchall()
+    return JSONResponse([dict(r) for r in reversed(rows)])
+
+
 # Static frontend. Mounted last so /api/* routes above take precedence.
 # html=True serves index.html for "/" (and as the SPA fallback).
 app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
