@@ -32,13 +32,30 @@ COAP := $(VENV)/bin/python3 -u server/coap_server.py --port $(COAP_PORT)
 WEB  := $(VENV)/bin/uvicorn app:app --host 127.0.0.1 --port $(HTTP_PORT) --app-dir server
 
 .PHONY: setup-host setup-caddy open-ports caddy \
-        coap-server server serve stop cells update-cells
+        coap-server server serve stop cells update-cells \
+        setup-webtest webtest
 
 # One-time server setup: Python deps only (the MQTT-era mosquitto is gone —
 # the CoAP ingest is a plain Python process on UDP).
 setup-host: setup-venv
 > $(VENV)/bin/pip install --quiet -r server/requirements.txt
 > @echo "Host tools ready."
+
+# One-time web-test setup (dev machines only, not the VM): playwright + a
+# headless Chromium for `make webtest`.
+setup-webtest: setup-venv
+> $(VENV)/bin/pip install --quiet -r server/requirements-dev.txt
+> $(VENV)/bin/playwright install --with-deps chromium
+> @echo "Web test tools ready."
+
+# Automated web UI test: seeds a TEMP db, serves the app on a test port,
+# EXECUTES the page in headless Chromium and fails on any console error,
+# broken import, missing UI element, or interaction that throws. This is what
+# actually catches a page that serves fine but dies at runtime — parse checks
+# and curl cannot. Screenshot: make webtest WEBTEST_SCREENSHOT=/tmp/ui.png
+webtest:
+> @test -x $(VENV)/bin/playwright || { echo "Run: make setup-webtest"; exit 1; }
+> @VENV=$(VENV) bash scripts/webtest.sh
 
 # Build the local cell-tower DB (server/cells.db) from OpenCelliD CSVs already
 # present in CELL_CSV_DIR. No token needed — offline. Drop *.csv.gz there (or

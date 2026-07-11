@@ -1,0 +1,4 @@
+# Dev/test-only dependencies — NOT needed to run the server (see
+# requirements.txt). Installed by `make setup-webtest`, which also downloads
+# the headless Chromium that playwright drives.
+playwright>=1.45

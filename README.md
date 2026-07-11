@@ -24,6 +24,8 @@ make flash
 make uart                      # stream the serial console
 make demo                      # run local CoAP server + web map + sim
 ./smoke.sh                     # check both flows: make build + make demo
+make setup-webtest             # dev only: playwright + headless Chromium
+make webtest                   # execute the web UI headlessly; fail on any JS error
 ```
 
 `setup.sh` installs the bootstrap apt packages, creates `nrf9151-tracker-ws/`, sets up a

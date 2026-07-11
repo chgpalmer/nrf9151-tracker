@@ -11,6 +11,7 @@ Usage:
   uvicorn app:app --reload --host 0.0.0.0 --port 8080 --app-dir server
 """
 
+import os
 import sqlite3
 import time
 from contextlib import asynccontextmanager
@@ -20,7 +21,10 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-DB_DEFAULT = Path(__file__).parent / "tracker.db"
+# TRACKER_DB overrides the DB path so tests can run against a seeded copy
+# without ever touching the real one.
+DB_DEFAULT = Path(os.environ.get("TRACKER_DB",
+                                 Path(__file__).parent / "tracker.db"))
 STATIC_DIR = Path(__file__).parent / "static"
 
 
@@ -38,6 +42,21 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="nRF9151 Tracker", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def no_stale_assets(request, call_next):
+    """Force revalidation of everything we serve.
+
+    The JS is ES modules importing each other by path: a cached app.js from
+    one deploy importing modules deleted in the next 404s and kills the whole
+    page (browsers and Cloudflare both cache .js by default). no-cache still
+    allows caching, but requires revalidation, so a deploy can never serve a
+    mixed module graph. The assets are tiny; correctness beats cache hits.
+    """
+    resp = await call_next(request)
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
 
 
 @app.get("/api/devices")
