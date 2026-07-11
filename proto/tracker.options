@@ -42,3 +42,11 @@ LogLine.text           type:FT_CALLBACK
 
 # The anchor is a single fixed submessage -- fine as a normal nested struct.
 # CellFix / GpsFix scalar fields are fixed-width and need no options.
+
+# A-GNSS. The device ENCODES AgnssRequest (device_id fits an IMEI, so a small
+# fixed array beats callback plumbing) and DECODES AgnssData, whose repeated
+# ephemeris streams through a callback: each element is filled into the one
+# nrf modem struct and written to the modem before the next is decoded --
+# never an array of 12 x ~80 B on a Zephyr stack.
+AgnssRequest.device_id  max_size:24
+AgnssData.ephemeris     type:FT_CALLBACK

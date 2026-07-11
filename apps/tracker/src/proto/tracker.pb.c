@@ -27,4 +27,25 @@ PB_BIND(Entry, Entry, AUTO)
 PB_BIND(Obs, Obs, AUTO)
 
 
+PB_BIND(AgnssRequest, AgnssRequest, AUTO)
+
+
+PB_BIND(AgnssTime, AgnssTime, AUTO)
+
+
+PB_BIND(AgnssLocation, AgnssLocation, AUTO)
+
+
+PB_BIND(AgnssUtc, AgnssUtc, AUTO)
+
+
+PB_BIND(AgnssKlobuchar, AgnssKlobuchar, AUTO)
+
+
+PB_BIND(AgnssEphemeris, AgnssEphemeris, AUTO)
+
+
+PB_BIND(AgnssData, AgnssData, AUTO)
+
+
 

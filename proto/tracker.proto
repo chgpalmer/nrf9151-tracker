@@ -111,3 +111,112 @@ message Obs {
   string device_id = 2;   // IMEI on hardware, TRACKER_DEVICE_ID on the sim
   repeated Entry entries = 3;
 }
+
+// ── A-GNSS (assisted GNSS) ─────────────────────────────────────────────────
+//
+// The one request/response exchange in the system: the device POSTs an
+// AgnssRequest to /agnss and the server answers with AgnssData in the CoAP
+// response (the uplink /obs path stays fire-and-forget). Everything numeric
+// below is PRE-SCALED BY THE SERVER to exactly the units and ranges of the
+// nrf_modem_gnss_agnss_* structs (GPS ICD-200 scale factors): the firmware
+// copies fields 1:1 into the modem structs and calls
+// nrf_modem_gnss_agnss_write() — no float math on the device, and the
+// scaling lives where it is unit-testable against real broadcast data.
+// Source: IGS combined broadcast ephemeris (BKG BRDC00WRD, free, ~15 min
+// fresh). Keep AgnssData ≤ ~1150 B: one unfragmented datagram.
+
+// Forwarded from the modem's own need report (nrf_modem_gnss_agnss_expiry).
+message AgnssRequest {
+  string device_id   = 1;  // lets the server pick a location + elevation-filter
+  uint32 data_flags  = 2;  // NRF_MODEM_GNSS_AGNSS_*_REQUEST bits
+  uint64 sv_mask_ephe = 3; // bit n-1 = PRN n needs ephemeris (informational)
+}
+
+// GPS system time, computed from the server's NTP-disciplined clock.
+// date_day = days since the GPS epoch (6 Jan 1980); time_full_s/frac_ms =
+// GPS time of day (UTC + leap seconds). Semantics identical to Nordic's
+// assistance samples.
+message AgnssTime {
+  uint32 date_day    = 1;
+  uint32 time_full_s = 2;
+  uint32 time_frac_ms = 3;
+}
+
+// Coarse position seed: the device's last known position from the server DB,
+// uncertainty inflated with age. Encodings are the 3GPP ones the modem
+// expects (lat: deg*2^23/90, lon: deg*2^24/360, unc: K in r=10*(1.1^K-1) m).
+message AgnssLocation {
+  sint32 latitude      = 1;
+  sint32 longitude     = 2;
+  sint32 altitude      = 3;  // metres; unc_altitude=255 marks it unknown
+  uint32 unc_semimajor = 4;
+  uint32 unc_semiminor = 5;
+  uint32 unc_altitude  = 6;
+  uint32 confidence    = 7;  // percent
+}
+
+// GPS-UTC parameters (RINEX header GPUT/LEAP when present).
+message AgnssUtc {
+  sint32 a1        = 1;  // 2^-50 s/s
+  sint32 a0        = 2;  // 2^-30 s
+  uint32 tot       = 3;  // 2^12 s
+  uint32 wn_t      = 4;  // week mod 256
+  sint32 delta_tls = 5;  // leap seconds
+  uint32 wn_lsf    = 6;
+  sint32 dn        = 7;
+  sint32 delta_tlsf = 8;
+}
+
+// Klobuchar ionosphere (RINEX header GPSA/GPSB when present).
+message AgnssKlobuchar {
+  sint32 alpha0 = 1;  // 2^-30 s
+  sint32 alpha1 = 2;  // 2^-27 s/sc
+  sint32 alpha2 = 3;  // 2^-24 s/sc^2
+  sint32 alpha3 = 4;  // 2^-24 s/sc^3
+  sint32 beta0  = 5;  // 2^11 s
+  sint32 beta1  = 6;  // 2^14 s/sc
+  sint32 beta2  = 7;  // 2^16 s/sc^2
+  sint32 beta3  = 8;  // 2^16 s/sc^3
+}
+
+// One GPS LNAV ephemeris, ICD-200 scaled integers matching
+// struct nrf_modem_gnss_agnss_gps_data_ephemeris field-for-field.
+message AgnssEphemeris {
+  uint32 sv_id     = 1;
+  uint32 health    = 2;
+  uint32 iodc      = 3;   // 11 bits
+  uint32 toc       = 4;   // 2^4 s
+  sint32 af2       = 5;   // 2^-55
+  sint32 af1       = 6;   // 2^-43
+  sint32 af0       = 7;   // 2^-31
+  sint32 tgd       = 8;   // 2^-31 s
+  uint32 ura       = 9;   // URA index 0..15
+  uint32 fit_int   = 10;  // 0: 4 h, 1: >4 h
+  uint32 toe       = 11;  // 2^4 s
+  sint32 w         = 12;  // 2^-31 semi-circle
+  sint32 delta_n   = 13;  // 2^-43 sc/s
+  sint32 m0        = 14;  // 2^-31 sc
+  sint32 omega_dot = 15;  // 2^-43 sc/s
+  uint32 e         = 16;  // 2^-33
+  sint32 idot      = 17;  // 2^-43 sc/s
+  uint32 sqrt_a    = 18;  // 2^-19 sqrt(m)
+  sint32 i0        = 19;  // 2^-31 sc
+  sint32 omega0    = 20;  // 2^-31 sc
+  sint32 crs       = 21;  // 2^-5 m
+  sint32 cis       = 22;  // 2^-29 rad
+  sint32 cus       = 23;  // 2^-29 rad
+  sint32 crc       = 24;  // 2^-5 m
+  sint32 cic       = 25;  // 2^-29 rad
+  sint32 cuc       = 26;  // 2^-29 rad
+}
+
+// The response payload. Every present element gets its own
+// nrf_modem_gnss_agnss_write(); ephemerides are written one element at a
+// time (nanopb decode callback — never an array on the stack).
+message AgnssData {
+  AgnssTime      time      = 1;
+  AgnssLocation  location  = 2;
+  AgnssUtc       utc       = 3;
+  AgnssKlobuchar klobuchar = 4;
+  repeated AgnssEphemeris ephemeris = 5;
+}

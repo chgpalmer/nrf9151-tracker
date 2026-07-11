@@ -92,6 +92,106 @@ typedef struct _Obs {
     pb_callback_t entries;
 } Obs;
 
+/* Forwarded from the modem's own need report (nrf_modem_gnss_agnss_expiry). */
+typedef struct _AgnssRequest {
+    char device_id[24]; /* lets the server pick a location + elevation-filter */
+    uint32_t data_flags; /* NRF_MODEM_GNSS_AGNSS_*_REQUEST bits */
+    uint64_t sv_mask_ephe; /* bit n-1 = PRN n needs ephemeris (informational) */
+} AgnssRequest;
+
+/* GPS system time, computed from the server's NTP-disciplined clock.
+ date_day = days since the GPS epoch (6 Jan 1980); time_full_s/frac_ms =
+ GPS time of day (UTC + leap seconds). Semantics identical to Nordic's
+ assistance samples. */
+typedef struct _AgnssTime {
+    uint32_t date_day;
+    uint32_t time_full_s;
+    uint32_t time_frac_ms;
+} AgnssTime;
+
+/* Coarse position seed: the device's last known position from the server DB,
+ uncertainty inflated with age. Encodings are the 3GPP ones the modem
+ expects (lat: deg*2^23/90, lon: deg*2^24/360, unc: K in r=10*(1.1^K-1) m). */
+typedef struct _AgnssLocation {
+    int32_t latitude;
+    int32_t longitude;
+    int32_t altitude; /* metres; unc_altitude=255 marks it unknown */
+    uint32_t unc_semimajor;
+    uint32_t unc_semiminor;
+    uint32_t unc_altitude;
+    uint32_t confidence; /* percent */
+} AgnssLocation;
+
+/* GPS-UTC parameters (RINEX header GPUT/LEAP when present). */
+typedef struct _AgnssUtc {
+    int32_t a1; /* 2^-50 s/s */
+    int32_t a0; /* 2^-30 s */
+    uint32_t tot; /* 2^12 s */
+    uint32_t wn_t; /* week mod 256 */
+    int32_t delta_tls; /* leap seconds */
+    uint32_t wn_lsf;
+    int32_t dn;
+    int32_t delta_tlsf;
+} AgnssUtc;
+
+/* Klobuchar ionosphere (RINEX header GPSA/GPSB when present). */
+typedef struct _AgnssKlobuchar {
+    int32_t alpha0; /* 2^-30 s */
+    int32_t alpha1; /* 2^-27 s/sc */
+    int32_t alpha2; /* 2^-24 s/sc^2 */
+    int32_t alpha3; /* 2^-24 s/sc^3 */
+    int32_t beta0; /* 2^11 s */
+    int32_t beta1; /* 2^14 s/sc */
+    int32_t beta2; /* 2^16 s/sc^2 */
+    int32_t beta3; /* 2^16 s/sc^3 */
+} AgnssKlobuchar;
+
+/* One GPS LNAV ephemeris, ICD-200 scaled integers matching
+ struct nrf_modem_gnss_agnss_gps_data_ephemeris field-for-field. */
+typedef struct _AgnssEphemeris {
+    uint32_t sv_id;
+    uint32_t health;
+    uint32_t iodc; /* 11 bits */
+    uint32_t toc; /* 2^4 s */
+    int32_t af2; /* 2^-55 */
+    int32_t af1; /* 2^-43 */
+    int32_t af0; /* 2^-31 */
+    int32_t tgd; /* 2^-31 s */
+    uint32_t ura; /* URA index 0..15 */
+    uint32_t fit_int; /* 0: 4 h, 1: >4 h */
+    uint32_t toe; /* 2^4 s */
+    int32_t w; /* 2^-31 semi-circle */
+    int32_t delta_n; /* 2^-43 sc/s */
+    int32_t m0; /* 2^-31 sc */
+    int32_t omega_dot; /* 2^-43 sc/s */
+    uint32_t e; /* 2^-33 */
+    int32_t idot; /* 2^-43 sc/s */
+    uint32_t sqrt_a; /* 2^-19 sqrt(m) */
+    int32_t i0; /* 2^-31 sc */
+    int32_t omega0; /* 2^-31 sc */
+    int32_t crs; /* 2^-5 m */
+    int32_t cis; /* 2^-29 rad */
+    int32_t cus; /* 2^-29 rad */
+    int32_t crc; /* 2^-5 m */
+    int32_t cic; /* 2^-29 rad */
+    int32_t cuc; /* 2^-29 rad */
+} AgnssEphemeris;
+
+/* The response payload. Every present element gets its own
+ nrf_modem_gnss_agnss_write(); ephemerides are written one element at a
+ time (nanopb decode callback — never an array on the stack). */
+typedef struct _AgnssData {
+    bool has_time;
+    AgnssTime time;
+    bool has_location;
+    AgnssLocation location;
+    bool has_utc;
+    AgnssUtc utc;
+    bool has_klobuchar;
+    AgnssKlobuchar klobuchar;
+    pb_callback_t ephemeris;
+} AgnssData;
+
 
 #ifdef __cplusplus
 extern "C" {
@@ -105,6 +205,13 @@ extern "C" {
 #define LogBatch_init_default                    {{{NULL}, NULL}}
 #define Entry_init_default                       {0, 0, {TrackSegment_init_default}}
 #define Obs_init_default                         {0, {{NULL}, NULL}, {{NULL}, NULL}}
+#define AgnssRequest_init_default                {"", 0, 0}
+#define AgnssTime_init_default                   {0, 0, 0}
+#define AgnssLocation_init_default               {0, 0, 0, 0, 0, 0, 0}
+#define AgnssUtc_init_default                    {0, 0, 0, 0, 0, 0, 0, 0}
+#define AgnssKlobuchar_init_default              {0, 0, 0, 0, 0, 0, 0, 0}
+#define AgnssEphemeris_init_default              {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+#define AgnssData_init_default                   {false, AgnssTime_init_default, false, AgnssLocation_init_default, false, AgnssUtc_init_default, false, AgnssKlobuchar_init_default, {{NULL}, NULL}}
 #define GpsFix_init_zero                         {0, 0, 0, 0, 0, 0, 0}
 #define TrackSegment_init_zero                   {false, GpsFix_init_zero, 0, {{NULL}, NULL}, {{NULL}, NULL}, {{NULL}, NULL}}
 #define CellFix_init_zero                        {0, 0, 0, 0, 0}
@@ -112,6 +219,13 @@ extern "C" {
 #define LogBatch_init_zero                       {{{NULL}, NULL}}
 #define Entry_init_zero                          {0, 0, {TrackSegment_init_zero}}
 #define Obs_init_zero                            {0, {{NULL}, NULL}, {{NULL}, NULL}}
+#define AgnssRequest_init_zero                   {"", 0, 0}
+#define AgnssTime_init_zero                      {0, 0, 0}
+#define AgnssLocation_init_zero                  {0, 0, 0, 0, 0, 0, 0}
+#define AgnssUtc_init_zero                       {0, 0, 0, 0, 0, 0, 0, 0}
+#define AgnssKlobuchar_init_zero                 {0, 0, 0, 0, 0, 0, 0, 0}
+#define AgnssEphemeris_init_zero                 {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+#define AgnssData_init_zero                      {false, AgnssTime_init_zero, false, AgnssLocation_init_zero, false, AgnssUtc_init_zero, false, AgnssKlobuchar_init_zero, {{NULL}, NULL}}
 
 /* Field tags (for use in manual encoding/decoding) */
 #define GpsFix_lat_e7_tag                        1
@@ -143,6 +257,66 @@ extern "C" {
 #define Obs_version_tag                          1
 #define Obs_device_id_tag                        2
 #define Obs_entries_tag                          3
+#define AgnssRequest_device_id_tag               1
+#define AgnssRequest_data_flags_tag              2
+#define AgnssRequest_sv_mask_ephe_tag            3
+#define AgnssTime_date_day_tag                   1
+#define AgnssTime_time_full_s_tag                2
+#define AgnssTime_time_frac_ms_tag               3
+#define AgnssLocation_latitude_tag               1
+#define AgnssLocation_longitude_tag              2
+#define AgnssLocation_altitude_tag               3
+#define AgnssLocation_unc_semimajor_tag          4
+#define AgnssLocation_unc_semiminor_tag          5
+#define AgnssLocation_unc_altitude_tag           6
+#define AgnssLocation_confidence_tag             7
+#define AgnssUtc_a1_tag                          1
+#define AgnssUtc_a0_tag                          2
+#define AgnssUtc_tot_tag                         3
+#define AgnssUtc_wn_t_tag                        4
+#define AgnssUtc_delta_tls_tag                   5
+#define AgnssUtc_wn_lsf_tag                      6
+#define AgnssUtc_dn_tag                          7
+#define AgnssUtc_delta_tlsf_tag                  8
+#define AgnssKlobuchar_alpha0_tag                1
+#define AgnssKlobuchar_alpha1_tag                2
+#define AgnssKlobuchar_alpha2_tag                3
+#define AgnssKlobuchar_alpha3_tag                4
+#define AgnssKlobuchar_beta0_tag                 5
+#define AgnssKlobuchar_beta1_tag                 6
+#define AgnssKlobuchar_beta2_tag                 7
+#define AgnssKlobuchar_beta3_tag                 8
+#define AgnssEphemeris_sv_id_tag                 1
+#define AgnssEphemeris_health_tag                2
+#define AgnssEphemeris_iodc_tag                  3
+#define AgnssEphemeris_toc_tag                   4
+#define AgnssEphemeris_af2_tag                   5
+#define AgnssEphemeris_af1_tag                   6
+#define AgnssEphemeris_af0_tag                   7
+#define AgnssEphemeris_tgd_tag                   8
+#define AgnssEphemeris_ura_tag                   9
+#define AgnssEphemeris_fit_int_tag               10
+#define AgnssEphemeris_toe_tag                   11
+#define AgnssEphemeris_w_tag                     12
+#define AgnssEphemeris_delta_n_tag               13
+#define AgnssEphemeris_m0_tag                    14
+#define AgnssEphemeris_omega_dot_tag             15
+#define AgnssEphemeris_e_tag                     16
+#define AgnssEphemeris_idot_tag                  17
+#define AgnssEphemeris_sqrt_a_tag                18
+#define AgnssEphemeris_i0_tag                    19
+#define AgnssEphemeris_omega0_tag                20
+#define AgnssEphemeris_crs_tag                   21
+#define AgnssEphemeris_cis_tag                   22
+#define AgnssEphemeris_cus_tag                   23
+#define AgnssEphemeris_crc_tag                   24
+#define AgnssEphemeris_cic_tag                   25
+#define AgnssEphemeris_cuc_tag                   26
+#define AgnssData_time_tag                       1
+#define AgnssData_location_tag                   2
+#define AgnssData_utc_tag                        3
+#define AgnssData_klobuchar_tag                  4
+#define AgnssData_ephemeris_tag                  5
 
 /* Struct field encoding specification for nanopb */
 #define GpsFix_FIELDLIST(X, a) \
@@ -208,6 +382,99 @@ X(a, CALLBACK, REPEATED, MESSAGE,  entries,           3)
 #define Obs_DEFAULT NULL
 #define Obs_entries_MSGTYPE Entry
 
+#define AgnssRequest_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, STRING,   device_id,         1) \
+X(a, STATIC,   SINGULAR, UINT32,   data_flags,        2) \
+X(a, STATIC,   SINGULAR, UINT64,   sv_mask_ephe,      3)
+#define AgnssRequest_CALLBACK NULL
+#define AgnssRequest_DEFAULT NULL
+
+#define AgnssTime_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, UINT32,   date_day,          1) \
+X(a, STATIC,   SINGULAR, UINT32,   time_full_s,       2) \
+X(a, STATIC,   SINGULAR, UINT32,   time_frac_ms,      3)
+#define AgnssTime_CALLBACK NULL
+#define AgnssTime_DEFAULT NULL
+
+#define AgnssLocation_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, SINT32,   latitude,          1) \
+X(a, STATIC,   SINGULAR, SINT32,   longitude,         2) \
+X(a, STATIC,   SINGULAR, SINT32,   altitude,          3) \
+X(a, STATIC,   SINGULAR, UINT32,   unc_semimajor,     4) \
+X(a, STATIC,   SINGULAR, UINT32,   unc_semiminor,     5) \
+X(a, STATIC,   SINGULAR, UINT32,   unc_altitude,      6) \
+X(a, STATIC,   SINGULAR, UINT32,   confidence,        7)
+#define AgnssLocation_CALLBACK NULL
+#define AgnssLocation_DEFAULT NULL
+
+#define AgnssUtc_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, SINT32,   a1,                1) \
+X(a, STATIC,   SINGULAR, SINT32,   a0,                2) \
+X(a, STATIC,   SINGULAR, UINT32,   tot,               3) \
+X(a, STATIC,   SINGULAR, UINT32,   wn_t,              4) \
+X(a, STATIC,   SINGULAR, SINT32,   delta_tls,         5) \
+X(a, STATIC,   SINGULAR, UINT32,   wn_lsf,            6) \
+X(a, STATIC,   SINGULAR, SINT32,   dn,                7) \
+X(a, STATIC,   SINGULAR, SINT32,   delta_tlsf,        8)
+#define AgnssUtc_CALLBACK NULL
+#define AgnssUtc_DEFAULT NULL
+
+#define AgnssKlobuchar_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, SINT32,   alpha0,            1) \
+X(a, STATIC,   SINGULAR, SINT32,   alpha1,            2) \
+X(a, STATIC,   SINGULAR, SINT32,   alpha2,            3) \
+X(a, STATIC,   SINGULAR, SINT32,   alpha3,            4) \
+X(a, STATIC,   SINGULAR, SINT32,   beta0,             5) \
+X(a, STATIC,   SINGULAR, SINT32,   beta1,             6) \
+X(a, STATIC,   SINGULAR, SINT32,   beta2,             7) \
+X(a, STATIC,   SINGULAR, SINT32,   beta3,             8)
+#define AgnssKlobuchar_CALLBACK NULL
+#define AgnssKlobuchar_DEFAULT NULL
+
+#define AgnssEphemeris_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, UINT32,   sv_id,             1) \
+X(a, STATIC,   SINGULAR, UINT32,   health,            2) \
+X(a, STATIC,   SINGULAR, UINT32,   iodc,              3) \
+X(a, STATIC,   SINGULAR, UINT32,   toc,               4) \
+X(a, STATIC,   SINGULAR, SINT32,   af2,               5) \
+X(a, STATIC,   SINGULAR, SINT32,   af1,               6) \
+X(a, STATIC,   SINGULAR, SINT32,   af0,               7) \
+X(a, STATIC,   SINGULAR, SINT32,   tgd,               8) \
+X(a, STATIC,   SINGULAR, UINT32,   ura,               9) \
+X(a, STATIC,   SINGULAR, UINT32,   fit_int,          10) \
+X(a, STATIC,   SINGULAR, UINT32,   toe,              11) \
+X(a, STATIC,   SINGULAR, SINT32,   w,                12) \
+X(a, STATIC,   SINGULAR, SINT32,   delta_n,          13) \
+X(a, STATIC,   SINGULAR, SINT32,   m0,               14) \
+X(a, STATIC,   SINGULAR, SINT32,   omega_dot,        15) \
+X(a, STATIC,   SINGULAR, UINT32,   e,                16) \
+X(a, STATIC,   SINGULAR, SINT32,   idot,             17) \
+X(a, STATIC,   SINGULAR, UINT32,   sqrt_a,           18) \
+X(a, STATIC,   SINGULAR, SINT32,   i0,               19) \
+X(a, STATIC,   SINGULAR, SINT32,   omega0,           20) \
+X(a, STATIC,   SINGULAR, SINT32,   crs,              21) \
+X(a, STATIC,   SINGULAR, SINT32,   cis,              22) \
+X(a, STATIC,   SINGULAR, SINT32,   cus,              23) \
+X(a, STATIC,   SINGULAR, SINT32,   crc,              24) \
+X(a, STATIC,   SINGULAR, SINT32,   cic,              25) \
+X(a, STATIC,   SINGULAR, SINT32,   cuc,              26)
+#define AgnssEphemeris_CALLBACK NULL
+#define AgnssEphemeris_DEFAULT NULL
+
+#define AgnssData_FIELDLIST(X, a) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  time,              1) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  location,          2) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  utc,               3) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  klobuchar,         4) \
+X(a, CALLBACK, REPEATED, MESSAGE,  ephemeris,         5)
+#define AgnssData_CALLBACK pb_default_field_callback
+#define AgnssData_DEFAULT NULL
+#define AgnssData_time_MSGTYPE AgnssTime
+#define AgnssData_location_MSGTYPE AgnssLocation
+#define AgnssData_utc_MSGTYPE AgnssUtc
+#define AgnssData_klobuchar_MSGTYPE AgnssKlobuchar
+#define AgnssData_ephemeris_MSGTYPE AgnssEphemeris
+
 extern const pb_msgdesc_t GpsFix_msg;
 extern const pb_msgdesc_t TrackSegment_msg;
 extern const pb_msgdesc_t CellFix_msg;
@@ -215,6 +482,13 @@ extern const pb_msgdesc_t LogLine_msg;
 extern const pb_msgdesc_t LogBatch_msg;
 extern const pb_msgdesc_t Entry_msg;
 extern const pb_msgdesc_t Obs_msg;
+extern const pb_msgdesc_t AgnssRequest_msg;
+extern const pb_msgdesc_t AgnssTime_msg;
+extern const pb_msgdesc_t AgnssLocation_msg;
+extern const pb_msgdesc_t AgnssUtc_msg;
+extern const pb_msgdesc_t AgnssKlobuchar_msg;
+extern const pb_msgdesc_t AgnssEphemeris_msg;
+extern const pb_msgdesc_t AgnssData_msg;
 
 /* Defines for backwards compatibility with code written before nanopb-0.4.0 */
 #define GpsFix_fields &GpsFix_msg
@@ -224,6 +498,13 @@ extern const pb_msgdesc_t Obs_msg;
 #define LogBatch_fields &LogBatch_msg
 #define Entry_fields &Entry_msg
 #define Obs_fields &Obs_msg
+#define AgnssRequest_fields &AgnssRequest_msg
+#define AgnssTime_fields &AgnssTime_msg
+#define AgnssLocation_fields &AgnssLocation_msg
+#define AgnssUtc_fields &AgnssUtc_msg
+#define AgnssKlobuchar_fields &AgnssKlobuchar_msg
+#define AgnssEphemeris_fields &AgnssEphemeris_msg
+#define AgnssData_fields &AgnssData_msg
 
 /* Maximum encoded size of messages (where known) */
 /* TrackSegment_size depends on runtime parameters */
@@ -231,9 +512,16 @@ extern const pb_msgdesc_t Obs_msg;
 /* LogBatch_size depends on runtime parameters */
 /* Entry_size depends on runtime parameters */
 /* Obs_size depends on runtime parameters */
+/* AgnssData_size depends on runtime parameters */
+#define AgnssEphemeris_size                      167
+#define AgnssKlobuchar_size                      48
+#define AgnssLocation_size                       42
+#define AgnssRequest_size                        42
+#define AgnssTime_size                           18
+#define AgnssUtc_size                            48
 #define CellFix_size                             30
 #define GpsFix_size                              42
-#define TRACKER_PB_H_MAX_SIZE                    GpsFix_size
+#define TRACKER_PB_H_MAX_SIZE                    AgnssEphemeris_size
 
 #ifdef __cplusplus
 } /* extern "C" */
