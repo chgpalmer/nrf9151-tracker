@@ -321,7 +321,16 @@ void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 	case LOC_REPORT_GNSS:
 		/* Losing the fix is not the same as losing the ephemeris: while
 		 * *visible* satellites still carry valid ephemeris, a re-fix is a
-		 * hot start (seconds) and LTE need not be disturbed. */
+		 * hot start (seconds) and LTE need not be disturbed.
+		 *
+		 * There is deliberately NO proactive "ephemeris expiring" exit
+		 * here. It existed once, fired only while the fix was CURRENT,
+		 * and ACQUIRE's fix-valid exit bounced it straight back -- a
+		 * 1 Hz transition ping-pong for the whole refresh window. It was
+		 * also unnecessary: ephemeris subframes repeat every 30 s and
+		 * the uplink is silent for ~50-120 s between flushes, so the
+		 * receiver refreshes ephemeris during normal tracking; a lapsed
+		 * one is recovered by the stale-fix exit below. */
 		if (!out->gps_current) {
 			if (sky_empty) {
 				next_state(LOC_CELL_LOOP, now_ms, "sky lost");
@@ -330,12 +339,6 @@ void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 					   "fix stale, ephemeris not visible");
 			}
 			/* else: hot-start conditions present; wait for re-fix */
-		} else if (out->ephemeris_held > 0 && !sky_empty &&
-			   out->min_ephe_expiry_min <=
-				CONFIG_TRACKER_LOC_EPHE_REFRESH_MIN) {
-			/* Refresh before it lapses: one quiet window now avoids a
-			 * full cold start later. */
-			next_state(LOC_GNSS_ACQUIRE, now_ms, "ephemeris expiring");
 		}
 		break;
 

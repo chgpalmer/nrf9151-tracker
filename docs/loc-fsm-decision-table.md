@@ -17,7 +17,6 @@ row by row. If code and table disagree, one of them is wrong — fix whichever.
 | `sky_empty` | ≥ 5 consecutive **observed** epochs with tracked == 0 (`SKY_EMPTY_EPOCHS`) | blanked epochs pause the count |
 | `lte_chops_gnss` | ≥ 10 consecutive epochs with NOT_ENOUGH_WINDOW_TIME (`CHOPPED_EPOCHS`) | modem's own testimony that idle-mode LTE is slicing GNSS |
 | `hotstart_dead` | > 10 s (`VISIBLE_LOST_MS`) since an observed epoch had ≥ 4 ephemeris-bearing satellites in view | visible ≠ held: held ephemerides may have set |
-| `ephe expiring` | min ephemeris expiry ≤ 15 min (`EPHE_REFRESH_MIN`) | from cached 5 s-throttled modem poll |
 
 Streaks and `last_visible_ok` reset on every state change: each state judges
 the sky on its own evidence.
@@ -65,7 +64,7 @@ override typically bounces CELL_LOOP → LTE_ATTACH within seconds (see F-2).
 | E1 | `!gps_current` and `sky_empty` | CELL_LOOP | "sky lost" |
 | E2 | `!gps_current` and `hotstart_dead` | GNSS_ACQUIRE | "fix stale, ephemeris not visible" |
 | E3 | `!gps_current` (hot start still viable) | stay | wait for re-fix |
-| E4 | `gps_current` and held > 0 and `!sky_empty` and expiring ≤ 15 min | GNSS_ACQUIRE | "ephemeris expiring" — **see finding F-1** |
+| E4 | *(removed — see finding F-1)* | | while the fix is current, REPORT_GNSS never exits |
 
 ### CELL_LOOP — cell cadence; sight-triggered retry
 | # | Condition | Next | |
@@ -88,20 +87,25 @@ override typically bounces CELL_LOOP → LTE_ATTACH within seconds (see F-2).
 
 ## Findings
 
-**F-1 — BUG, live: the ephemeris-refresh transition (E4) ping-pongs at 1 Hz.**
-E4 fires while the fix is *current*; but GNSS_ACQUIRE's first rule (C1) is
-`fix → REPORT_GNSS`, and under open sky the very next PVT is fix-valid. So the
-machine oscillates REPORT_GNSS → ACQUIRE → REPORT_GNSS every second for up to
-15 minutes until the ephemeris expiry crosses the threshold — logging TWO INF
-transition lines per second, which the log uplink would ship: an instant
-data-plan fire. Never seen in the field only because no session has yet held a
-fix for ~1¾ h+. It also can't achieve its goal: a 1 s round trip creates no
-quiet window. Root cause: E4 predates 1 Hz batching — at the old
+**F-1 — BUG (fixed by deleting E4): the ephemeris-refresh transition
+ping-ponged at 1 Hz.** E4 fired while the fix was *current*; but
+GNSS_ACQUIRE's first rule (C1) is `fix → REPORT_GNSS`, and under open sky the
+very next PVT is fix-valid. So the machine oscillated REPORT_GNSS → ACQUIRE →
+REPORT_GNSS every second for up to 15 minutes until the ephemeris expiry
+crossed the threshold — logging TWO INF transition lines per second, which
+the log uplink would ship: an instant data-plan fire. Never seen in the field
+only because no session had yet held a fix for ~1¾ h+. It also could not
+achieve its goal: a 1 s round trip creates no quiet window — and its target
+state clears `publish_allowed`, so it silenced live tracking while holding a
+good fix. Root cause: E4 predates 1 Hz batching — at the old
 publish-every-10 s cadence a deliberate quiet window was needed; with uplink
 flushing every ~50–120 s, tracking gaps are already quiet and the receiver
-re-demodulates ephemeris during normal tracking. Recommendation: gate E4 with
-`!fix` (minimal, kills the oscillation) or delete it (cleaner, on the argument
-above). Decision pending review.
+re-demodulates ephemeris during normal tracking (subframes repeat every
+30 s). A genuinely lapsed ephemeris recovers via E2. **Resolution: E4
+deleted** (a `!fix` gate was considered and rejected — it only moves the
+bounce onto momentary gap epochs); `TRACKER_LOC_EPHE_REFRESH_MIN` removed.
+The ztest pins the fixed behaviour: current fix + expiring ephemeris stays
+in REPORT_GNSS.
 
 **F-2 — the machine has no rest state (the parked-cost root cause).** After a
 failed EXCLUSIVE, the sequence is CELL_LOOP →(seconds, via override) →

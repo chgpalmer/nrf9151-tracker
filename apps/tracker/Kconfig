@@ -112,14 +112,6 @@ config TRACKER_LOC_SKY_EMPTY_EPOCHS
 	  truly empty sky (indoors, Faraday cage); a 30 s cold-start grace at
 	  acquisition entry keeps a warming receiver from tripping it.
 
-config TRACKER_LOC_EPHE_REFRESH_MIN
-	int "Refresh ephemeris when the soonest expiry is under this many minutes"
-	default 15
-	range 1 120
-	help
-	  Broadcast ephemeris is good for about two hours. Refreshing before it
-	  lapses costs one quiet window and avoids a full cold start later.
-
 config TRACKER_SIM_DEVICE_ID
 	string "native_sim fallback device ID"
 	default "sim-dev-1"

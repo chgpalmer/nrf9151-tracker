@@ -89,11 +89,15 @@
  *      |         |                         | "fix returned" -> REPORT_GNSS
  *      |         |                         v GNSS_ACQUIRE
  *      |
- *      | "ephemeris expiring" (< EPHE_REFRESH_MIN left; refresh now to
- *      |   avoid a future cold start)
  *      | "fix stale, ephemeris not visible" (can't hot-start: fewer than
  *      |   4 ephemeris-bearing satellites observed for VISIBLE_LOST_MS)
  *      +--> GNSS_ACQUIRE
+ *
+ * There is deliberately no proactive ephemeris-refresh exit from REPORT_GNSS:
+ * it ping-ponged with ACQUIRE's fix-valid exit at 1 Hz (the fix was current,
+ * so the very next PVT bounced back). Refresh happens for free during normal
+ * tracking -- subframes repeat every 30 s and the uplink is silent between
+ * flushes -- and a genuinely lapsed ephemeris recovers via the stale-fix exit.
  *
  * Sky evidence rules (the fallacy that bit us three times): only OBSERVED
  * epochs count. tracked > 0 is an observation by definition; an empty frame
