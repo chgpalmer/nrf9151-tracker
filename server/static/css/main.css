@@ -945,6 +945,27 @@ button { cursor: pointer; }
   pointer-events: none;
 }
 
+/* Shown in Live when the map is displaying the last-known location because
+   nothing was reported inside the selected window. */
+.stale-note {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 500;
+  background: var(--amber-dim);
+  border: 1px solid var(--amber);
+  border-radius: var(--radius);
+  padding: 4px 12px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--amber);
+  pointer-events: none;
+  white-space: nowrap;
+}
+
 .map-badge-item { display: flex; align-items: center; gap: 5px; }
 .map-badge-dot {
   width: 8px; height: 8px;

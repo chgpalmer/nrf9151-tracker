@@ -17,6 +17,7 @@ let fixTable     = null;
 let timer        = null;
 let minuteWindow = 60;   // default: 1 hour
 let currentFixes = [];
+let lastKnownOnly = false; // true when the window was empty and we fell back
 let isInitialized = false;
 
 // Controls
@@ -114,6 +115,23 @@ function renderView(fitBounds) {
   });
   fixTable.render(vis);
   updateCharts(vis);
+  showStaleNote(lastKnownOnly && vis.length > 0);
+}
+
+// Small banner shown when the map is displaying the last-known location
+// because nothing was reported inside the selected window.
+function showStaleNote(show) {
+  let note = document.getElementById('live-stale-note');
+  if (!show) { if (note) note.remove(); return; }
+  if (!note) {
+    note = document.createElement('div');
+    note.id = 'live-stale-note';
+    note.className = 'stale-note';
+    document.getElementById('map-live').appendChild(note);
+  }
+  const last = currentFixes[currentFixes.length - 1];
+  note.textContent = `Last known location · nothing in the last ${
+    minuteWindow >= 60 ? `${minuteWindow / 60}h` : `${minuteWindow}m`}`;
 }
 
 async function refresh(fitBounds) {
@@ -127,7 +145,17 @@ async function refresh(fitBounds) {
       ? { since: minuteWindow }
       : {};
 
-    const fixes = await fetchPositions(deviceId, opts);
+    let fixes = await fetchPositions(deviceId, opts);
+
+    // Live must always show where the device is, even if its last report is
+    // older than the selected window (parked for hours, keepalive gaps, etc).
+    // An empty window means nothing was heard recently — fall back to the
+    // single most recent fix so the device never vanishes from the map.
+    lastKnownOnly = false;
+    if (fixes.length === 0) {
+      fixes = await fetchPositions(deviceId, { limit: 1 });
+      lastKnownOnly = fixes.length > 0;
+    }
     currentFixes = fixes;
 
     renderView(fitBounds);

@@ -244,8 +244,7 @@ export function createMapView(containerId, onFixClick) {
       const marker = L.marker([fix.lat, fix.lon], { icon, zIndexOffset: isLatest ? 1000 : 0 })
         .bindPopup(popupContent(fix), { maxWidth: 240, className: 'trk-popup' })
         .on('click', () => {
-          selectedFixId = fix.id;
-          highlightSelected(fix);
+          selectFix(fix);
           onFixClick && onFixClick(fix);
         })
         .addTo(markerLayer);
@@ -264,9 +263,32 @@ export function createMapView(containerId, onFixClick) {
       }
     });
 
+    // Re-apply an existing selection so a live refresh doesn't wipe the
+    // highlighted accuracy circle out from under the user.
+    if (selectedFixId != null) {
+      const sel = fixes.find(f => f.id === selectedFixId);
+      if (sel) highlightSelected(sel);
+    }
+
     // Fit map to track
     if (opts.fitBounds !== false) {
       map.fitBounds(computeBounds(fixes), { padding: [30, 30], maxZoom: 17 });
+    }
+  }
+
+  /**
+   * Select a fix: highlight it, and if its accuracy circle isn't already
+   * fully in view, zoom out just enough to show it (never zoom *in* on a
+   * tight GPS circle — that would be jarring on every click).
+   */
+  function selectFix(fix) {
+    selectedFixId = fix.id;
+    highlightSelected(fix);
+    if (fix.acc > 0) {
+      const circleBounds = L.latLng(fix.lat, fix.lon).toBounds(fix.acc * 2);
+      if (!map.getBounds().contains(circleBounds)) {
+        map.fitBounds(circleBounds, { padding: [40, 40], maxZoom: map.getZoom() });
+      }
     }
   }
 
@@ -313,8 +335,7 @@ export function createMapView(containerId, onFixClick) {
 
   /** Pan to a fix and highlight it (used by the locations table). */
   function focusFix(fix) {
-    selectedFixId = fix.id;
-    highlightSelected(fix);
+    selectFix(fix);
     map.panTo([fix.lat, fix.lon]);
   }
 
