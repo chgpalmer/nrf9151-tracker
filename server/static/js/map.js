@@ -192,12 +192,13 @@ document.querySelectorAll('#chart-tabs .chart-tab').forEach(b =>
 
 // ── lifecycle ───────────────────────────────────────────────
 // Cross-view selection: whichever surface a fix is picked on (map marker,
-// chart click, table row), all four reflect it — map ring + pan, detail
-// drawer, chart dot + tooltip, highlighted table row.
+// chart click, table row), the others reflect it — map ring + pan, chart
+// dot, highlighted table row. The DETAIL panel content is kept fresh
+// silently but the tab does NOT auto-switch (that was jarring); tap
+// DETAIL when you actually want the numbers.
 function selectPoint(fix) {
   mapView.focusFix(fix);
   openDrawer(fix);
-  setTab('detail');
   setActiveFix(fix);
   fixTable.highlight(fix);
 }

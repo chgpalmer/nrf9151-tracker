@@ -144,19 +144,25 @@ def main():
         page.click('#chart-tabs .chart-tab[data-chart="speed"]')
         page.wait_for_timeout(200)
 
-        # Cross-view selection: clicking the speed chart must activate the
-        # DETAIL tab (drawer open) AND highlight the matching table row.
+        # Cross-view selection: clicking the speed chart highlights the
+        # table row and quietly fills the DETAIL panel — but must NOT
+        # yank the side panel to the DETAIL tab (jarring). Tapping the
+        # DETAIL tab then shows the populated detail.
         box = page.locator("#chart-speed").bounding_box()
         if box:
             page.mouse.click(box["x"] + box["width"] * 0.5,
                              box["y"] + box["height"] * 0.5)
             page.wait_for_timeout(400)
-            if page.locator("#fix-drawer.open").count() == 0:
-                problems.append("chart click did not open the fix drawer")
-            if page.locator('#side-tabs .side-tab[data-tab="detail"].active').count() == 0:
-                problems.append("chart click did not activate the DETAIL tab")
+            if page.locator('#side-tabs .side-tab[data-tab="detail"].active').count():
+                problems.append("chart click auto-switched to DETAIL tab")
             if page.locator(".ftable-table tr.sel").count() == 0:
                 problems.append("chart click did not highlight a table row")
+            if not (page.locator("#drawer-body").inner_text() or "").strip():
+                problems.append("chart click did not populate the detail panel")
+            page.click('#side-tabs .side-tab[data-tab="detail"]')
+            page.wait_for_timeout(200)
+            if page.locator('.side-tab-panel[data-tab="detail"].active').count() == 0:
+                problems.append("DETAIL tab did not show the detail panel")
             page.click("#drawer-close")
             page.wait_for_timeout(200)
             if page.locator('#side-tabs .side-tab[data-tab="detail"].active').count():
@@ -277,6 +283,11 @@ def main():
             "getComputedStyle(document.getElementById('summary')).flexWrap")
         if wrap != "nowrap":
             problems.append(f"mobile summary flex-wrap is {wrap}, want nowrap")
+        # Timeline shrinks to a density strip on phones: no axis, no handles.
+        ax = mob.evaluate(
+            "getComputedStyle(document.getElementById('tl-axis')).display")
+        if ax != "none":
+            problems.append("mobile timeline axis should be hidden")
         mob.click('#side-tabs .side-tab[data-tab="locations"]')
         mob.wait_for_timeout(200)
         rows = mob.locator("#fix-table tbody tr")
@@ -285,16 +296,19 @@ def main():
         else:
             rows.first.click()
             mob.wait_for_timeout(400)
-            if mob.locator('#side-tabs .side-tab[data-tab="detail"].active').count() == 0:
-                problems.append("mobile row click did not activate DETAIL tab")
+            # Row click = show on map; it must NOT yank to the DETAIL tab.
+            if mob.locator('#side-tabs .side-tab[data-tab="detail"].active').count():
+                problems.append("mobile row click auto-switched to DETAIL tab")
+            if mob.locator("#fix-table tr.sel").count() == 0:
+                problems.append("mobile row click did not highlight the row")
+            mob.click('#side-tabs .side-tab[data-tab="detail"]')
+            mob.wait_for_timeout(200)
+            if not (mob.locator("#drawer-body").inner_text() or "").strip():
+                problems.append("mobile DETAIL tab empty after selecting a fix")
             pos = mob.evaluate(
                 "getComputedStyle(document.getElementById('fix-drawer')).position")
             if pos == "fixed":
                 problems.append("mobile fix detail is a fixed overlay — inline expected")
-            mob.click("#drawer-close")
-            mob.wait_for_timeout(200)
-            if mob.locator('#side-tabs .side-tab[data-tab="detail"].active').count():
-                problems.append("mobile ✕ did not return to the previous tab")
         mob.close()
 
         browser.close()

@@ -1564,4 +1564,11 @@ tr.lvl-4 .log-text, tr.lvl-4 .log-mod { color: var(--text-dim); }
     gap: 16px;
   }
   .hist-stat { flex-shrink: 0; }
+
+  /* The timeline earns a glance, not a control surface, on a phone:
+   * a slim density strip (fix ticks + trip bands), no axis labels, no
+   * drag handles — too small to operate with a finger anyway. */
+  .timeline { padding: 4px 16px 3px; }
+  .timeline-axis, .tl-handle { display: none; }
+  .timeline-track { height: 10px; margin-top: 0; }
 }
