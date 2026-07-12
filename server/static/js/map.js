@@ -99,27 +99,44 @@ pointsChip.addEventListener('click', () => {
   mapView && mapView.setShowPoints(pointsChip.classList.contains('active'));
 });
 
-// ── timeline drag (custom window = 'range' selection) ───────
+// ── timeline input: ONE gesture handler on the track ────────
+// Trip bands, the selection body, and the handles share pixels, and one
+// pixel can mean "select trip" (click) or "slide window" (drag) — intents
+// split by GESTURE, which per-element routing can't express: whichever
+// element sits on top steals every gesture there (bands were unclickable
+// wherever the window overlapped them). So the children are
+// pointer-events:none visuals, and this handler classifies the gesture
+// first (drag = moved past DRAG_PX), the geometry second — the same model
+// as the map's canvas renderer, d3-brush, and editor timelines.
+const DRAG_PX   = 5; // the OS click-vs-drag convention (SM_CXDRAG)
+const HANDLE_PX = 8; // resize grab zone around each window edge
+
 function fracFromEvent(clientX) {
   const r = track.getBoundingClientRect();
   return Math.min(1, Math.max(0, (clientX - r.left) / r.width));
 }
 
-function onPointerMove(e) {
-  if (!dragging) return;
-  const f = fracFromEvent(e.clientX);
-  if (dragging === 'start')    selFrac[0] = Math.min(f, selFrac[1] - MIN_FRAC);
-  else if (dragging === 'end') selFrac[1] = Math.max(f, selFrac[0] + MIN_FRAC);
-  else setWindowFrac(f - grabOffset, selFrac[1] - selFrac[0]);
-  sel = { mode: 'range' };
-  renderChips();
-  applyView(false);  // no re-fit mid-drag
+/* Rendered band geometry (0.01 min-width keeps short trips visible) — hit
+ * tests use the SAME math, so what you see is what you can click. */
+function tripAtFrac(f) {
+  for (let i = 0; i < trips.length; i++) {
+    const left  = (trips[i].start_ts - dayStart) / DAY;
+    const width = Math.max(0.01, (trips[i].end_ts - trips[i].start_ts) / DAY);
+    if (f >= left && f <= left + width) return i;
+  }
+  return -1;
 }
 
-function endDrag() {
-  if (!dragging) return;
-  dragging = null;
-  applyView(true);
+/* Drag zone at a fraction: window edges win (resize), then the interior
+ * (slide) — except a full-day window, which has nowhere to slide, so
+ * dragging inside it rubber-bands a fresh window instead (DAY mode). */
+function dragZone(f) {
+  const w = track.getBoundingClientRect().width;
+  if (Math.abs((f - selFrac[0]) * w) <= HANDLE_PX) return 'start';
+  if (Math.abs((f - selFrac[1]) * w) <= HANDLE_PX) return 'end';
+  if ((selFrac[0] > 0.0001 || selFrac[1] < 0.9999) &&
+      f > selFrac[0] && f < selFrac[1]) return 'move';
+  return 'create';
 }
 
 function setWindowFrac(start, width) {
@@ -127,26 +144,79 @@ function setWindowFrac(start, width) {
   selFrac = [s, s + width];
 }
 
-startH.addEventListener('pointerdown', e => { dragging = 'start'; startH.setPointerCapture(e.pointerId); });
-endH.addEventListener('pointerdown',   e => { dragging = 'end';   endH.setPointerCapture(e.pointerId); });
-selEl.addEventListener('pointerdown',  e => {
-  dragging = 'move';
-  grabOffset = fracFromEvent(e.clientX) - selFrac[0];
-  selEl.setPointerCapture(e.pointerId);
-});
-track.addEventListener('pointermove', onPointerMove);
-window.addEventListener('pointerup', endDrag);
+let armed = null; // pointerdown seen; click-vs-drag verdict pending
 
-// Click empty track: center the current window there.
 track.addEventListener('pointerdown', e => {
-  if (e.target === startH || e.target === endH || e.target === selEl ||
-      e.target.classList.contains('tl-trip-band')) return;
-  setWindowFrac(fracFromEvent(e.clientX) - (selFrac[1] - selFrac[0]) / 2,
-                selFrac[1] - selFrac[0]);
+  const f = fracFromEvent(e.clientX);
+  armed = { kind: dragZone(f), f0: f, x0: e.clientX };
+  track.setPointerCapture(e.pointerId);
+});
+
+track.addEventListener('pointermove', e => {
+  const f = fracFromEvent(e.clientX);
+  if (!armed && !dragging) { hoverAt(f); return; }
+  if (armed && !dragging) {
+    if (Math.abs(e.clientX - armed.x0) <= DRAG_PX) return; // still a click
+    dragging = armed.kind;
+    if (dragging === 'move') grabOffset = armed.f0 - selFrac[0];
+  }
+  if (dragging === 'start')       selFrac[0] = Math.min(f, selFrac[1] - MIN_FRAC);
+  else if (dragging === 'end')    selFrac[1] = Math.max(f, selFrac[0] + MIN_FRAC);
+  else if (dragging === 'create') selFrac = f >= armed.f0
+      ? [armed.f0, Math.max(f, armed.f0 + MIN_FRAC)]
+      : [Math.min(f, armed.f0 - MIN_FRAC), armed.f0];
+  else setWindowFrac(f - grabOffset, selFrac[1] - selFrac[0]);
   sel = { mode: 'range' };
+  renderChips();
+  applyView(false); // no re-fit mid-drag
+});
+
+track.addEventListener('pointerup', () => {
+  const a = armed, wasDrag = dragging;
+  armed = null;
+  dragging = null;
+  if (wasDrag) { applyView(true); return; }
+  if (!a) return;
+  const i = tripAtFrac(a.f0);  // click: a trip band wins where one exists
+  if (i >= 0) {
+    sel = { mode: 'trip', i };
+  } else {                     // empty track: center the window there
+    setWindowFrac(a.f0 - (selFrac[1] - selFrac[0]) / 2,
+                  selFrac[1] - selFrac[0]);
+    sel = { mode: 'range' };
+  }
   renderChips();
   applyView(true);
 });
+
+track.addEventListener('pointercancel', () => {
+  const wasDrag = dragging;
+  armed = null;
+  dragging = null;
+  if (wasDrag) applyView(true);
+});
+
+/* Hover affordances (CSS :hover died with pointer-events:none): cursor by
+ * zone, band highlight + tooltip forwarded from the band element. */
+let hoverTrip = -1;
+function hoverAt(f) {
+  const zone = f < 0 ? null : dragZone(f);
+  const trip = f < 0 ? -1 : tripAtFrac(f);
+
+  track.style.cursor =
+    zone === 'start' || zone === 'end' ? 'ew-resize' :
+    trip >= 0                          ? 'pointer'   :
+    zone === 'move'                    ? 'grab'      :
+    zone === 'create'                  ? 'crosshair' : '';
+  if (trip !== hoverTrip) {
+    const bands = tripsEl.children;
+    if (bands[hoverTrip]) bands[hoverTrip].classList.remove('hover');
+    if (bands[trip])      bands[trip].classList.add('hover');
+    track.title = bands[trip] ? bands[trip].title : '';
+    hoverTrip = trip;
+  }
+}
+track.addEventListener('pointerleave', () => hoverAt(-1));
 
 function keyNudge(e, which) {
   const step = (e.shiftKey ? 60 : 300) / DAY;
@@ -451,12 +521,9 @@ function renderTripBands() {
     band.style.left  = ((t.start_ts - dayStart) / DAY * 100) + '%';
     // 0.01 min-width (~15 min of day) keeps a 5-minute journey clickable.
     band.style.width = (Math.max(0.01, (t.end_ts - t.start_ts) / DAY) * 100) + '%';
+    // No listener: the band is a visual + tooltip carrier; clicks are
+    // routed by the track's gesture handler (tripAtFrac).
     band.title = `T${i + 1}  ${hhmm(t.start_ts)}–${hhmm(t.end_ts)}  ${fmtDistM(t.dist_m)}`;
-    band.addEventListener('click', () => {
-      sel = { mode: 'trip', i };
-      renderChips();
-      applyView(true);
-    });
     tripsEl.appendChild(band);
   });
 }

@@ -21,6 +21,7 @@
   --amber-dim:  #F5A62320;
   --danger:     #FF4757;
   --live:       #3B9EFF;   /* current position — the "you are here" blue dot */
+  --live-dim:   #3B9EFF20;
   --live-glow:  #3B9EFF66;
 
   --text:       #D4DCE8;
@@ -1216,38 +1217,43 @@ body.map-has-fullscreen .top-rail { display: none; }
   border-radius: var(--radius, 4px);
   touch-action: none;
 }
+/* Every track child is a VISUAL: one gesture handler on the track owns all
+ * pointer input (map.js) so overlapping trip/window/handle pixels can't
+ * steal each other's gestures. Cursor + hover come from JS. */
+.timeline-track > * { pointer-events: none; }
+
 /* Fix-density strip: a canvas — a 1 Hz day holds thousands of fixes, far too
  * many for one DOM node each. */
 .tl-density { position: absolute; inset: 0; width: 100%; height: 100%; }
 
-/* Detected trips: clickable translucent bands over the density strip. */
+/* Detected trips: translucent bands over the density strip; .hover is set
+ * by the track's geometry hit-test (CSS :hover can't fire on an inert). */
 .tl-trips { position: absolute; inset: 0; }
 .tl-trip-band {
   position: absolute; top: 0; bottom: 0;
   background: rgba(0, 229, 160, 0.10);
   border: 1px solid rgba(0, 229, 160, 0.35);
   border-radius: 2px;
-  cursor: pointer;
   transition: background 0.12s;
 }
-.tl-trip-band:hover { background: rgba(0, 229, 160, 0.22); }
+.tl-trip-band.hover { background: rgba(0, 229, 160, 0.22); }
 
+/* Selected window: BLUE (= "selected" throughout the UI) and layered under
+ * the trip bands, so blue window vs green trip stay distinguishable where
+ * they overlap and bands stay clickable in DAY mode. */
 .tl-selection {
   position: absolute; top: 0; bottom: 0;
-  background: var(--signal-dim);
-  border-left: 1px solid var(--signal-glow);
-  border-right: 1px solid var(--signal-glow);
-  cursor: grab;   /* drag the band to slide the whole window */
+  background: var(--live-dim);
+  border-left: 1px solid var(--live-glow);
+  border-right: 1px solid var(--live-glow);
 }
-.tl-selection:active { cursor: grabbing; }
 .tl-handle {
   position: absolute; top: -4px; width: 14px; height: 42px;
   transform: translateX(-50%);
-  background: var(--signal);
+  background: var(--live);
   border: 1px solid var(--ink);
   border-radius: 3px;
-  cursor: ew-resize;
-  box-shadow: 0 0 6px var(--signal-glow);
+  box-shadow: 0 0 6px var(--live-glow);
 }
 .tl-handle::after {  /* dark grip lines against the bright handle */
   content: ''; position: absolute; left: 50%; top: 50%;
@@ -1255,16 +1261,15 @@ body.map-has-fullscreen .top-rail { display: none; }
   border-left: 1px solid var(--ink);
   border-right: 1px solid var(--ink);
 }
-.tl-handle:hover { filter: brightness(1.15); }
-.tl-handle:focus-visible {
+.tl-handle:focus-visible { /* keyboard focus works on an inert element */
   outline: none;
-  box-shadow: 0 0 0 3px var(--signal-glow), 0 0 6px var(--signal-glow);
+  box-shadow: 0 0 0 3px var(--live-glow), 0 0 6px var(--live-glow);
 }
 
 .hist-range-label {
   font-family: var(--font-mono);
   font-size: 12px;
-  color: var(--signal);
+  color: var(--live); /* names the selected window — selection is blue */
   letter-spacing: 0.04em;
 }
 .hist-hint { color: var(--text-dim); font-family: var(--font-mono); font-size: 11px; }

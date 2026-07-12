@@ -175,6 +175,50 @@ def main():
             if page.locator("#journeys-table tbody tr.active").count() == 0:
                 problems.append("journeys row click did not mark it active")
 
+            # Timeline gesture routing (regression: per-element layers used
+            # to steal each other's clicks wherever window and trip bands
+            # overlapped). (1) DAY mode: band click selects the trip even
+            # though the full-day window covers it.
+            page.locator("#trip-chips .trip-chip", has_text="DAY").click()
+            page.wait_for_timeout(200)
+            # Bands are pointer-events:none visuals (input = the track's
+            # gesture handler), so click COORDINATES, not the element.
+            box = page.locator(".tl-trip-band").first.bounding_box()
+            page.mouse.click(box["x"] + box["width"] / 2,
+                             box["y"] + box["height"] / 2)
+            page.wait_for_timeout(300)
+            if page.locator("#journeys-table tbody tr.active").count() == 0:
+                problems.append("timeline trip band click ignored in DAY "
+                                "mode (selection layer eating clicks?)")
+
+            # (2) Dragging on the track rubber-bands a custom window, even
+            # when the drag starts/crosses a band; (3) the band stays
+            # clickable INSIDE that window. Gesture beats layering.
+            page.locator("#trip-chips .trip-chip", has_text="DAY").click()
+            page.wait_for_timeout(200)
+            box = page.locator(".tl-trip-band").first.bounding_box()
+            tbox = page.locator("#tl-track").bounding_box()
+            if box and tbox:
+                # Clamp to the track: the seeded first trip sits near the
+                # left edge, and a start point off the track arms nothing.
+                x0 = max(tbox["x"] + 2, box["x"] - 40)
+                x1 = min(tbox["x"] + tbox["width"] - 2,
+                         box["x"] + box["width"] + 40)
+                cy = box["y"] + box["height"] / 2
+                page.mouse.move(x0, cy)
+                page.mouse.down()
+                page.mouse.move(x1, cy, steps=8)
+                page.mouse.up()
+                page.wait_for_timeout(300)
+                if page.locator("#trip-chips .trip-chip.active").count():
+                    problems.append("track drag did not create a range "
+                                    "window (a chip is still active)")
+                page.mouse.click(box["x"] + box["width"] / 2, cy)
+                page.wait_for_timeout(300)
+                if page.locator("#journeys-table tbody tr.active").count() == 0:
+                    problems.append("trip band click ignored inside a "
+                                    "custom range window")
+
         # Chart tabs: ACCURACY tab must reveal the accuracy canvas.
         page.click('#chart-tabs .chart-tab[data-chart="acc"]')
         page.wait_for_timeout(200)

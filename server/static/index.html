@@ -129,9 +129,13 @@
         <div class="timeline" id="timeline">
           <div class="timeline-axis" id="tl-axis"></div>
           <div class="timeline-track" id="tl-track">
+            <!-- Stacking is visual only (blue window under green bands so
+                 both read where they overlap): ALL pointer input goes
+                 through one gesture handler on the track (map.js), the
+                 children are pointer-events:none. -->
             <canvas class="tl-density" id="tl-density"></canvas>
-            <div class="tl-trips" id="tl-trips"></div>
             <div class="tl-selection" id="tl-sel"></div>
+            <div class="tl-trips" id="tl-trips"></div>
             <div class="tl-handle tl-handle-start" id="tl-start" tabindex="0" role="slider"
                  aria-label="Window start"></div>
             <div class="tl-handle tl-handle-end" id="tl-end" tabindex="0" role="slider"
