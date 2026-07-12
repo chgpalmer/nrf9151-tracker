@@ -1,6 +1,6 @@
 /**
  * app.js — Root entry point.
- * Handles: clock, hash-based router, device loading, page lifecycle.
+ * Handles: hash-based router, device loading, page lifecycle.
  */
 
 import { loadDevices, onDeviceChange as onDeviceChangeCb } from '/js/devices.js';
@@ -8,16 +8,6 @@ import { start as mapStart, stop as mapStop, onDeviceChange as mapDeviceChange }
 import { start as logsStart, stop as logsStop, onDeviceChange as logsDeviceChange } from '/js/logs.js';
 import { start as usageStart, stop as usageStop, onDeviceChange as usageDeviceChange } from '/js/usage.js';
 import { init as settingsInit } from '/js/settings.js';
-
-// ── Clock ───────────────────────────────────────────────────
-const clockEl = document.getElementById('clock');
-function tickClock() {
-  clockEl.textContent = new Date().toLocaleTimeString([], {
-    hour: '2-digit', minute: '2-digit', second: '2-digit',
-  });
-}
-tickClock();
-setInterval(tickClock, 1000);
 
 // ── Router ───────────────────────────────────────────────────
 const PAGES    = ['map', 'logs', 'usage', 'events', 'settings'];

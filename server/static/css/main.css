@@ -232,16 +232,6 @@ button { cursor: pointer; }
   .status-indicator[data-status="online"] .status-ring { animation: none; }
 }
 
-.clock {
-  font-family: var(--font-mono);
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text-sec);
-  letter-spacing: 0.05em;
-  min-width: 48px;
-  text-align: right;
-}
-
 /* ════════════════════════════════
    APP SHELL
    ════════════════════════════════ */
@@ -413,13 +403,9 @@ button { cursor: pointer; }
   }
 }
 
-/* Phone = overview mode: the map, the speed chart and the tables carry
- * it; the SHOW and SOURCES control rows are desktop furniture.
- * (.page-controls prefix outranks the later .control-group display rule.) */
-@media (max-width: 1099px) {
-  .page-controls .cg-show,
-  .page-controls .cg-sources { display: none; }
-}
+/* Phone-overview overrides live at the END of this file — base rules for
+ * .map-container/.hist-summary are defined later than this point and
+ * would win the same-specificity fight. */
 
 .side-tabs {
   display: flex;
@@ -1545,3 +1531,37 @@ tr.lvl-4 .log-text, tr.lvl-4 .log-mod { color: var(--text-dim); }
 .est-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-dim, #888); }
 .est-num { font-size: 1.25rem; font-weight: 700; font-variant-numeric: tabular-nums; }
 .est-num.over { color: #e05555; }
+
+/* ════════════════════════════════
+   PHONE OVERVIEW MODE (<1100px)
+   Last in the file on purpose: these override same-specificity base
+   rules defined above (later-in-file wins).
+   ════════════════════════════════ */
+@media (max-width: 1099px) {
+  /* Overview, not inspection: SHOW/SOURCES rows are desktop furniture. */
+  .page-controls .cg-show,
+  .page-controls .cg-sources { display: none; }
+
+  /* The map is the point of the page: keep it roughly square (bounded
+   * by 42dvh so short/landscape phones still fit the stack). The zone
+   * takes its NATURAL height here — its desktop min-height:0 let a
+   * tight stack paint the chart over the side panel — and the side
+   * panel flexes into whatever remains, within bounds. */
+  .map-container { min-height: min(100vw, 42dvh); }
+  .map-zone { flex: none; min-height: auto; }
+  .side-panel {
+    flex: 1 1 auto;
+    height: auto;
+    min-height: 150px;
+    max-height: 280px;
+  }
+
+  /* Overview stats stay ONE row; anything past the edge scrolls
+   * sideways rather than stacking a second row of the screen away. */
+  .hist-summary {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    gap: 16px;
+  }
+  .hist-stat { flex-shrink: 0; }
+}

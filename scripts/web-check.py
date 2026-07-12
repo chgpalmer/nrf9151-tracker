@@ -268,6 +268,15 @@ def main():
                 f"getComputedStyle(document.querySelector('{sel_hidden}')).display")
             if vis != "none":
                 problems.append(f"mobile: {sel_hidden} row should be hidden")
+        # The map keeps a roughly-square minimum; the summary stays one row.
+        mh = mob.evaluate(
+            "document.getElementById('map-main').getBoundingClientRect().height")
+        if mh < 300:
+            problems.append(f"mobile map height {mh}px — square-ish minimum expected")
+        wrap = mob.evaluate(
+            "getComputedStyle(document.getElementById('summary')).flexWrap")
+        if wrap != "nowrap":
+            problems.append(f"mobile summary flex-wrap is {wrap}, want nowrap")
         mob.click('#side-tabs .side-tab[data-tab="locations"]')
         mob.wait_for_timeout(200)
         rows = mob.locator("#fix-table tbody tr")
