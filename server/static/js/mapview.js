@@ -32,10 +32,42 @@ const TOKEN = {
  * @param {function} onFixClick — called with the fix object when a marker is clicked
  */
 export function createMapView(containerId, onFixClick) {
+  // Map element + its parent, declared before any use (fullscreen control,
+  // click delegate and the empty-state overlay all need them).
+  const mapEl     = document.getElementById(containerId);
+  const container = mapEl.parentElement || mapEl;
+
   const map = L.map(containerId, {
     zoomControl: true,
     attributionControl: true,
   }).setView([51.505, -0.09], 13);
+
+  // ⛶ fullscreen: pin the map element to the viewport (CSS class), Esc or
+  // the button exits. No layout changes — works the same on mobile.
+  const FsControl = L.Control.extend({
+    options: { position: 'topright' },
+    onAdd() {
+      const btn = L.DomUtil.create('button', 'map-fs-btn');
+      btn.type = 'button';
+      btn.title = 'Fullscreen (Esc exits)';
+      btn.textContent = '⛶';
+      L.DomEvent.disableClickPropagation(btn);
+      btn.addEventListener('click', toggleFullscreen);
+      return btn;
+    },
+  });
+  map.addControl(new FsControl());
+
+  function toggleFullscreen() {
+    const on = mapEl.classList.toggle('map-fullscreen');
+    document.body.classList.toggle('map-has-fullscreen', on);
+    setTimeout(() => map.invalidateSize(), 60);
+  }
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && mapEl.classList.contains('map-fullscreen')) {
+      toggleFullscreen();
+    }
+  });
 
   // Voyager: a light, legible basemap. The dark_all basemap read as "too dark"
   // and washed the track/markers out; a light base makes the green/amber fixes
@@ -169,10 +201,6 @@ export function createMapView(containerId, onFixClick) {
     </div>`;
   }
 
-  // Map element + its parent, declared before any use (the click delegate and
-  // the empty-state overlay both need them).
-  const mapEl    = document.getElementById(containerId);
-  const container = mapEl.parentElement || mapEl;
   let emptyOverlay = null;
 
   // Delegate click on popup detail links (map container catches bubbled events)

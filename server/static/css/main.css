@@ -526,6 +526,27 @@ button { cursor: pointer; }
   height: 100%;
 }
 
+/* Fullscreen: pin the live map element to the viewport. 100dvh not 100vh —
+ * mobile browser chrome eats the difference. */
+.map-container.map-fullscreen {
+  position: fixed;
+  inset: 0;
+  height: 100dvh;
+  z-index: 2000;
+}
+.map-fs-btn {
+  width: 34px;
+  height: 34px;
+  background: var(--panel, #1a2030);
+  color: var(--text, #D4DCE8);
+  border: 1px solid var(--border, #2A3347);
+  border-radius: 4px;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.map-fs-btn:hover { border-color: var(--border-hi, #3d4a66); }
+
 /* ── Chart strip ── */
 .chart-strip {
   display: flex;

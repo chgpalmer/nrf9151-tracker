@@ -88,6 +88,25 @@ def main():
                     "per-fix DOM is back")
         else:
             problems.append("no DAY chip found for the density check")
+
+        # Fullscreen control must expand the map to the viewport and back.
+        fs = page.locator(".map-fs-btn")
+        if fs.count() == 0:
+            problems.append("fullscreen control missing")
+        else:
+            fs.first.click()
+            page.wait_for_timeout(300)
+            vw = page.evaluate("window.innerWidth")
+            mw = page.evaluate(
+                "document.getElementById('map-main').getBoundingClientRect().width")
+            if abs(vw - mw) > 4:
+                problems.append(f"fullscreen map width {mw} != viewport {vw}")
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(300)
+            mw2 = page.evaluate(
+                "document.getElementById('map-main').getBoundingClientRect().width")
+            if abs(vw - mw2) <= 4:
+                problems.append("Escape did not exit fullscreen")
         for tid in ("#filter-gps", "#filter-cell", "#filter-gps", "#filter-cell"):
             if page.locator(tid).count():
                 page.click(tid)
