@@ -101,6 +101,14 @@ windows-usb-passthrough:
 > @powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$$(wslpath -w scripts/windows/passthrough.ps1)"
 > @echo "If /dev/ttyACM* still missing, install usbipd on Windows (admin): winget install usbipd"
 
+# AT_SHELL=1 compiles the AT-command shell into the console (`at AT+COPS=?`
+# for a carrier scan, `at AT%XMONITOR` for serving-cell detail). Diagnostic
+# builds only — a manual COPS scan detaches the modem for minutes.
+AT_SHELL ?=
+ifneq ($(strip $(AT_SHELL)),)
+BUILD_DEFINES += -DCONFIG_AT_SHELL=y
+endif
+
 # SNIPPET=nrf91-modem-trace-uart routes the modem's binary trace firehose to
 # the second VCOM (uart1, 1 Mbaud) for capture with `stty raw` + cat and
 # offline decode via `nrfutil trace lte`. Diagnostic builds only — do not
