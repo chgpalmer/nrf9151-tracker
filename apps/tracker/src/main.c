@@ -102,6 +102,12 @@ static char device_id[HW_ID_LEN];
  * flags the change and the main loop logs the edge. */
 static volatile bool gnss_blocked;
 
+/* Registration was lost: the main loop asks the modem WHY (AT+CEER, the last
+ * EMM/ESM failure cause) — one line per loss, the difference between "it
+ * dropped" and "the network rejected TAU with cause 15". Set in the LTE
+ * callback, consumed in the loop (AT commands don't belong in callbacks). */
+static volatile bool want_ceer;
+
 static void gnss_handler(int event)
 {
 	switch (event) {
@@ -180,6 +186,9 @@ static void lte_handler(const struct lte_lc_evt *const evt)
 					? "roaming" : "home");
 			lte_connected = true;
 		} else {
+			if (lte_connected) {
+				want_ceer = true; /* registered -> lost: ask why */
+			}
 			lte_connected = false;
 		}
 		break;
@@ -213,6 +222,30 @@ static void lte_handler(const struct lte_lc_evt *const evt)
 		}
 		break;
 #endif
+	case LTE_LC_EVT_MODEM_EVENT: {
+		/* The modem narrating its own radio work — the observability
+		 * for "what is searching actually doing". Search-phase events
+		 * are sparse (one per search cycle); CE level shifts with
+		 * coverage and stays at DBG. */
+		switch (evt->modem_evt.type) {
+		case LTE_LC_MODEM_EVT_LIGHT_SEARCH_DONE:
+			LOG_INF("modem: light search done (no cell found yet)");
+			break;
+		case LTE_LC_MODEM_EVT_SEARCH_DONE:
+			LOG_INF("modem: full search done");
+			break;
+		case LTE_LC_MODEM_EVT_RESET_LOOP:
+			LOG_WRN("modem: RESET LOOP restriction");
+			break;
+		case LTE_LC_MODEM_EVT_CE_LEVEL:
+			LOG_DBG("modem: CE level %d", evt->modem_evt.ce_level);
+			break;
+		default:
+			LOG_INF("modem: event %d", evt->modem_evt.type);
+			break;
+		}
+		break;
+	}
 	case LTE_LC_EVT_RRC_UPDATE:
 		rrc_connected = (evt->rrc_mode == LTE_LC_RRC_MODE_CONNECTED);
 		if (rrc_connected) {
@@ -616,6 +649,21 @@ int main(void)
 		if (!pdn_active && coap_pub_ready()) {
 			LOG_WRN("PDN down — closing CoAP socket");
 			coap_pub_close();
+		}
+
+		/* Registration loss post-mortem: one CEER read per loss edge. */
+		if (want_ceer) {
+			want_ceer = false;
+			char ceer[64];
+
+			if (nrf_modem_at_cmd(ceer, sizeof(ceer), "AT+CEER") == 0) {
+				char *nl = strpbrk(ceer, "\r\n");
+
+				if (nl) {
+					*nl = '\0';
+				}
+				LOG_INF("LTE lost: %s", ceer);
+			}
 		}
 
 		/* EVT_BLOCKED/UNBLOCKED arrive in ISR context; log the edge here. */

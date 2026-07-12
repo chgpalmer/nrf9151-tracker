@@ -161,6 +161,18 @@ cycle (cell ring holds 8). Intent — "a coarse position reached the server
 before GNSS gets the radio" — is arguably still met by a minutes-old cell.
 Accepted as-is; noted so the test encodes the actual semantics.
 
+**F-5 — OPEN QUESTION: registration loss mid-tracking turns GNSS off.**
+The global override sends every state to LTE_ATTACH on registration loss,
+and LTE_ATTACH's output is gnss_mode=OFF — designed for boot (a searching
+modem starves a cold GNSS; nothing to upload anyway). But field data
+(2026-07-12, 09:23: registered → network drop → 7 min re-registration)
+shows mid-session losses can be long, and with a HELD fix that rule throws
+away tracking the 34-min obs ring could have buffered and shipped after
+re-attach. Candidate change: `!lte_registered && gps_current` keeps GNSS
+tracking (a warm tracker is more chop-tolerant than a cold acquirer) and
+buffers. Needs a hardware experiment: does tracking survive a searching
+modem? Discussion pending — do not implement without it.
+
 **F-4 — blanked-epoch bookkeeping is correct but subtle.** `sky_empty` counts
 only observed epochs; `ephemeris_visible` carries the last observed value
 through blanked epochs; `chopped_streak` resets only on an *observed* clean
