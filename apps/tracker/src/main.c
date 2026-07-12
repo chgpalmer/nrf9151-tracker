@@ -641,24 +641,50 @@ int main(void)
 		int64_t now = k_uptime_get();
 
 		if (pvt.flags & NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID) {
-			/* Quarantine the FIRST fix after a periodic-mode sleep:
-			 * the receiver reports its HELD pre-sleep position (near-
-			 * zero speed, plausible accuracy) before snapping to
-			 * reality an epoch later — field-caught as a phantom
-			 * point 501 m and 4 s from its successor. The second
-			 * epoch of a wake arrives a second later and is real. */
+			/* HYPOTHESIS UNDER TEST (n=1 field sample, DevZone-
+			 * corroborated class): the first fix after a periodic-mode
+			 * sleep can report the HELD pre-sleep position (caught
+			 * 501 m / 4 s from its successor). Rather than drop on
+			 * faith, hold the first post-sleep fix ONE epoch and
+			 * convict it only on measured disagreement with the next —
+			 * every conviction is logged with the distance, so the
+			 * field counts the phenomenon. If the conviction line
+			 * never fires, delete this block. */
+			static struct nrf_modem_gnss_pvt_data_frame pend_pvt;
+			static int64_t pend_ms;
 			static int64_t last_fix_seen_ms;
-			bool woke_stale = (gnss_mode_applied == LOC_GNSS_PERIODIC) &&
-					  (now - last_fix_seen_ms > 30000);
 
-			last_fix_seen_ms = now;
-			if (!woke_stale) {
+			if (pend_ms && (now - pend_ms) > 10000) {
+				pend_ms = 0; /* single-epoch wake: unverifiable */
+				LOG_DBG("wake fix expired unvalidated");
+			}
+			if (gnss_mode_applied == LOC_GNSS_PERIODIC &&
+			    (now - last_fix_seen_ms) > 30000) {
+				pend_pvt = pvt; /* first fix of a wake: hold it */
+				pend_ms = now;
+				last_fix_seen_ms = now;
+			} else {
+				last_fix_seen_ms = now;
+				if (pend_ms) {
+					double ky = 111320.0 * cos(pvt.latitude *
+								   0.017453293);
+					double dx = (pvt.longitude -
+						     pend_pvt.longitude) * ky;
+					double dy = (pvt.latitude -
+						     pend_pvt.latitude) * 110540.0;
+					double d = sqrt(dx * dx + dy * dy);
+
+					pend_ms = 0;
+					if (d > MAX(50.0, 4.0 * pvt.accuracy)) {
+						LOG_INF("dropped wake fix %d m from next epoch (held-position artifact)",
+							(int)d);
+					}
+					/* agreeing pend is just 1 s stale: superseded */
+				}
 				fix_pvt = pvt;
 				fix_pvt_ms = now;
 				motion_note_gps(pvt.latitude, pvt.longitude,
 						(double)pvt.accuracy, now);
-			} else {
-				LOG_DBG("dropping first fix after periodic wake");
 			}
 		}
 
