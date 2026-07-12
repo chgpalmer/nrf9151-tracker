@@ -60,12 +60,22 @@ export function createFixTable(containerId, { onRowClick, onRowHover, startOpen 
     tbody.addEventListener('mouseleave', () => onRowHover(null));
   }
 
-  function renderBody() {
+  /* Render a MAX_ROWS window of the (newest-first) table. By default the
+   * newest rows; pass an index to center the window on that fix so
+   * cross-view selection can land on days with thousands of fixes. */
+  let windowStartK = 0;
+
+  function renderBody(centerI = null) {
     dirty = false;
+    if (centerI != null) {
+      const kFix = fixes.length - 1 - centerI;
+      windowStartK = Math.max(0, Math.min(kFix - (MAX_ROWS >> 1),
+                                          fixes.length - MAX_ROWS));
+    }
     const rows = [];
     // newest first; fixes arrive oldest-first from the API
-    const n = Math.min(fixes.length, MAX_ROWS);
-    for (let k = 0; k < n; k++) {
+    const n = Math.min(fixes.length - windowStartK, MAX_ROWS);
+    for (let k = windowStartK; k < windowStartK + n; k++) {
       const i = fixes.length - 1 - k;
       const f = fixes[i];
       const isGps = f.source === 'gps';
@@ -85,6 +95,7 @@ export function createFixTable(containerId, { onRowClick, onRowHover, startOpen 
 
   function render(newFixes) {
     fixes = newFixes || [];
+    windowStartK = 0; // new data: window back to the newest rows
     countEl.textContent = fixes.length === 0 ? 'no fixes'
       : fixes.length > MAX_ROWS ? `${fixes.length} fixes (showing ${MAX_ROWS})`
       : `${fixes.length} fix${fixes.length !== 1 ? 'es' : ''}`;
@@ -107,7 +118,14 @@ export function createFixTable(containerId, { onRowClick, onRowHover, startOpen 
     if (dirty) renderBody();
     tbody.querySelectorAll('tr.sel').forEach(tr => tr.classList.remove('sel'));
     const i = fixes.indexOf(fix);
-    const tr = i >= 0 ? tbody.querySelector(`tr[data-i="${i}"]`) : null;
+    if (i < 0) return;
+    let tr = tbody.querySelector(`tr[data-i="${i}"]`);
+    if (!tr) {
+      // Selected fix is outside the rendered window (dense day):
+      // re-window the table around it.
+      renderBody(i);
+      tr = tbody.querySelector(`tr[data-i="${i}"]`);
+    }
     if (tr) {
       tr.classList.add('sel');
       tr.scrollIntoView({ block: 'nearest' });

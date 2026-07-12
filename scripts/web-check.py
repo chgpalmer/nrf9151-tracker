@@ -21,6 +21,7 @@ Needs: pip install playwright && playwright install chromium
 
 import argparse
 import sys
+import time
 
 from playwright.sync_api import sync_playwright
 
@@ -66,6 +67,27 @@ def main():
         for chip in page.locator("#trip-chips button").all():
             chip.click()
             page.wait_for_timeout(150)
+
+        # Day view at 1 Hz density must stay responsive: click DAY (10k+
+        # fixes) and require the main thread back within budget, with no
+        # per-fix DOM markers (canvas renders the points).
+        day_chip = page.locator("#trip-chips button", has_text="DAY")
+        if day_chip.count():
+            t0 = time.time()
+            day_chip.first.click()
+            page.evaluate("1 + 1")   # blocks until the main thread is free
+            busy_s = time.time() - t0
+            if busy_s > 5.0:
+                problems.append(
+                    f"Day view blocked the main thread {busy_s:.1f}s (>5s)")
+            n_dom = page.evaluate(
+                "document.querySelectorAll('#map-main .leaflet-marker-pane > *').length")
+            if n_dom > 300:
+                problems.append(
+                    f"Day view created {n_dom} DOM markers (>300) — "
+                    "per-fix DOM is back")
+        else:
+            problems.append("no DAY chip found for the density check")
         for tid in ("#filter-gps", "#filter-cell", "#filter-gps", "#filter-cell"):
             if page.locator(tid).count():
                 page.click(tid)

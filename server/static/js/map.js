@@ -54,6 +54,7 @@ const accToggle   = document.getElementById('show-accuracy');
 const arrowToggle = document.getElementById('show-arrows');
 const gpsChip     = document.getElementById('filter-gps');
 const cellChip    = document.getElementById('filter-cell');
+const pointsChip  = document.getElementById('show-points');
 
 const track     = document.getElementById('tl-track');
 const densityEl = document.getElementById('tl-density');
@@ -92,6 +93,12 @@ arrowToggle.addEventListener('change', () => mapView && mapView.setShowArrows(ar
     chip.setAttribute('aria-pressed', String(chip.classList.contains('active')));
     applyView(false);
   });
+});
+
+pointsChip.addEventListener('click', () => {
+  pointsChip.classList.toggle('active');
+  pointsChip.setAttribute('aria-pressed', String(pointsChip.classList.contains('active')));
+  mapView && mapView.setShowPoints(pointsChip.classList.contains('active'));
 });
 
 // ── timeline drag (custom window = 'range' selection) ───────
@@ -311,6 +318,7 @@ function applyView(fit) {
     fitBounds: fit,
     showAccuracy: accToggle.checked,
     showArrows: arrowToggle.checked,
+    showPoints: pointsChip.classList.contains('active'),
     liveDot: sel.mode === 'live',
     emptyMsg: filtered ? 'All fixes hidden by source filter' : undefined,
     emptySub: filtered ? 'Re-enable GPS or CELL above.' : undefined,

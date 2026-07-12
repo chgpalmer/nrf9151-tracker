@@ -57,8 +57,16 @@ export function createMapView(containerId, onFixClick) {
   let currentFixes    = [];
   let showAccuracy    = false;
   let showArrows      = true;
+  let showPoints      = false;
   let liveDot         = false;
   let selectedFixId   = null;
+
+  // One canvas renderer for all per-fix geometry: a 1 Hz day is 10k+ fixes,
+  // and per-fix DOM markers (the old approach) hang the page. Canvas paths
+  // stay interactive (click) without any DOM cost.
+  const canvasRenderer = L.canvas({ padding: 0.3 });
+  // One shared popup instead of 10k+ bindPopup instances.
+  const sharedPopup = L.popup({ maxWidth: 240, className: 'trk-popup' });
 
   // ── Private helpers ──────────────────────────────────────
 
@@ -200,6 +208,7 @@ export function createMapView(containerId, onFixClick) {
   function render(fixes, opts = {}) {
     if (opts.showAccuracy != null) showAccuracy = opts.showAccuracy;
     if (opts.showArrows   != null) showArrows   = opts.showArrows;
+    if (opts.showPoints   != null) showPoints   = opts.showPoints;
     if (opts.liveDot      != null) liveDot      = opts.liveDot;
 
     currentFixes = fixes;
@@ -224,9 +233,11 @@ export function createMapView(containerId, onFixClick) {
     const gpsLatlngs = fixes.filter(f => f.source === 'gps').map(f => [f.lat, f.lon]);
     if (gpsLatlngs.length > 1) {
       L.polyline(gpsLatlngs, {
+        renderer: canvasRenderer,
         color:   TOKEN.signal,
         weight:  2,
         opacity: 0.55,
+        interactive: false, // map-level nearest-fix handler does hover/click
       }).addTo(trackLayer);
     }
 
@@ -237,32 +248,36 @@ export function createMapView(containerId, onFixClick) {
 
     const latest = fixes[fixes.length - 1];
 
-    // Markers + arrows
-    fixes.forEach((fix, i) => {
+    // Latest fix: the one DOM marker (live dot in live mode). Everything
+    // else is canvas: GPS fixes are represented by the line (plus optional
+    // POINTS circles), cell fixes always get a circle — they are few and
+    // are ambient context rather than track.
+    fixes.forEach(fix => {
       const isLatest = fix === latest;
-      const icon = (isLatest && liveDot) ? liveIcon() : markerIcon(fix, isLatest);
-
-      const marker = L.marker([fix.lat, fix.lon], { icon, zIndexOffset: isLatest ? 1000 : 0 })
-        .bindPopup(popupContent(fix), { maxWidth: 240, className: 'trk-popup' })
-        .on('click', () => {
-          selectFix(fix);
-          onFixClick && onFixClick(fix);
-        })
-        .addTo(markerLayer);
-
-      // Direction arrows for GPS fixes that have a heading
-      if (showArrows && fix.source === 'gps' && fix.hdg != null && !isLatest) {
-        // Place arrow slightly behind this fix toward previous fix
-        // (midpoint between prev and this fix to avoid cluttering the marker)
-        if (i > 0) {
-          const prev = fixes[i - 1];
-          const midLat = (prev.lat + fix.lat) / 2;
-          const midLon = (prev.lon + fix.lon) / 2;
-          L.marker([midLat, midLon], { icon: arrowIcon(fix.hdg), interactive: false })
-            .addTo(arrowLayer);
-        }
+      if (isLatest) {
+        const icon = liveDot ? liveIcon() : markerIcon(fix, true);
+        L.marker([fix.lat, fix.lon], { icon, zIndexOffset: 1000 })
+          .on('click', () => pickFix(fix))
+          .addTo(markerLayer);
+        return;
       }
+      const isGps = fix.source === 'gps';
+      if (isGps && !showPoints) return; // the polyline represents it
+      // interactive:false — canvas hit-testing is O(layers) per mousemove;
+      // the map-level nearest-fix handler below covers hover AND click for
+      // every fix, drawn or not.
+      L.circleMarker([fix.lat, fix.lon], {
+        renderer: canvasRenderer,
+        radius: 3.5,
+        color: isGps ? TOKEN.signal : TOKEN.amber,
+        weight: 1,
+        fillColor: isGps ? TOKEN.signal : TOKEN.amber,
+        fillOpacity: 0.85,
+        interactive: false,
+      }).addTo(markerLayer);
     });
+
+    renderArrows();
 
     // Re-apply an existing selection so a live refresh doesn't wipe the
     // highlighted accuracy circle out from under the user.
@@ -276,6 +291,69 @@ export function createMapView(containerId, onFixClick) {
       map.fitBounds(computeBounds(fixes), { padding: [30, 30], maxZoom: 17 });
     }
   }
+
+  /** Click path shared by markers, canvas points and the line. */
+  function pickFix(fix) {
+    sharedPopup.setLatLng([fix.lat, fix.lon])
+      .setContent(popupContent(fix)).openOn(map);
+    selectFix(fix);
+    onFixClick && onFixClick(fix);
+  }
+
+  /**
+   * Direction arrows, decimated by SCREEN distance: one arrow per
+   * ~ARROW_MIN_PX of track at the current zoom, hard-capped. Re-runs on
+   * zoom so arrows appear as you zoom into a ride and melt into the line
+   * zoomed out. (The old code placed one DOM arrow per GPS pair — half
+   * the 16k-fix page hang on its own.)
+   */
+  const ARROW_MIN_PX = 80, ARROW_CAP = 200;
+
+  function renderArrows() {
+    arrowLayer.clearLayers();
+    if (!showArrows) return;
+    const gps = currentFixes.filter(f => f.source === 'gps' && f.hdg != null);
+    if (gps.length < 2) return;
+    let lastPt = null, placed = 0;
+    for (let i = 1; i < gps.length && placed < ARROW_CAP; i++) {
+      const pt = map.latLngToLayerPoint([gps[i].lat, gps[i].lon]);
+      if (lastPt && pt.distanceTo(lastPt) < ARROW_MIN_PX) continue;
+      const prev = gps[i - 1];
+      L.marker([(prev.lat + gps[i].lat) / 2, (prev.lon + gps[i].lon) / 2],
+               { icon: arrowIcon(gps[i].hdg), interactive: false })
+        .addTo(arrowLayer);
+      lastPt = pt; placed++;
+    }
+  }
+  map.on('zoomend', renderArrows);
+
+  /**
+   * Hover/click anywhere near the track inspects the nearest fix — the
+   * line IS the data, no per-fix markers needed. Linear scan is fine at
+   * 16k (sub-ms), throttled to animation frames.
+   */
+  function nearestFix(cpt, maxPx) {
+    let best = null, bestD = maxPx;
+    for (const f of currentFixes) {
+      const p = map.latLngToContainerPoint([f.lat, f.lon]);
+      const d = cpt.distanceTo(p);
+      if (d < bestD) { bestD = d; best = f; }
+    }
+    return best;
+  }
+
+  let hoverRaf = null;
+  map.on('mousemove', e => {
+    if (hoverRaf || currentFixes.length === 0) return;
+    hoverRaf = requestAnimationFrame(() => {
+      hoverRaf = null;
+      hoverFix(nearestFix(e.containerPoint, 12)); // null clears the ring
+    });
+  });
+  map.on('click', e => {
+    const fix = nearestFix(e.containerPoint, 12);
+    if (fix) pickFix(fix);
+  });
 
   /**
    * Select a fix: highlight it, and if its accuracy circle isn't already
@@ -309,7 +387,14 @@ export function createMapView(containerId, onFixClick) {
 
   function highlightSelected(fix) {
     selectedLayer.clearLayers();
-    // Show accuracy circle for selected fix regardless of toggle
+    // Pixel-scaled ring: findable at ANY zoom (a metres-scaled accuracy
+    // circle is invisible on a ride-scale view) ...
+    L.circleMarker([fix.lat, fix.lon], {
+      radius: 11, weight: 3, fill: false,
+      color: fix.source === 'gps' ? TOKEN.signal : TOKEN.amber,
+      interactive: false,
+    }).addTo(selectedLayer);
+    // ... plus the accuracy circle, so the radius information is kept.
     selectedAccuracyCircle(fix).addTo(selectedLayer);
   }
 
@@ -326,7 +411,11 @@ export function createMapView(containerId, onFixClick) {
 
   function setShowArrows(val) {
     showArrows = val;
-    // Full re-render needed (arrows baked into arrowLayer)
+    renderArrows();
+  }
+
+  function setShowPoints(val) {
+    showPoints = val;
     render(currentFixes, { fitBounds: false });
   }
 
@@ -356,5 +445,5 @@ export function createMapView(containerId, onFixClick) {
     }).addTo(hoverLayer);
   }
 
-  return { render, setShowAccuracy, setShowArrows, focusFix, hoverFix, invalidate, map };
+  return { render, setShowAccuracy, setShowArrows, setShowPoints, focusFix, hoverFix, invalidate, map };
 }

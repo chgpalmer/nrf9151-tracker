@@ -46,6 +46,10 @@ rows += trip(now - 3 * 3600, 300, 51.505, -0.09)           # trip 1: 5 min
 rows += [(dev, now - 3 * 3600 + 900, 'cell', 51.507, -0.088,
           None, 1500.0, None, None, None)]
 rows += trip(now - 2 * 3600, 420, 51.508, -0.086, spd=6)   # trip 2: 7 min
+# Dense 1 Hz trip covering now-3h..now (~10800 fixes): a realistic heavy
+# day. The old per-fix-DOM renderer hung the page on this; webtest clicks
+# DAY and asserts the page stays responsive.
+rows += trip(now - 3 * 3600 + 1, 10800 - 2, 51.512, -0.10, spd=5)
 rows += [(dev, now - 600, 'cell', 51.509, -0.084, None, 1200.0, None, None, None)]
 
 db.executemany(
