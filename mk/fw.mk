@@ -95,10 +95,16 @@ windows-usb-passthrough:
 > @powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$$(wslpath -w scripts/windows/passthrough.ps1)"
 > @echo "If /dev/ttyACM* still missing, install usbipd on Windows (admin): winget install usbipd"
 
+# SNIPPET=nrf91-modem-trace-uart routes the modem's binary trace firehose to
+# the second VCOM (uart1, 1 Mbaud) for capture with `stty raw` + cat and
+# offline decode via `nrfutil trace lte`. Diagnostic builds only — do not
+# ship it by default.
+SNIPPET ?=
 build: | check-workspace
 > @test -d $(APP_DIR) || { echo "No app '$(APP)' in apps/ ($$(ls apps 2>/dev/null | tr '\n' ' '))"; exit 1; }
-> $(WEST) build -p auto -b $(BOARD) $(APP_DIR) -d $(BUILD) $(BUILD_DEFINES)
-> @echo "built $(APP) for $(BOARD)"
+> $(WEST) build -p auto -b $(BOARD) $(APP_DIR) -d $(BUILD) $(BUILD_DEFINES) \
+>   $(if $(SNIPPET),-S $(SNIPPET))
+> @echo "built $(APP) for $(BOARD)$(if $(SNIPPET), [snippet: $(SNIPPET)])"
 
 flash:
 > $(WEST) flash -d $(BUILD) --runner $(RUNNER)
