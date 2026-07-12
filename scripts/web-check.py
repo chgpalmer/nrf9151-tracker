@@ -168,11 +168,16 @@ def main():
             if page.locator('#side-tabs .side-tab[data-tab="detail"].active').count():
                 problems.append("closing detail did not return to the previous tab")
 
-        # Day steppers must navigate without errors.
+        # Day steppers must navigate without errors; forward stops (greyed)
+        # at today — the seed day IS today, so it starts disabled.
+        if not page.evaluate("document.getElementById('date-next').disabled"):
+            problems.append("date-next not disabled on today")
         for tid in ("#date-prev", "#date-next"):
             if page.locator(tid).count():
                 page.click(tid)
                 page.wait_for_timeout(400)
+        if not page.evaluate("document.getElementById('date-next').disabled"):
+            problems.append("date-next not re-disabled after returning to today")
 
         # trips.js rule check: parked jitter must not form a trip; a loop
         # ride (returns to its start) must. Real-data calibration
@@ -269,11 +274,16 @@ def main():
             "getComputedStyle(document.getElementById('page-map')).display")
         if mdisp == "grid":
             problems.append("mobile map page is grid — stack expected")
-        for sel_hidden in (".cg-show", ".cg-sources"):
-            vis = mob.evaluate(
-                f"getComputedStyle(document.querySelector('{sel_hidden}')).display")
-            if vis != "none":
-                problems.append(f"mobile: {sel_hidden} row should be hidden")
+        vis = mob.evaluate(
+            "getComputedStyle(document.querySelector('.cg-sources')).display")
+        if vis != "none":
+            problems.append("mobile: .cg-sources row should be hidden")
+        # LIVE/DAY chips stay reachable on the phone (slimmed SHOW group).
+        if mob.locator("#trip-chips button").count() == 0:
+            problems.append("mobile: LIVE/DAY chips missing")
+        # Charts start collapsed on the phone — the map is king.
+        if mob.locator(".chart-panel.collapsed").count() == 0:
+            problems.append("mobile: chart panel should start collapsed")
         # The map keeps a roughly-square minimum; the summary stays one row.
         mh = mob.evaluate(
             "document.getElementById('map-main').getBoundingClientRect().height")

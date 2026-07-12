@@ -689,6 +689,21 @@ body.map-has-fullscreen .top-rail { display: none; }
 
 .chart-wrap.active { display: block; }
 
+.chart-collapse {
+  margin-left: auto;
+  background: none;
+  border: none;
+  padding: 2px 0 3px;
+  font-size: 10px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.chart-collapse:hover { color: var(--text-sec); }
+
+/* Collapsed: just the tab bar — the map gets the height. */
+.chart-panel.collapsed { height: auto; }
+.chart-panel.collapsed .chart-wrap { display: none; }
+
 /* ── History summary ── */
 .hist-summary {
   flex-shrink: 0;
@@ -1496,6 +1511,11 @@ tr.lvl-4 .log-text, tr.lvl-4 .log-mod { color: var(--text-dim); }
   transition: color 0.12s, border-color 0.12s;
 }
 .date-step:hover { color: var(--signal); border-color: var(--border-hi); }
+.date-step:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.date-step:disabled:hover { color: var(--text-sec); border-color: var(--border); }
 
 /* ── Usage page ────────────────────────────────────────────── */
 .usage-today { padding: 14px 18px 4px; display: flex; align-items: baseline; gap: 10px; }
@@ -1538,9 +1558,12 @@ tr.lvl-4 .log-text, tr.lvl-4 .log-mod { color: var(--text-dim); }
    rules defined above (later-in-file wins).
    ════════════════════════════════ */
 @media (max-width: 1099px) {
-  /* Overview, not inspection: SHOW/SOURCES rows are desktop furniture. */
-  .page-controls .cg-show,
+  /* Overview, not inspection: the SOURCES row is desktop furniture; the
+   * SHOW group slims to just the LIVE/DAY chips, inline after the date
+   * (journey selection lives in the Journeys table). */
   .page-controls .cg-sources { display: none; }
+  .cg-show .control-label,
+  .cg-show .hist-range-label { display: none; }
 
   /* The map is the point of the page: keep it roughly square (bounded
    * by 42dvh so short/landscape phones still fit the stack). The zone

@@ -180,14 +180,29 @@ document.querySelectorAll('#side-tabs .side-tab').forEach(b =>
 onDrawerClose(() => setTab(lastTab));
 
 // Chart tabs: one canvas visible at a time; Chart.js needs a resize poke
-// when a hidden canvas becomes visible.
+// when a hidden canvas becomes visible. The whole panel collapses to its
+// tab bar (▾/▸) — default-collapsed on phones, where the map is king.
+const chartPanel    = document.getElementById('chart-strip');
+const chartCollapse = document.getElementById('chart-collapse');
+
+function setChartCollapsed(v) {
+  chartPanel.classList.toggle('collapsed', v);
+  chartCollapse.textContent = v ? '▸' : '▾';
+  if (!v) resizeCharts();
+}
+
+chartCollapse.addEventListener('click', () =>
+  setChartCollapsed(!chartPanel.classList.contains('collapsed')));
+
+if (window.matchMedia('(max-width: 1099px)').matches) setChartCollapsed(true);
+
 document.querySelectorAll('#chart-tabs .chart-tab').forEach(b =>
   b.addEventListener('click', () => {
     document.querySelectorAll('#chart-tabs .chart-tab').forEach(t =>
       t.classList.toggle('active', t === b));
     document.querySelectorAll('.chart-wrap').forEach(w =>
       w.classList.toggle('active', w.dataset.chart === b.dataset.chart));
-    resizeCharts();
+    setChartCollapsed(false); // picking a chart means you want to see it
   }));
 
 // ── lifecycle ───────────────────────────────────────────────
@@ -253,6 +268,8 @@ async function loadDay() {
   const deviceId = currentDevice();
   dayStart = Math.floor(new Date(`${dateInput.value}T00:00:00`).getTime() / 1000);
   isToday  = dateInput.value === todayStr();
+  // Tomorrow doesn't exist yet: grey the forward stepper out at today.
+  document.getElementById('date-next').disabled = isToday;
 
   if (!deviceId) {
     dayFixes = []; trips = [];
