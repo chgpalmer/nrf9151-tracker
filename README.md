@@ -1,229 +1,176 @@
 # nrf9151-tracker
 
-Firmware and server for the [Nordic nRF9151-DK](https://www.nordicsemi.com/Products/Development-hardware/nRF9151-DK)
-(nRF9151 SiP, Arm Cortex-M33, LTE-M / NB-IoT / GNSS). A freestanding, multi-app
-Zephyr/[NCS](https://github.com/nrfconnect/sdk-nrf) **west manifest repo** — the repo
-*is* the manifest, so contributors clone one thing and pull a trimmed subset of the SDK
-(see `west.yml` `name-allowlist`), not the whole world.
+A GPS tracker that rides at 1 Hz and fits in a 10 MB/month IoT plan:
+nRF9151 firmware (Zephyr/[NCS](https://github.com/nrfconnect/sdk-nrf)), a small
+Python server, and a no-build web map — one repo, everything field-measured.
 
-Linux-native workflow: build, flash, and debug all run inside WSL with native tools. The
-board's USB is brought across the WSL2 boundary once with
-[usbipd-win](https://github.com/dorssel/usbipd-win); after that everything is
-`west` + `nrfutil` + `tio`.
+- boot → registered **6 s** · assisted indoor cold-boot fix **~17 s**
+- **~6 B per GPS point** on the wire · **~1 KB/min** riding
+- parked: 120 s periodic GNSS checks, backing off to 30 min without sky
+- the full sim → server → web loop runs with **zero hardware**
 
-## Quick start
+Measured on the reference deployment (NB-IoT B20, Vodafone UK roaming, flolive
+SIM, one small VM); the stack is network- and host-agnostic. Full spec sheet:
+`git show v0.1.0-alpha`.
+
+## Architecture
+
+```mermaid
+flowchart LR
+  subgraph dk [nRF9151 tracker]
+    FSM[GNSS/LTE arbitration FSM<br/>1 Hz moving - periodic parked]
+    UP[pull-model uplink<br/>protobuf batches + device logs]
+    FSM --> UP
+  end
+  UP -- "CoAP NON / UDP 5683<br/>RAI + PSM" --> COAP[aiocoap ingest]
+  COAP -. "A-GNSS ~1 KB" .-> UP
+  BKG[BKG broadcast ephemeris<br/>free, 15-min fresh] --> COAP
+  COAP --> DB[(SQLite<br/>positions - logs - usage)]
+  DB --> API[FastAPI]
+  API --> WEB[web map<br/>vanilla ESM + Leaflet]
+  CADDY[Caddy<br/>auto-HTTPS + basicauth] --- API
+```
+
+## Try it — no hardware
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/chgpalmer/nrf9151-tracker/main/setup.sh | bash
 cd nrf9151-tracker-ws/nrf9151-tracker
-make setup-tools               # host tools: nrfutil, usbip, tio
-make setup-host                # server tools: Python deps (aiocoap, protobuf)
-make build                     # build the default app (tracker), non-secure
-make windows-usb-passthrough   # attach the J-Link into WSL (usbipd)
-make flash
-make uart                      # stream the serial console
-make demo                      # run local CoAP server + web map + sim
-./smoke.sh                     # check both flows: make build + make demo
-make setup-webtest             # dev only: playwright + headless Chromium
-make webtest                   # execute the web UI headlessly; fail on any JS error
+make setup-host                # server deps
+make demo                      # sim device -> local CoAP server -> web map on :8080
+make setup-webtest && make webtest   # drive the UI headlessly, fail on any JS error
+./smoke.sh                     # build + demo end-to-end, incl. the A-GNSS exchange
 ```
 
-`setup.sh` installs the bootstrap apt packages, creates `nrf9151-tracker-ws/`, sets up a
-venv, runs `west init -m <this repo>`, then `make setup-zephyr` (system build deps +
-west update + minimal Zephyr SDK). The workspace is created **under the current
-directory** — override with `WS=~/my-path bash <(curl ...)`. Idempotent.
+The `native_sim` build swaps one file (a modem mock) for the real modem — the
+firmware under test is otherwise the shipping firmware.
 
-**Supported host: Ubuntu 24.04 LTS (Python 3.12).** The NCS modules pin exact
-Python package versions (nanopb pins `grpcio-tools==1.68.0`, nrf pins `hidapi`)
-that ship prebuilt wheels only up to Python 3.13 — on a newer Python (e.g. 3.14
-on Ubuntu 26.04) pip falls back to building them from source and `make
-setup-zephyr` dies mid-pip. Stick to an LTS release.
+## Hardware
+
+Requires: an [nRF9151-DK](https://www.nordicsemi.com/Products/Development-hardware/nRF9151-DK),
+any LTE-M/NB-IoT SIM, Ubuntu 24.04 (WSL2 fine — Python 3.13+ breaks NCS module
+pins), and a host with a public UDP port for the server.
+
+```sh
+cp env.template .env           # server host/port, SIM APN — see Configuration
+make setup-tools               # nrfutil, usbip, tio
+make build                     # APP=tracker BOARD=nrf9151dk/nrf9151/ns
+make windows-usb-passthrough   # WSL only: attach the J-Link (usbipd)
+make flash
+make uart
+```
 
 ## Configuration (`.env`)
 
-Host-specific values are **not** committed. Copy the template and edit:
-
-```sh
-cp env.template .env
-```
+Host-specific values are never committed. `cp env.template .env`, then:
 
 | Variable | Used by | Purpose |
 |---|---|---|
-| `TRACKER_SERVER_HOST` | `make build APP=tracker` | CoAP server the physical device sends to over LTE (`coap://HOST:PORT/obs`, UDP) — set to your server's hostname/IP. |
-| `TRACKER_SERVER_PORT` | `make build APP=tracker` | CoAP UDP port (default `5683`). |
-| `CADDY_DOMAIN` | `make serve` | Domain for auto-HTTPS; empty serves plain HTTP by IP. |
+| `TRACKER_SERVER_HOST/PORT` | `make build` | CoAP server the device sends to (`coap://HOST:PORT/obs`, UDP) |
+| `TRACKER_APN` | `make build` | SIM-provider APN; empty = the SIM's default |
+| `CADDY_DOMAIN` | `make serve` | domain for auto-HTTPS; empty = plain HTTP by IP |
+| `CADDY_USERNAME/PASSWORD` | `make serve` | web-UI basicauth |
+| `OPENCELLID_TOKEN` | `make update-cells` | tower DB for locating cell-only fixes |
 
-Precedence is **CLI > `.env` > built-in default**, e.g. `make build APP=tracker
-TRACKER_SERVER_HOST=my-server.example.com` overrides `.env` for one build. `.env` is
-git-ignored; `env.template` is the committed reference.
+Precedence: CLI > `.env` > default (`make build TRACKER_SERVER_HOST=x` wins).
 
-## USB passthrough (one-time)
+## How it works
 
-`make windows-usb-passthrough` runs `scripts/windows/passthrough.ps1`, which uses
-`usbipd` to `bind` + `attach` the SEGGER J-Link (VID 1366) into WSL. The first `bind`
-needs an **admin** PowerShell on Windows; if usbipd isn't installed, run once:
+**GNSS/LTE arbitration.** One radio, two tenants. An explicit FSM decides who
+owns it: 1 Hz continuous GNSS while moving, modem-native periodic fixes while
+parked, LTE deactivated outright when idle-mode paging chops GNSS windows.
+[`docs/loc-fsm-decision-table.md`](docs/loc-fsm-decision-table.md) is the
+NORMATIVE description — code, table, and `make fsmtest` change together, and
+every threshold in it traces to a measured incident.
 
-```powershell
-winget install usbipd
-```
+**Assisted GNSS.** The server pulls the free BKG broadcast-ephemeris file,
+does all ICD-200 scaling server-side, and answers the device's CoAP request
+with ~1 KB of ephemerides elevation-filtered at its last known position.
 
-After attaching, the DK appears in WSL as `/dev/ttyACM0` (console) and `/dev/ttyACM1`.
-Confirm with `nrfutil device list` — it should report `Product J-Link`, `Board version PCA10171`.
+**Wire protocol.** Protobuf in non-confirmable CoAP POSTs over UDP. Schema in
+one place (`proto/tracker.proto` + nanopb options); both codecs are generated
+(`make proto`), so ends can't drift. GPS data travels as track segments — one
+absolute anchor plus packed zigzag delta arrays, per-point time implicit —
+so a moving point costs ~6 B instead of ~33 B. Speed is per-point GNSS
+Doppler, never derived (position-delta speed carries ~8 km/h jitter at 1 Hz).
+Segments cap at 50 points pre-encode to stay under the ~512 B cellular-safe
+MTU; a batch is several datagrams, `RAI_ONGOING` on intermediates and
+`RAI_LAST` on the final one so the modem drops the radio connection
+immediately instead of waiting out the network's inactivity timer.
 
-**If `bind` succeeds but `attach` fails** with `The VBoxUsbMon driver is not correctly
-installed`, usbipd's kernel driver never registered — usually because an unofficial CI
-build got installed instead of a tagged release. Check with `sc.exe query VBoxUsbMon`;
-if the service is absent, reinstall from the release:
+**Uplink.** Pull model: sources (cell fixes, GPS segments, device logs)
+register with priorities; the drain loop fills datagrams through
+transactional encode/commit/rollback cursors — a failed send loses nothing,
+and the ring buffers ~34 min of 1 Hz offline. Device logs (INF and up) ship
+over the same path; WRN+ triggers an urgent flush. Every datagram lands in a
+`usage` ledger, and the same cost model runs in the browser as the settings
+estimator.
 
-```powershell
-winget uninstall dorssel.usbipd-win
-winget install --id dorssel.usbipd-win -e
-```
+**Data budget.** ~1 KB/min riding, a few hundred B/h parked. Carrier-billed
+bytes run ≈ 2× the app-layer arithmetic (per-session rounding — measured, so
+budget with the factor). The ingest is anonymous and unauthenticated; DTLS-PSK
+via the modem's offloaded sockets is the planned upgrade.
 
-## Make targets
+## Verification
 
-| Target | What it does |
-|---|---|
-| `make setup-zephyr` | venv + `west update` + minimal Zephyr SDK (arm only) |
-| `make setup-tools` | install host tools: `nrfutil`, `usbip`, `tio` |
-| `make windows-usb-passthrough` | bind + attach the J-Link into WSL via usbipd |
-| `make build` | build `APP` for `BOARD` |
-| `make flash` | program the board (`west flash --runner nrfutil`) |
-| `make recover` | unlock a readback-protected chip (some /ns builds lock it) |
-| `make uart` | stream the serial console with `tio` |
-| `make gdb` | `west debugserver` + `arm-zephyr-eabi-gdb` |
-| `make clean` | remove the build dir for `APP` |
-
-## Variables
-
-| Var | Default | Notes |
+| Tier | Command | Contract |
 |---|---|---|
-| `APP` | `tracker` | app under `apps/` (`tracker`, `hello`, `gnss`) |
-| `BOARD` | `nrf9151dk/nrf9151/ns` | non-secure; needed for modem/GNSS. `nrf9151dk/nrf9151` is the secure target (`hello` only) |
-| `PORT` | `/dev/ttyACM0` | serial port for `make uart` |
-| `BAUD` | `115200` | serial baud |
-| `RUNNER` | `nrfutil` | west flash/debug runner (`nrfutil`\|`nrfjprog`\|`openocd`) |
+| FSM unit | `make fsmtest` | 52 ztest cases pin the decision table |
+| Server | `make servertest` | pytest against a committed real broadcast-ephemeris file |
+| Web UI | `make webtest` | Playwright, desktop 1400×900 + phone 360×740, structural asserts |
+| End-to-end | `./smoke.sh` | build + sim → server → web, incl. A-GNSS exchange |
 
-Example:
-
-```sh
-make build flash APP=gnss BOARD=nrf9151dk/nrf9151/ns
-```
-
-## Serving the web map publicly
-
-`make serve` runs the full stack behind [Caddy](https://caddyserver.com/) as a
-reverse proxy. The FastAPI app binds `127.0.0.1` only; Caddy (a systemd service)
-is the sole public face. First run installs Caddy and opens the firewall
-(80/443 TCP + 5683 UDP) automatically.
+## Deployment
 
 ```sh
-make serve                      # public HTTP by IP (works before DNS is set up)
-make serve CADDY_DOMAIN=tracker.example.com # public HTTPS: Caddy gets a Let's Encrypt cert
+make setup-host                          # python deps only
+make serve                               # public HTTP by IP
+make serve CADDY_DOMAIN=tracker.example.com  # auto-HTTPS via Let's Encrypt
 ```
 
-- **HTTP by IP** (default, `CADDY_DOMAIN` unset): reach the map at
-  `http://<public-ip>/`. Use this while DNS is still propagating.
-- **HTTPS by domain**: set `CADDY_DOMAIN` once the domain's A record points at
-  this host. Caddy fetches + auto-renews the cert; no manual certificate steps.
+The API binds `127.0.0.1`; Caddy (systemd, survives Ctrl-C) is the only public
+face, with bcrypt basicauth from `.env`. First run opens the firewall
+(80/443 TCP, 5683 UDP) — cloud security lists must allow the same.
 
-Caddy runs as a persistent service, so HTTPS stays up across `Ctrl-C` and reboots
-(`Ctrl-C` on `make serve` only stops the app + CoAP ingest). Requirements:
-the domain must resolve to this host, and OCI/cloud security lists must allow
-**80** (HTTP + ACME), **443** (HTTPS), and **UDP 5683** (CoAP for real devices).
+## Status
 
-## Wire protocol
+`v0.1.0-alpha` — first coherent end-to-end state; the tag annotation is the
+spec sheet. Open: DTLS-PSK for the ingest, registration-loss vs GNSS (F-5),
+indoor churn (F-6), wake-fix corroboration, quiet-while-parked, LTE-M carrier
+scan, NTN.
 
-Reports go as **protobuf in non-confirmable CoAP POSTs over UDP**
-(`coap://server:5683/obs`). The schema lives in one place —
-`proto/tracker.proto` (+ `tracker.options` for nanopb) — and both sides consume
-generated code from it: the firmware encodes with
-[nanopb](https://github.com/nanopb/nanopb) (a west module of this workspace),
-the server decodes with the committed `server/tracker_pb2.py`, so the two cannot
-drift apart silently.
+## Reference
 
-```sh
-vi proto/tracker.proto         # edit the schema (never the generated code)
-make proto                     # regen apps/tracker/src/proto/ + server/tracker_pb2.py
-```
+**Make targets:** `setup-zephyr` (venv + west + SDK), `setup-tools`,
+`windows-usb-passthrough`, `build`, `flash`, `recover`, `uart`, `gdb`,
+`clean`, `sim`, `proto`, `fsmtest`, `demo`, `serve`, `webtest`,
+`servertest`, `update-cells`. Variables: `APP` (`tracker`|`gnss`|`hello`),
+`BOARD` (`nrf9151dk/nrf9151/ns` — non-secure, required for modem/GNSS),
+`PORT`, `BAUD`, `RUNNER`.
 
-The unit of GPS data is a **track segment**: one absolute anchor fix plus packed
-delta arrays (`dlat`/`dlon`/`spd_dms` as zigzag varints) at a fixed cadence, so
-per-point time is implicit (anchor age + i×dt) and a moving point costs ~5–7 B
-instead of ~33 B. Speed is the GNSS Doppler measurement, sent per point — NOT
-derived from position deltas on the server, which carries ~8 km/h of jitter at
-1 Hz and is unusable at higher rates. A stationary run is zero-deltas (~3 B per
-point). The firmware caps a segment at 50 points *before* encoding (packed
-arrays are written field-by-field, so a mid-encode cap would desync them) and
-that keeps every datagram under the ~512 B safe cellular MTU; longer flushes
-just emit several datagrams. Adding a per-point field later (e.g. lean angle) is
-a new packed array — old decoders skip it, no version bump.
-
-### Data budget (against a 10 MB/month IoT plan)
-
-Measured wire sizes (payload + 47 B UDP/IP + CoAP per datagram, IPv4):
-
-| Scenario | Per datagram | 30 days |
-|---|---|---|
-| 1 Hz driving, flushed every 60 s | ~395 B (60 pts, ~6.6 B/pt) | — |
-| Cell keepalive | ~86 B | — |
-| Mixed month: 2 h/day 1 Hz driving + keepalives /15 min | — | **~1.7 MB** |
-| 10 Hz race-telemetry burst | ~4.8 B/pt | ~150 KB per hour |
-
-The levers, in measured order of impact: flush interval (2.5×), delta-vs-full
-representation (4×), per-datagram overhead, and only then the encoding container
-(<5% between protobuf / CBOR / hand-packed — protobuf was chosen for hot-path
-extensibility, not bytes). Carrier accounting may round per-session; treat these
-as floors. Reports carry the RFC 7967 No-Response option, and the firmware sets
-`SO_RAI` (`RAI_LAST`) before each send — with nothing coming back, the modem
-releases the radio connection immediately after the datagram, which is also what
-keeps GNSS acquisition windows intact. Note the ingest is **anonymous and
-unauthenticated** (as the MQTT broker was); DTLS-PSK via the modem's offloaded
-sockets is the upgrade path when that starts to matter.
-
-## LEDs (state at a glance)
+**LEDs:**
 
 | LED | Meaning | Off | Blink | Solid |
 |---|---|---|---|---|
-| 1 | LTE | radio off on purpose (exclusive) | attaching | registered |
-| 2 | GPS | GNSS not running | acquiring | **fix current** |
-| 3 | TX | — | — | ~½ s pulse per successful send |
-| 4 | help | normal | CELL_LOOP (retrying on sight) | GNSS_EXCLUSIVE (radio dark) |
+| 1 | LTE | radio off on purpose | attaching | registered |
+| 2 | GPS | GNSS not running | acquiring | fix current |
+| 3 | TX | — | — | pulse per successful send |
+| 4 | help | normal | CELL_LOOP (retry on sight) | GNSS_EXCLUSIVE (radio dark) |
 
-Glance rules: **LED2 solid = safe to start moving** (hot re-fix from here is
-seconds). LED4 lit = GPS is struggling, and explains a dark LED1. LED3
-flickering every ~50 s while moving = track segments are flowing.
+LED2 solid = safe to start moving; LED4 lit explains a dark LED1.
 
-## Apps
-
-- `apps/hello` — secure `printk` loop. Verified working.
-- `apps/gnss` — GNSS sample; needs the `/ns` board target.
-
-## Layout
+**Layout:**
 
 ```
 nrf9151-tracker-ws/          workspace root (created by setup.sh)
-  .venv/                   python venv holding west
-  .west/                   west workspace marker
-  zephyr/  nrf/  ...       SDK trees, cloned by `west update`
-  nrf9151-tracker/         this repo (== manifest.self.path in west.yml)
-    west.yml            self-manifest; imports sdk-nrf v3.4.0 (trimmed allowlist)
-    Makefile            shared config + cross-cutting entry points (demo, setup-venv)
-    setup.sh            one-line bootstrap (curl | bash)
-    smoke.sh            smoke test: make build + make demo end-to-end
-    env.template        copy to .env for host-specific config (server, domain)
-    proto/
-      tracker.proto     wire schema — single source for fw + server codecs
-      tracker.options   nanopb field options (callbacks, not fixed arrays)
-    mk/
-      fw.mk             firmware/Zephyr targets (build, flash, debug, sim, proto)
-      server.mk         server/host services (CoAP ingest, web, Caddy)
-    apps/<name>/        CMakeLists.txt, prj.conf, src/main.c
-    server/             Python CoAP ingest (aiocoap + protobuf), FastAPI web map
-    scripts/
-      setup-system.sh   installs the Zephyr apt build deps
-      setup-tools.sh    installs nrfutil / usbip / tio
-      windows/
-        passthrough.ps1 usbipd bind + attach (the only Windows-side script)
-        uart.ps1        PowerShell serial fallback (not needed in the native flow)
+  zephyr/  nrf/  ...         SDK trees (west update, trimmed allowlist)
+  nrf9151-tracker/           this repo == the west manifest
+    west.yml                 imports sdk-nrf v3.4.0 (name-allowlist)
+    proto/tracker.proto      wire schema — single source for both codecs
+    mk/fw.mk  mk/server.mk   firmware / server make targets
+    apps/tracker/            the firmware (gnss/, hello/ = bring-up apps)
+    server/                  aiocoap ingest + FastAPI + static webapp
+    docs/loc-fsm-decision-table.md   normative FSM spec
+    tests/fsm/               ztest suite for loc_fsm + motion
+    scripts/                 setup, webtest, seeding, usbipd passthrough
 ```
