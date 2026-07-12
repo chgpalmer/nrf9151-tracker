@@ -118,8 +118,34 @@ def main():
                 page.click(tid)
                 page.wait_for_timeout(100)
 
-        # Cross-view selection: clicking the speed chart must open the fix
-        # drawer AND highlight the matching table row.
+        # Two-column layout at desktop width: side panel sits to the RIGHT
+        # of the map, and the journeys table has selectable trip rows.
+        disp = page.evaluate(
+            "getComputedStyle(document.getElementById('page-map')).display")
+        if disp != "grid":
+            problems.append(f"desktop map page display is {disp}, want grid")
+        n_rows = page.locator("#journeys-table tbody tr").count()
+        if n_rows == 0:
+            problems.append("journeys table has no rows")
+        else:
+            page.locator("#journeys-table tbody tr").first.click()
+            page.wait_for_timeout(300)
+            if page.locator("#journeys-table tbody tr.active").count() == 0:
+                problems.append("journeys row click did not mark it active")
+
+        # Chart tabs: ACCURACY tab must reveal the accuracy canvas.
+        page.click('#chart-tabs .chart-tab[data-chart="acc"]')
+        page.wait_for_timeout(200)
+        acc_visible = page.evaluate(
+            "document.querySelector('.chart-wrap[data-chart=\\'acc\\']')"
+            ".classList.contains('active')")
+        if not acc_visible:
+            problems.append("accuracy chart tab did not activate")
+        page.click('#chart-tabs .chart-tab[data-chart="speed"]')
+        page.wait_for_timeout(200)
+
+        # Cross-view selection: clicking the speed chart must activate the
+        # DETAIL tab (drawer open) AND highlight the matching table row.
         box = page.locator("#chart-speed").bounding_box()
         if box:
             page.mouse.click(box["x"] + box["width"] * 0.5,
@@ -127,8 +153,14 @@ def main():
             page.wait_for_timeout(400)
             if page.locator("#fix-drawer.open").count() == 0:
                 problems.append("chart click did not open the fix drawer")
+            if page.locator('#side-tabs .side-tab[data-tab="detail"].active').count() == 0:
+                problems.append("chart click did not activate the DETAIL tab")
             if page.locator(".ftable-table tr.sel").count() == 0:
                 problems.append("chart click did not highlight a table row")
+            page.click("#drawer-close")
+            page.wait_for_timeout(200)
+            if page.locator('#side-tabs .side-tab[data-tab="detail"].active').count():
+                problems.append("closing detail did not return to the previous tab")
 
         # Day steppers must navigate without errors.
         for tid in ("#date-prev", "#date-next"):
@@ -219,6 +251,37 @@ def main():
 
         if args.screenshot:
             page.screenshot(path=args.screenshot)
+
+        # ── Mobile pass (390x844): vertical stack; an open fix detail
+        # takes the whole viewport (a squeezed side sliver is useless on
+        # a phone) and ✕ closes it.
+        mob = browser.new_page(viewport={"width": 390, "height": 844})
+        mob.on("pageerror", lambda e: console_errors.append(f"mobile pageerror: {e}"))
+        mob.goto(args.url, wait_until="networkidle", timeout=30000)
+        mob.wait_for_timeout(800)
+        mdisp = mob.evaluate(
+            "getComputedStyle(document.getElementById('page-map')).display")
+        if mdisp == "grid":
+            problems.append("mobile map page is grid — stack expected")
+        mob.click('#side-tabs .side-tab[data-tab="locations"]')
+        mob.wait_for_timeout(200)
+        rows = mob.locator("#fix-table tbody tr")
+        if rows.count() == 0:
+            problems.append("mobile locations table empty")
+        else:
+            rows.first.click()
+            mob.wait_for_timeout(400)
+            dw = mob.evaluate(
+                "document.getElementById('fix-drawer').getBoundingClientRect().width")
+            mvw = mob.evaluate("window.innerWidth")
+            if abs(dw - mvw) > 4:
+                problems.append(
+                    f"mobile fix detail width {dw} != viewport {mvw}")
+            mob.click("#drawer-close")
+            mob.wait_for_timeout(200)
+            if mob.locator("#fix-drawer.open").count():
+                problems.append("mobile ✕ did not close the fix detail")
+        mob.close()
 
         browser.close()
 

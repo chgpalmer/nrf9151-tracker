@@ -86,8 +86,12 @@
     <!-- Main Content -->
     <main class="main-content" id="main-content">
 
-      <!-- ── MAP PAGE (live + history, unified) ── -->
+      <!-- ── MAP PAGE (live + history, unified) ──
+           Two-column at >=1100px: .map-zone (controls/map/timeline/chart)
+           left, .side-panel (JOURNEYS | LOCATIONS | DETAIL tabs) right.
+           Below 1100px everything stacks vertically. -->
       <section class="page" id="page-map" data-page="map">
+        <div class="map-zone">
         <div class="page-controls">
           <div class="control-group">
             <label class="control-label" for="map-date">DATE</label>
@@ -97,7 +101,8 @@
           </div>
           <div class="control-group">
             <span class="control-label">SHOW</span>
-            <!-- populated by JS: LIVE (today only), DAY, then one chip per trip -->
+            <!-- populated by JS: LIVE (today only) + DAY; trips live in the
+                 Journeys side-panel table -->
             <div class="chip-group trip-chips" id="trip-chips"></div>
             <span class="hist-range-label" id="range-label">—</span>
           </div>
@@ -149,20 +154,48 @@
           </div>
         </div>
 
-        <div class="chart-strip" id="chart-strip">
-          <div class="chart-wrap">
-            <div class="chart-header">SPEED (km/h)</div>
+        <!-- One chart visible at a time: tabs demote the accuracy plot
+             from permanent tenant to one tap away. -->
+        <div class="chart-panel" id="chart-strip">
+          <div class="chart-tabs" id="chart-tabs">
+            <button class="chart-tab active" data-chart="speed" type="button">SPEED (km/h)</button>
+            <button class="chart-tab" data-chart="acc" type="button">ACCURACY (m)</button>
+          </div>
+          <div class="chart-wrap active" data-chart="speed">
             <canvas id="chart-speed" height="70"></canvas>
           </div>
-          <div class="chart-wrap">
-            <div class="chart-header">ACCURACY (m)</div>
+          <div class="chart-wrap" data-chart="acc">
             <canvas id="chart-acc" height="70"></canvas>
           </div>
         </div>
 
         <div class="hist-summary" id="summary"></div>
+        </div><!-- .map-zone -->
 
-        <div id="fix-table"></div>
+        <aside class="side-panel">
+          <div class="side-tabs" id="side-tabs">
+            <button class="side-tab active" data-tab="journeys" type="button">JOURNEYS</button>
+            <button class="side-tab" data-tab="locations" type="button">LOCATIONS</button>
+            <button class="side-tab" data-tab="detail" type="button">DETAIL</button>
+          </div>
+          <div class="side-tab-panel active" data-tab="journeys">
+            <div id="journeys-table"></div>
+          </div>
+          <div class="side-tab-panel" data-tab="locations">
+            <div id="fix-table"></div>
+          </div>
+          <div class="side-tab-panel" data-tab="detail">
+            <aside class="fix-drawer" id="fix-drawer" aria-hidden="true">
+              <div class="drawer-header">
+                <span class="drawer-title">Fix detail</span>
+                <button class="drawer-close" id="drawer-close" aria-label="Close">✕</button>
+              </div>
+              <div class="drawer-body" id="drawer-body">
+                <!-- populated by JS -->
+              </div>
+            </aside>
+          </div>
+        </aside>
       </section>
 
       <!-- ── LOGS PAGE (device log lines shipped over the uplink) ── -->
@@ -317,17 +350,6 @@
       </section>
 
     </main>
-
-    <!-- Fix Detail Drawer -->
-    <aside class="fix-drawer" id="fix-drawer" aria-hidden="true">
-      <div class="drawer-header">
-        <span class="drawer-title">Fix detail</span>
-        <button class="drawer-close" id="drawer-close" aria-label="Close">✕</button>
-      </div>
-      <div class="drawer-body" id="drawer-body">
-        <!-- populated by JS -->
-      </div>
-    </aside>
 
   </div><!-- .app-shell -->
 

@@ -34,7 +34,6 @@
   /* Sizes */
   --rail-h:     48px;
   --sidebar-w:  180px;
-  --drawer-w:   280px;
   --radius:     4px;
   --radius-lg:  8px;
 
@@ -380,6 +379,101 @@ button { cursor: pointer; }
 
 .page.hidden { display: none; }
 
+/* ── Map page: map-zone + side-panel ──
+ * Mobile/portrait: vertical stack, side panel capped so the map keeps
+ * most of the screen. Landscape/desktop: two columns, tables get the
+ * full height they always needed. */
+.map-zone {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+
+.side-panel {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  max-height: 42dvh;
+  min-height: 0;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+}
+
+@media (min-width: 1100px) {
+  #page-map:not(.hidden) {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 380px;
+  }
+  .side-panel {
+    max-height: none;
+    border-top: none;
+    border-left: 1px solid var(--border);
+  }
+}
+
+.side-tabs {
+  display: flex;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.side-tab {
+  flex: 1;
+  background: none;
+  border: none;
+  padding: 9px 0 8px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  color: var(--text-dim);
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+}
+
+.side-tab:hover { color: var(--text-sec); }
+.side-tab.active {
+  color: var(--text);
+  border-bottom-color: var(--signal, #00E5A0);
+}
+
+.side-tab-panel {
+  display: none;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.side-tab-panel.active { display: flex; }
+
+/* Tables inside a tab panel fill it and scroll internally. */
+.side-tab-panel .ftable {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  border-top: none;
+}
+.side-tab-panel .ftable-scroll { max-height: none; flex: 1; }
+
+.jtable {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.jtable-scroll { flex: 1; min-height: 0; overflow-y: auto; }
+.jtable-table tbody tr.active td { color: var(--text); background: rgba(0, 229, 160, 0.08); }
+.jtable-empty {
+  padding: 16px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
 /* ── Page controls bar ── */
 .page-controls {
   display: flex;
@@ -553,33 +647,53 @@ body.map-has-fullscreen .top-rail { display: none; }
 .map-fs-btn:hover { border-color: var(--border-hi, #3d4a66); }
 
 /* ── Chart strip ── */
-.chart-strip {
+/* One chart visible at a time (tabs) — half the height the old
+ * side-by-side strip claimed, and the accuracy plot stops being a
+ * permanent tenant. */
+.chart-panel {
   display: flex;
-  gap: 0;
+  flex-direction: column;
   flex-shrink: 0;
   border-top: 1px solid var(--border);
   height: 110px;
   background: var(--panel);
 }
 
-.chart-wrap {
-  flex: 1;
-  min-width: 0;
-  padding: 6px 12px 8px;
-  position: relative;
-  border-right: 1px solid var(--border);
+.chart-tabs {
+  display: flex;
+  gap: 12px;
+  padding: 4px 12px 0;
+  flex-shrink: 0;
 }
 
-.chart-wrap:last-child { border-right: none; }
-
-.chart-header {
+.chart-tab {
+  background: none;
+  border: none;
+  padding: 2px 0 3px;
   font-family: var(--font-mono);
   font-size: 8px;
   font-weight: 600;
   letter-spacing: 0.15em;
   color: var(--text-dim);
-  margin-bottom: 4px;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
 }
+
+.chart-tab.active {
+  color: var(--text-sec);
+  border-bottom-color: var(--signal, #00E5A0);
+}
+
+.chart-wrap {
+  display: none;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  padding: 4px 12px 8px;
+  position: relative;
+}
+
+.chart-wrap.active { display: block; }
 
 /* ── History summary ── */
 .hist-summary {
@@ -602,19 +716,28 @@ body.map-has-fullscreen .top-rail { display: none; }
 /* ════════════════════════════════
    FIX DETAIL DRAWER
    ════════════════════════════════ */
+/* Fix detail lives in the side panel's DETAIL tab: a plain column that
+ * fills the panel. On small screens an OPEN detail takes the whole
+ * viewport instead — a squeezed side sliver was useless on a phone. */
 .fix-drawer {
-  width: 0;
-  overflow: hidden;
-  background: var(--panel);
-  border-left: 1px solid var(--border);
-  transition: width 0.25s var(--ease);
   display: flex;
   flex-direction: column;
-  flex-shrink: 0;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--panel);
 }
 
-.fix-drawer.open {
-  width: var(--drawer-w);
+@media (max-width: 1099px) {
+  .fix-drawer.open {
+    position: fixed;
+    inset: 0;
+    height: 100dvh;
+    z-index: 2100;
+  }
+  /* The overlay owns the screen — the rail would paint above it (sibling
+   * stacking context beats any child z-index) and bury the ✕. */
+  body.detail-open .top-rail { display: none; }
 }
 
 .drawer-header {
@@ -1048,7 +1171,6 @@ body.map-has-fullscreen .top-rail { display: none; }
 @media (max-width: 700px) {
   :root {
     --sidebar-w: 48px;
-    --drawer-w:  260px;
   }
   .nav-label, .nav-badge, .sidebar-device-info { display: none; }
   .nav-item { justify-content: center; padding: 12px 0; }

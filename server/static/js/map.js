@@ -20,8 +20,9 @@
 import { fetchPositions }  from '/js/api.js';
 import { createMapView }   from '/js/mapview.js';
 import { createFixTable }  from '/js/fixtable.js';
-import { initCharts, updateCharts, setActiveFix } from '/js/charts.js';
-import { open as openDrawer } from '/js/drawer.js';
+import { createJourneysTable } from '/js/journeys.js';
+import { initCharts, updateCharts, setActiveFix, resizeCharts } from '/js/charts.js';
+import { open as openDrawer, onClose as onDrawerClose } from '/js/drawer.js';
 import { currentDevice, setStatus } from '/js/devices.js';
 import { fmtAcc, mpsToKph, deviceStatus } from '/js/format.js';
 import { segmentTrips, haversineM, fmtDistM } from '/js/trips.js';
@@ -33,6 +34,7 @@ const DAY_LIMIT  = 50000; // API rows per day-load; a full 1 Hz day can exceed t
 
 let mapView  = null;
 let fixTable = null;
+let journeysTable = null;
 let isInitialized = false;
 let timer    = null;
 
@@ -164,6 +166,35 @@ function keyNudge(e, which) {
 startH.addEventListener('keydown', e => keyNudge(e, 'start'));
 endH.addEventListener('keydown',   e => keyNudge(e, 'end'));
 
+// ── side-panel tabs (JOURNEYS | LOCATIONS | DETAIL) ─────────
+// One panel active at a time. Selecting a fix anywhere jumps to DETAIL;
+// closing the detail returns to wherever you were.
+let lastTab = 'journeys';
+
+function setTab(name) {
+  if (name !== 'detail') lastTab = name;
+  document.querySelectorAll('#side-tabs .side-tab').forEach(b =>
+    b.classList.toggle('active', b.dataset.tab === name));
+  document.querySelectorAll('.side-tab-panel').forEach(p =>
+    p.classList.toggle('active', p.dataset.tab === name));
+}
+
+document.querySelectorAll('#side-tabs .side-tab').forEach(b =>
+  b.addEventListener('click', () => setTab(b.dataset.tab)));
+
+onDrawerClose(() => setTab(lastTab));
+
+// Chart tabs: one canvas visible at a time; Chart.js needs a resize poke
+// when a hidden canvas becomes visible.
+document.querySelectorAll('#chart-tabs .chart-tab').forEach(b =>
+  b.addEventListener('click', () => {
+    document.querySelectorAll('#chart-tabs .chart-tab').forEach(t =>
+      t.classList.toggle('active', t === b));
+    document.querySelectorAll('.chart-wrap').forEach(w =>
+      w.classList.toggle('active', w.dataset.chart === b.dataset.chart));
+    resizeCharts();
+  }));
+
 // ── lifecycle ───────────────────────────────────────────────
 // Cross-view selection: whichever surface a fix is picked on (map marker,
 // chart click, table row), all four reflect it — map ring + pan, detail
@@ -171,6 +202,7 @@ endH.addEventListener('keydown',   e => keyNudge(e, 'end'));
 function selectPoint(fix) {
   mapView.focusFix(fix);
   openDrawer(fix);
+  setTab('detail');
   setActiveFix(fix);
   fixTable.highlight(fix);
 }
@@ -184,6 +216,14 @@ export function init() {
   fixTable = createFixTable('fix-table', {
     onRowClick: selectPoint,
     onRowHover: fix => mapView.hoverFix(fix),
+    startOpen: true, // it lives in a side-panel tab now; the tab is the toggle
+  });
+  journeysTable = createJourneysTable('journeys-table', {
+    onSelect: i => {
+      sel = { mode: 'trip', i };
+      renderChips();
+      applyView(true);
+    },
   });
   initCharts({
     onHover: fix => mapView.hoverFix(fix),
@@ -335,13 +375,10 @@ function chipActive(c) {
 }
 
 function renderChips() {
+  // LIVE + DAY only — trips live in the Journeys side-panel table.
   const chips = [];
   if (isToday) chips.push({ mode: 'live', label: '● LIVE' });
   chips.push({ mode: 'day', label: 'DAY' });
-  trips.forEach((t, i) => chips.push({
-    mode: 'trip', i,
-    label: `T${i + 1} ${hhmm(t.start_ts)} · ${fmtDistM(t.dist_m)}`,
-  }));
 
   chipsEl.innerHTML = '';
   for (const c of chips) {
@@ -351,13 +388,15 @@ function renderChips() {
                   (chipActive(c) ? ' active' : '');
     b.textContent = c.label;
     b.addEventListener('click', () => {
-      sel = c.mode === 'trip' ? { mode: 'trip', i: c.i } : { mode: c.mode };
+      sel = { mode: c.mode };
       renderChips();
       applyView(true);
-      // Selecting a trip is "show me this trip" — that includes its fixes.
-      if (c.mode === 'trip') fixTable.setOpen(true);
     });
     chipsEl.appendChild(b);
+  }
+
+  if (journeysTable) {
+    journeysTable.render(trips, sel.mode === 'trip' ? sel.i : null);
   }
 }
 
@@ -384,13 +423,13 @@ function renderTripBands() {
     const band = document.createElement('div');
     band.className = 'tl-trip-band';
     band.style.left  = ((t.start_ts - dayStart) / DAY * 100) + '%';
-    band.style.width = (Math.max(0.004, (t.end_ts - t.start_ts) / DAY) * 100) + '%';
+    // 0.01 min-width (~15 min of day) keeps a 5-minute journey clickable.
+    band.style.width = (Math.max(0.01, (t.end_ts - t.start_ts) / DAY) * 100) + '%';
     band.title = `T${i + 1}  ${hhmm(t.start_ts)}–${hhmm(t.end_ts)}  ${fmtDistM(t.dist_m)}`;
     band.addEventListener('click', () => {
       sel = { mode: 'trip', i };
       renderChips();
       applyView(true);
-      fixTable.setOpen(true);
     });
     tripsEl.appendChild(band);
   });

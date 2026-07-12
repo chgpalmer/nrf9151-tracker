@@ -166,3 +166,10 @@ export function updateCharts(fixes) {
   speedChart.update('none');
   accChart.update('none');
 }
+
+/** Poke after un-hiding a chart canvas (tab switch): a canvas that was
+ * display:none has zero size and Chart.js won't repaint it on its own. */
+export function resizeCharts() {
+  if (speedChart) speedChart.resize();
+  if (accChart)   accChart.resize();
+}
