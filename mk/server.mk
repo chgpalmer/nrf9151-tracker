@@ -4,7 +4,7 @@
 # Override on the command line:
 #   COAP_PORT=5683            CoAP ingest UDP port
 #   HTTP_PORT=8080            web map port
-#   CADDY_DOMAIN=noil.uk      empty -> HTTP on :80 by IP; set -> HTTPS for domain
+#   CADDY_DOMAIN=tracker.example.com      empty -> HTTP on :80 by IP; set -> HTTPS for domain
 #
 # Public access goes through Caddy (systemd service) as a reverse proxy to the
 # app on 127.0.0.1. With CADDY_DOMAIN unset, Caddy serves plain HTTP on :80 so
@@ -148,7 +148,7 @@ server:
 # Caddy runs as a persistent systemd service (stays up across Ctrl-C/disconnect);
 # Ctrl-C here stops the app + ingest via the EXIT trap.
 #   make serve                 public HTTP by IP  (default, works without DNS)
-#   make serve CADDY_DOMAIN=noil.uk   public HTTPS once DNS points here
+#   make serve CADDY_DOMAIN=tracker.example.com   public HTTPS once DNS points here
 serve: open-ports caddy
 > @trap '$(MAKE) --no-print-directory stop' EXIT; \
 >  $(COAP) & echo "coap ingest started (pid $$!)"; \

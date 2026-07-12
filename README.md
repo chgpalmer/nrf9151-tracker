@@ -54,7 +54,7 @@ cp env.template .env
 | `CADDY_DOMAIN` | `make serve` | Domain for auto-HTTPS; empty serves plain HTTP by IP. |
 
 Precedence is **CLI > `.env` > built-in default**, e.g. `make build APP=tracker
-TRACKER_SERVER_HOST=noil.uk` overrides `.env` for one build. `.env` is
+TRACKER_SERVER_HOST=my-server.example.com` overrides `.env` for one build. `.env` is
 git-ignored; `env.template` is the committed reference.
 
 ## USB passthrough (one-time)
@@ -119,7 +119,7 @@ is the sole public face. First run installs Caddy and opens the firewall
 
 ```sh
 make serve                      # public HTTP by IP (works before DNS is set up)
-make serve CADDY_DOMAIN=noil.uk # public HTTPS: Caddy gets a Let's Encrypt cert
+make serve CADDY_DOMAIN=tracker.example.com # public HTTPS: Caddy gets a Let's Encrypt cert
 ```
 
 - **HTTP by IP** (default, `CADDY_DOMAIN` unset): reach the map at

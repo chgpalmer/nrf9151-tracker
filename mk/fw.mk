@@ -31,6 +31,12 @@ SIM           := TRACKER_DEVICE_ID=$(SIM_DEVICE_ID) $(SIM_BUILD)/tracker/zephyr/
 ifeq ($(APP),tracker)
 BUILD_DEFINES := -DCONFIG_TRACKER_SERVER_HOST=\"$(TRACKER_SERVER_HOST)\" \
                  -DCONFIG_TRACKER_SERVER_PORT=$(TRACKER_SERVER_PORT)
+# SIM-provider APN. Empty = the SIM's own default; some providers need an
+# explicit one (set TRACKER_APN in .env). Deployment config, not code.
+ifneq ($(strip $(TRACKER_APN)),)
+BUILD_DEFINES += -DCONFIG_LTE_LC_PDN_DEFAULTS_OVERRIDE=y \
+                 -DCONFIG_LTE_LC_PDN_DEFAULT_APN=\"$(TRACKER_APN)\"
+endif
 endif
 
 .PHONY: setup setup-system setup-zephyr setup-tools windows-usb-passthrough \
