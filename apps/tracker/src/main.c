@@ -622,6 +622,23 @@ int main(void)
 	static struct nrf_modem_gnss_pvt_data_frame fix_pvt;
 	int64_t fix_pvt_ms = 0; /* when fix_pvt was captured, for the age field */
 
+	/* Wake-PVT forensics (phantom investigation, 2026-07-12): the
+	 * receiver marks the first PVT after a duty-cycle sleep
+	 * (SLEEP_BETWEEN_PVT) and frames from its self-scheduled ephemeris
+	 * downloads (SCHED_DOWNLOAD) — exactly the epochs implicated in the
+	 * 501 m time-true/position-stale point. Hold the newest one and log
+	 * it when the FSM leaves a parked state, so departure points arrive
+	 * pre-labeled: one INF line per departure, never per wake (a parked
+	 * night has ~720 wakes; the wire budget says no). */
+	static struct {
+		int64_t ms;
+		bool slept;
+		bool sched;
+		bool fix;
+		float acc;
+	} last_wake;
+	uint32_t wake_pvts = 0, wake_fixes = 0, sched_pvts = 0;
+
 	int64_t last_post_ms   = 0;
 	int64_t queued_fix_ms  = 0;
 	int64_t last_acq_log_ms = 0;
@@ -639,6 +656,21 @@ int main(void)
 		k_sem_take(&pvt_sem, K_SECONDS(2));
 
 		int64_t now = k_uptime_get();
+
+		if (pvt.flags & (NRF_MODEM_GNSS_PVT_FLAG_SLEEP_BETWEEN_PVT |
+				 NRF_MODEM_GNSS_PVT_FLAG_SCHED_DOWNLOAD)) {
+			last_wake.ms    = now;
+			last_wake.slept = pvt.flags &
+				NRF_MODEM_GNSS_PVT_FLAG_SLEEP_BETWEEN_PVT;
+			last_wake.sched = pvt.flags &
+				NRF_MODEM_GNSS_PVT_FLAG_SCHED_DOWNLOAD;
+			last_wake.fix   = pvt.flags &
+				NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID;
+			last_wake.acc   = pvt.accuracy;
+			wake_pvts++;
+			wake_fixes += last_wake.fix;
+			sched_pvts += last_wake.sched;
+		}
 
 		if (pvt.flags & NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID) {
 			/* Known cosmetic quirk, deliberately NOT special-cased:
@@ -793,6 +825,12 @@ int main(void)
 		if (now - last_status_ms >= STATUS_INTERVAL_MS) {
 			last_status_ms = now;
 			print_status(&pvt, &loc, now);
+			if (wake_pvts) {
+				/* UART-only prevalence stats (DBG never
+				 * ships): do ALL wakes carry the flag? */
+				LOG_DBG("wake: %u pvts %u fixes %u sched-dl",
+					wake_pvts, wake_fixes, sched_pvts);
+			}
 		}
 
 		/* SAMPLE at the FSM's cadence — free, no radio involved. GPS
@@ -832,6 +870,17 @@ int main(void)
 		 * the one policy input only this loop can see (a fresh fix or
 		 * boot cell report should reach the map now, not in 2 min). */
 		if (loc.state != prev_state) {
+			/* Departure forensics: label what the wake's PVT
+			 * claimed, once, before prev_state is overwritten. */
+			if ((prev_state == LOC_QUIESCENT ||
+			     prev_state == LOC_REST) && last_wake.ms != 0) {
+				LOG_INF("GNSS: wake PVT %ds ago: sleep=%d "
+					"sched-dl=%d fix=%d acc=%d",
+					(int)((now - last_wake.ms) / 1000),
+					last_wake.slept, last_wake.sched,
+					last_wake.fix, (int)last_wake.acc);
+				last_wake.ms = 0; /* log each wake once */
+			}
 			prev_state = loc.state;
 			uplink_request_flush(UPLINK_FLUSH_URGENT);
 		}
