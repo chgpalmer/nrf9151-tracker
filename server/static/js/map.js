@@ -52,8 +52,6 @@ const dateInput = document.getElementById('map-date');
 const chipsEl   = document.getElementById('trip-chips');
 const rangeEl   = document.getElementById('range-label');
 const summaryEl = document.getElementById('summary');
-const accToggle   = document.getElementById('show-accuracy');
-const arrowToggle = document.getElementById('show-arrows');
 const gpsChip     = document.getElementById('filter-gps');
 const cellChip    = document.getElementById('filter-cell');
 const pointsChip  = document.getElementById('show-points');
@@ -85,9 +83,6 @@ function stepDay(days) {
 }
 document.getElementById('date-prev').addEventListener('click', () => stepDay(-1));
 document.getElementById('date-next').addEventListener('click', () => stepDay(1));
-
-accToggle.addEventListener('change', () => mapView && mapView.setShowAccuracy(accToggle.checked));
-arrowToggle.addEventListener('change', () => mapView && mapView.setShowArrows(arrowToggle.checked));
 
 [gpsChip, cellChip].forEach(chip => {
   chip.addEventListener('click', () => {
@@ -356,8 +351,6 @@ function applyView(fit) {
   const filtered = win.length === 0 && dayFixes.length > 0 && !(gps && cell);
   mapView.render(win, {
     fitBounds: fit,
-    showAccuracy: accToggle.checked,
-    showArrows: arrowToggle.checked,
     showPoints: pointsChip.classList.contains('active'),
     liveDot: sel.mode === 'live',
     emptyMsg: filtered ? 'All fixes hidden by source filter' : undefined,

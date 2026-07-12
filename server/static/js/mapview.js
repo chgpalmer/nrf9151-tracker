@@ -1,15 +1,10 @@
 /**
  * mapview.js — Leaflet map logic for rendering tracks
  *
- * Accuracy-circle strategy:
- *   - No per-fix circles drawn by default.
- *   - Circles are opt-in via `showAccuracy` flag (controlled by a toggle).
- *   - Even when enabled, cell circles are capped to an opacity that makes
- *     stacking visible but not opaque; we use a very low individual opacity
- *     so the user can see the density gradient (many cell fixes → more amber
- *     glow) without an opaque blob occluding the map.
- *   - On hover/selected, the single-fix circle is shown at full clarity.
- *   - Fix detail (accuracy as a number) is always visible in the popup/drawer.
+ * Accuracy circles draw ONLY for the selected fix (full clarity, plus a
+ * pixel-scaled ring so it's findable at any zoom). The old draw-them-all
+ * toggle was removed: nobody ever changed the default, and the numbers
+ * live in the popup/drawer anyway.
  */
 
 import { fmtDateTime, fmtAge, mpsToKph, fmtAcc, fmtHdg, fmtAlt, fmtCoord } from '/js/format.js';
@@ -82,13 +77,10 @@ export function createMapView(containerId, onFixClick) {
   const trackLayer     = L.layerGroup().addTo(map);
   const markerLayer    = L.layerGroup().addTo(map);
   const arrowLayer     = L.layerGroup().addTo(map);
-  const accuracyLayer  = L.layerGroup().addTo(map);
   const selectedLayer  = L.layerGroup().addTo(map);
   const hoverLayer     = L.layerGroup().addTo(map);
 
   let currentFixes    = [];
-  let showAccuracy    = false;
-  let showArrows      = true;
   let showPoints      = false;
   let liveDot         = false;
   let selectedFixId   = null;
@@ -141,23 +133,6 @@ export function createMapView(containerId, onFixClick) {
       html: `<div style="transform:rotate(${headingDeg}deg);width:16px;height:16px;line-height:0">${svg}</div>`,
       iconSize:   [16, 16],
       iconAnchor: [8, 8],
-    });
-  }
-
-  /**
-   * Build a Leaflet circle for a fix's accuracy radius.
-   * Uses very low opacity for stacking; cell is even lower than GPS.
-   */
-  function accuracyCircle(fix) {
-    const isGps = fix.source === 'gps';
-    return L.circle([fix.lat, fix.lon], {
-      radius:      fix.acc,
-      color:       isGps ? TOKEN.signal : TOKEN.amber,
-      weight:      1,
-      opacity:     isGps ? 0.25 : 0.12,
-      fillColor:   isGps ? TOKEN.signal : TOKEN.amber,
-      fillOpacity: isGps ? 0.04 : 0.025,
-      interactive: false,
     });
   }
 
@@ -234,17 +209,14 @@ export function createMapView(containerId, onFixClick) {
   }
 
   function render(fixes, opts = {}) {
-    if (opts.showAccuracy != null) showAccuracy = opts.showAccuracy;
-    if (opts.showArrows   != null) showArrows   = opts.showArrows;
-    if (opts.showPoints   != null) showPoints   = opts.showPoints;
-    if (opts.liveDot      != null) liveDot      = opts.liveDot;
+    if (opts.showPoints != null) showPoints = opts.showPoints;
+    if (opts.liveDot    != null) liveDot    = opts.liveDot;
 
     currentFixes = fixes;
 
     trackLayer.clearLayers();
     markerLayer.clearLayers();
     arrowLayer.clearLayers();
-    accuracyLayer.clearLayers();
     selectedLayer.clearLayers();
 
     if (!fixes || fixes.length === 0) {
@@ -258,20 +230,25 @@ export function createMapView(containerId, onFixClick) {
 
     // Track polyline: GPS fixes only. Cell fixes are tower-resolution
     // estimates — a line through them draws travel that never happened.
+    // White casing under the brand-green line: the green was picked for
+    // the dark UI, and on the light basemap it washed out — the casing
+    // makes the track read on any background (classic cartography).
     const gpsLatlngs = fixes.filter(f => f.source === 'gps').map(f => [f.lat, f.lon]);
     if (gpsLatlngs.length > 1) {
       L.polyline(gpsLatlngs, {
         renderer: canvasRenderer,
+        color:   '#FFFFFF',
+        weight:  6,
+        opacity: 0.9,
+        interactive: false,
+      }).addTo(trackLayer);
+      L.polyline(gpsLatlngs, {
+        renderer: canvasRenderer,
         color:   TOKEN.signal,
-        weight:  2,
-        opacity: 0.55,
+        weight:  3,
+        opacity: 0.95,
         interactive: false, // map-level nearest-fix handler does hover/click
       }).addTo(trackLayer);
-    }
-
-    // Accuracy circles (opt-in)
-    if (showAccuracy) {
-      fixes.forEach(f => accuracyCircle(f).addTo(accuracyLayer));
     }
 
     const latest = fixes[fixes.length - 1];
@@ -297,10 +274,10 @@ export function createMapView(containerId, onFixClick) {
       L.circleMarker([fix.lat, fix.lon], {
         renderer: canvasRenderer,
         radius: 3.5,
-        color: isGps ? TOKEN.signal : TOKEN.amber,
-        weight: 1,
+        color: '#FFFFFF', // white stroke pops on the light basemap
+        weight: 1.5,
         fillColor: isGps ? TOKEN.signal : TOKEN.amber,
-        fillOpacity: 0.85,
+        fillOpacity: 0.95,
         interactive: false,
       }).addTo(markerLayer);
     });
@@ -339,7 +316,6 @@ export function createMapView(containerId, onFixClick) {
 
   function renderArrows() {
     arrowLayer.clearLayers();
-    if (!showArrows) return;
     const gps = currentFixes.filter(f => f.source === 'gps' && f.hdg != null);
     if (gps.length < 2) return;
     let lastPt = null, placed = 0;
@@ -399,18 +375,8 @@ export function createMapView(containerId, onFixClick) {
     }
   }
 
-  /**
-   * Bounds covering the fix positions — and, when accuracy circles are
-   * visible, the full extent of each circle, so no radius gets cut off.
-   */
   function computeBounds(fixes) {
-    const bounds = L.latLngBounds(fixes.map(f => [f.lat, f.lon]));
-    if (showAccuracy) {
-      fixes.forEach(f => {
-        if (f.acc > 0) bounds.extend(L.latLng(f.lat, f.lon).toBounds(f.acc * 2));
-      });
-    }
-    return bounds;
+    return L.latLngBounds(fixes.map(f => [f.lat, f.lon]));
   }
 
   function highlightSelected(fix) {
@@ -424,22 +390,6 @@ export function createMapView(containerId, onFixClick) {
     }).addTo(selectedLayer);
     // ... plus the accuracy circle, so the radius information is kept.
     selectedAccuracyCircle(fix).addTo(selectedLayer);
-  }
-
-  function setShowAccuracy(val) {
-    showAccuracy = val;
-    // Re-render accuracy layer
-    accuracyLayer.clearLayers();
-    if (showAccuracy && currentFixes.length > 0) {
-      currentFixes.forEach(f => accuracyCircle(f).addTo(accuracyLayer));
-      // Re-fit so the newly revealed circles aren't cut off at the edges
-      map.fitBounds(computeBounds(currentFixes), { padding: [30, 30], maxZoom: 17 });
-    }
-  }
-
-  function setShowArrows(val) {
-    showArrows = val;
-    renderArrows();
   }
 
   function setShowPoints(val) {
@@ -473,5 +423,5 @@ export function createMapView(containerId, onFixClick) {
     }).addTo(hoverLayer);
   }
 
-  return { render, setShowAccuracy, setShowArrows, setShowPoints, focusFix, hoverFix, invalidate, map };
+  return { render, setShowPoints, focusFix, hoverFix, invalidate, map };
 }

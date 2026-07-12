@@ -252,9 +252,9 @@ def main():
         if args.screenshot:
             page.screenshot(path=args.screenshot)
 
-        # ── Mobile pass (390x844): vertical stack; an open fix detail
-        # takes the whole viewport (a squeezed side sliver is useless on
-        # a phone) and ✕ closes it.
+        # ── Mobile pass (390x844): vertical stack, overview mode (the
+        # SHOW/SOURCES control rows hide), and fix detail opens INLINE in
+        # the DETAIL tab — same as desktop, no fullscreen takeover.
         mob = browser.new_page(viewport={"width": 390, "height": 844})
         mob.on("pageerror", lambda e: console_errors.append(f"mobile pageerror: {e}"))
         mob.goto(args.url, wait_until="networkidle", timeout=30000)
@@ -263,6 +263,11 @@ def main():
             "getComputedStyle(document.getElementById('page-map')).display")
         if mdisp == "grid":
             problems.append("mobile map page is grid — stack expected")
+        for sel_hidden in (".cg-show", ".cg-sources"):
+            vis = mob.evaluate(
+                f"getComputedStyle(document.querySelector('{sel_hidden}')).display")
+            if vis != "none":
+                problems.append(f"mobile: {sel_hidden} row should be hidden")
         mob.click('#side-tabs .side-tab[data-tab="locations"]')
         mob.wait_for_timeout(200)
         rows = mob.locator("#fix-table tbody tr")
@@ -271,16 +276,16 @@ def main():
         else:
             rows.first.click()
             mob.wait_for_timeout(400)
-            dw = mob.evaluate(
-                "document.getElementById('fix-drawer').getBoundingClientRect().width")
-            mvw = mob.evaluate("window.innerWidth")
-            if abs(dw - mvw) > 4:
-                problems.append(
-                    f"mobile fix detail width {dw} != viewport {mvw}")
+            if mob.locator('#side-tabs .side-tab[data-tab="detail"].active').count() == 0:
+                problems.append("mobile row click did not activate DETAIL tab")
+            pos = mob.evaluate(
+                "getComputedStyle(document.getElementById('fix-drawer')).position")
+            if pos == "fixed":
+                problems.append("mobile fix detail is a fixed overlay — inline expected")
             mob.click("#drawer-close")
             mob.wait_for_timeout(200)
-            if mob.locator("#fix-drawer.open").count():
-                problems.append("mobile ✕ did not close the fix detail")
+            if mob.locator('#side-tabs .side-tab[data-tab="detail"].active').count():
+                problems.append("mobile ✕ did not return to the previous tab")
         mob.close()
 
         browser.close()

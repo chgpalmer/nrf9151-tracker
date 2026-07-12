@@ -413,6 +413,14 @@ button { cursor: pointer; }
   }
 }
 
+/* Phone = overview mode: the map, the speed chart and the tables carry
+ * it; the SHOW and SOURCES control rows are desktop furniture.
+ * (.page-controls prefix outranks the later .control-group display rule.) */
+@media (max-width: 1099px) {
+  .page-controls .cg-show,
+  .page-controls .cg-sources { display: none; }
+}
+
 .side-tabs {
   display: flex;
   flex-shrink: 0;
@@ -717,8 +725,8 @@ body.map-has-fullscreen .top-rail { display: none; }
    FIX DETAIL DRAWER
    ════════════════════════════════ */
 /* Fix detail lives in the side panel's DETAIL tab: a plain column that
- * fills the panel. On small screens an OPEN detail takes the whole
- * viewport instead — a squeezed side sliver was useless on a phone. */
+ * fills the panel — same on phone and laptop (a fullscreen takeover was
+ * tried and felt jarring; phone use is overview, not deep inspection). */
 .fix-drawer {
   display: flex;
   flex-direction: column;
@@ -726,18 +734,6 @@ body.map-has-fullscreen .top-rail { display: none; }
   min-height: 0;
   overflow: hidden;
   background: var(--panel);
-}
-
-@media (max-width: 1099px) {
-  .fix-drawer.open {
-    position: fixed;
-    inset: 0;
-    height: 100dvh;
-    z-index: 2100;
-  }
-  /* The overlay owns the screen — the rail would paint above it (sibling
-   * stacking context beats any child z-index) and bury the ✕. */
-  body.detail-open .top-rail { display: none; }
 }
 
 .drawer-header {

@@ -19,17 +19,12 @@ document.addEventListener('fix-detail-click', e => open(e.detail));
 
 export function open(fix) {
   drawerEl.classList.add('open');
-  // On small screens .open overlays the viewport; the body class lets CSS
-  // hide the top-rail (sibling stacking context — it would paint over the
-  // drawer header and swallow the ✕ otherwise, same trap as fullscreen).
-  document.body.classList.add('detail-open');
   drawerEl.setAttribute('aria-hidden', 'false');
   bodyEl.innerHTML = renderFix(fix);
 }
 
 export function close() {
   drawerEl.classList.remove('open');
-  document.body.classList.remove('detail-open');
   drawerEl.setAttribute('aria-hidden', 'true');
   if (closeCb) closeCb();
 }
