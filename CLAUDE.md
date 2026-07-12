@@ -25,7 +25,11 @@ module pins have no wheels for newer Pythons; 26.04 breaks `make setup-zephyr`).
      WRN, clear INF). Precedent: the GNSS window warnings in `main.c`.
    - A WRN+ line triggers a (rate-limited) radio wake. No WRN/ERR in loops.
    - Before adding any recurring transmission, do the bytes-per-month math in
-     the commit message (see README "Data budget" for the method).
+     the commit message (see README "Data budget" for the method), then
+     DOUBLE it: measured SIM billing runs ~2x the app-layer arithmetic
+     (IP/UDP headers + per-RRC-session carrier rounding; calibrated
+     2026-07-12: 105 KB estimated, 0.21 MB billed). Radio wakes cost bytes
+     even when the payload is tiny.
 2. **`uplink` is the only sender.** Producers register as `uplink_source`s
    (pull model; `encode_next/commit/rollback` is transactional — cursors
    advance only after a confirmed send). Never call `coap_pub_send` directly.
