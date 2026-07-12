@@ -534,6 +534,11 @@ button { cursor: pointer; }
   height: 100dvh;
   z-index: 2000;
 }
+/* The fixed .app-shell is its own stacking context, so the map's z-index
+ * can never beat the top-rail's (sibling context, z-index 100) — the rail
+ * painted over the map's top strip, burying the Leaflet zoom buttons.
+ * Fullscreen means the map owns the whole screen: hide the rail. */
+body.map-has-fullscreen .top-rail { display: none; }
 .map-fs-btn {
   width: 34px;
   height: 34px;

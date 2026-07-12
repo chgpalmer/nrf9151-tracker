@@ -101,6 +101,12 @@ def main():
                 "document.getElementById('map-main').getBoundingClientRect().width")
             if abs(vw - mw) > 4:
                 problems.append(f"fullscreen map width {mw} != viewport {vw}")
+            # The top-rail must not overlay the map (it buried the zoom
+            # buttons — sibling stacking context beats any child z-index).
+            rail_visible = page.evaluate(
+                "getComputedStyle(document.querySelector('.top-rail')).display !== 'none'")
+            if rail_visible:
+                problems.append("top-rail still visible over fullscreen map")
             page.keyboard.press("Escape")
             page.wait_for_timeout(300)
             mw2 = page.evaluate(
