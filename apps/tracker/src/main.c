@@ -437,6 +437,71 @@ static void print_status(const struct nrf_modem_gnss_pvt_data_frame *p,
 		pdn_active ? "active" : "down");
 }
 
+#if defined(CONFIG_NRF_MODEM_LIB)
+#include <modem/at_monitor.h>
+
+/* SIM readiness timing: "%XSIM: 1" marks the UICC initialized. Whether it
+ * lands at +5 s or +60 s decides if the boot-attach gap is the SIM applet
+ * (nothing we can do) or the modem's search scheduling (tunable below). */
+static void xsim_handler(const char *notif)
+{
+	char buf[32];
+
+	strncpy(buf, notif, sizeof(buf) - 1);
+	buf[sizeof(buf) - 1] = '\0';
+	buf[strcspn(buf, "\r\n")] = '\0';
+	LOG_INF("SIM: %s", buf);
+}
+AT_MONITOR(xsim_monitor, "%XSIM", xsim_handler);
+
+/* Front-load search attempts when unregistered: the default scheduling let
+ * the modem idle ~60 s between a failed +9 s boot light search and the full
+ * search that then succeeded in 6 s (measured 2026-07-12). Retry at 5 s,
+ * then 10/20/40, then loop every 60 s — worst case a handful of extra scans
+ * per outage, each seconds long. Written to modem NVM; `fastsearch off`
+ * clears back to modem defaults. */
+static void fast_search_configure(void)
+{
+	struct lte_lc_periodic_search_cfg cfg = {
+		.loop = true,
+		.return_to_pattern = 0,
+		.band_optimization = 1,
+		.pattern_count = 1,
+		.patterns = { {
+			.type = LTE_LC_PERIODIC_SEARCH_PATTERN_TABLE,
+			.table = { .val_1 = 5, .val_2 = 10, .val_3 = 20,
+				   .val_4 = 40, .val_5 = 60 },
+		} },
+	};
+	int err = lte_lc_periodic_search_set(&cfg);
+
+	if (err) {
+		LOG_WRN("LTE: fast search pattern rejected (%d)", err);
+	} else {
+		LOG_INF("LTE: fast search pattern set");
+	}
+}
+
+#if defined(CONFIG_SHELL)
+#include <zephyr/shell/shell.h>
+
+static int cmd_fastsearch(const struct shell *sh, size_t argc, char **argv)
+{
+	if (argc == 2 && strcmp(argv[1], "off") == 0) {
+		shell_print(sh, "clear: %d (reboot re-applies unless rebuilt)",
+			    lte_lc_periodic_search_clear());
+	} else if (argc == 2 && strcmp(argv[1], "on") == 0) {
+		fast_search_configure();
+		shell_print(sh, "set");
+	}
+	return 0;
+}
+SHELL_CMD_ARG_REGISTER(fastsearch, NULL,
+		       "Aggressive out-of-coverage search pattern (on|off)",
+		       cmd_fastsearch, 1, 1);
+#endif
+#endif /* CONFIG_NRF_MODEM_LIB */
+
 /* ── attach-speed experiment: network-state checkpoint ────────────────────
  * The modem persists its network history (band, channel, PLMN — and GNSS
  * data) to its own NVM only on CFUN=0, which an abrupt dev reset never
@@ -507,6 +572,13 @@ int main(void)
 	log_uplink_init();
 	agnss_set_device_id(device_id);
 	leds_init();
+
+#if defined(CONFIG_NRF_MODEM_LIB)
+	/* Time the SIM (%XSIM notifications) and front-load search retries —
+	 * both persist/apply before the attach we're about to start. */
+	(void)nrf_modem_at_printf("AT%%XSIM=1");
+	fast_search_configure();
+#endif
 
 	/* Start LTE async — don't block, status loop shows progress */
 	LOG_INF("starting LTE (async)...");
