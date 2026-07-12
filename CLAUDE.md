@@ -70,7 +70,6 @@ module pins have no wheels for newer Pythons; 26.04 breaks `make setup-zephyr`).
   anonymous HTTPS, 30 min refresh) and serves POST /agnss; device fetches
   ~1 KB when its inventory is thin and injects via agnss_write. All scaling
   is server-side (server/agnss.py, `make servertest`). Best-effort: server
-  down = old behaviour. VM carries ONE local commit (login gating) rebased
-  onto main — never reset --hard the VM checkout.
-- KNOWN FLAKE: `make webtest` fails 00:00–03:00 local — seed-testday.py
-  seeds `now-3h`, which straddles midnight. Fix = anchor the seed mid-day.
+  down = old behaviour. VM is a clean tracking checkout of origin/main
+  (the login-gating commit is upstream since 510d3de); web UI creds live
+  in the VM's git-ignored .env.
