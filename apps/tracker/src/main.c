@@ -641,10 +641,25 @@ int main(void)
 		int64_t now = k_uptime_get();
 
 		if (pvt.flags & NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID) {
-			fix_pvt = pvt;
-			fix_pvt_ms = now;
-			motion_note_gps(pvt.latitude, pvt.longitude,
-					(double)pvt.accuracy, now);
+			/* Quarantine the FIRST fix after a periodic-mode sleep:
+			 * the receiver reports its HELD pre-sleep position (near-
+			 * zero speed, plausible accuracy) before snapping to
+			 * reality an epoch later — field-caught as a phantom
+			 * point 501 m and 4 s from its successor. The second
+			 * epoch of a wake arrives a second later and is real. */
+			static int64_t last_fix_seen_ms;
+			bool woke_stale = (gnss_mode_applied == LOC_GNSS_PERIODIC) &&
+					  (now - last_fix_seen_ms > 30000);
+
+			last_fix_seen_ms = now;
+			if (!woke_stale) {
+				fix_pvt = pvt;
+				fix_pvt_ms = now;
+				motion_note_gps(pvt.latitude, pvt.longitude,
+						(double)pvt.accuracy, now);
+			} else {
+				LOG_DBG("dropping first fix after periodic wake");
+			}
 		}
 
 		/* Policy first: it owns the fix-staleness and ephemeris bookkeeping. */

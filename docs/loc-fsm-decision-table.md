@@ -173,6 +173,16 @@ tracking (a warm tracker is more chop-tolerant than a cold acquirer) and
 buffers. Needs a hardware experiment: does tracking survive a searching
 modem? Discussion pending — do not implement without it.
 
+**F-6 — OPEN: indoors with a "moving" verdict churns (2026-07-12 field).**
+Bag carried inside a building: a jitter wake set stationary=false, indoor
+sky teased acquisition, and with !stationary the C2 EXCLUSIVE gate reopened
+— ~12 min of hunt (two EXCLUSIVE laps) before the dwell completed. Neither
+parked state can catch it: QUIESCENT needs fixes, REST needs a stationary
+verdict, and the GPS verdict blocks the cell verdict for GPS_HOLD (10 min)
+after the last fix. Candidate: let the cell-set verdict reclaim authority
+faster once GPS goes dark, or add dwell credit from the pre-wake parked
+spot. Discussion pending — self-resolves today at ~3 KB per episode.
+
 **F-4 — blanked-epoch bookkeeping is correct but subtle.** `sky_empty` counts
 only observed epochs; `ephemeris_visible` carries the last observed value
 through blanked epochs; `chopped_streak` resets only on an *observed* clean
