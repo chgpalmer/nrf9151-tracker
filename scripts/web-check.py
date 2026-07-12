@@ -89,6 +89,43 @@ def main():
                 page.click(tid)
                 page.wait_for_timeout(400)
 
+        # trips.js rule check: parked jitter must not form a trip; a loop
+        # ride (returns to its start) must. Real-data calibration
+        # 2026-07-12: 27 fake trips all ranged <= 102 m from start, the 3
+        # real rides all >= 1565 m.
+        trip_check = page.evaluate("""async () => {
+          const { segmentTrips } = await import('/js/trips.js');
+          const t0 = 1700000000;
+          // Parked jitter: 10 fixes, 120 s apart, alternating +-0.00015 deg
+          // lat (~33 m hops, never >40 m from start). Cumulative path
+          // ~270 m, so a cumulative-distance-only rule wrongly trips.
+          const jitter = [];
+          for (let i = 0; i < 10; i++) {
+            jitter.push({ source: 'gps', received_ts: t0 + i * 120,
+                          lat: 52.2 + (i % 2 ? 0.00015 : -0.00015),
+                          lon: 0.14, spd: 0.3 });
+          }
+          // Loop ride: 480 m out north at 4 m/s, straight back to start.
+          // Net displacement ~0 -- must STILL count (radius, not net).
+          const loop = [];
+          for (let i = 0; i < 240; i++) {
+            const out = i < 120 ? i : 240 - i;
+            loop.push({ source: 'gps', received_ts: t0 + i,
+                        lat: 52.2 + out * 4 / 111320, lon: 0.14,
+                        spd: 4.0 });
+          }
+          return { jitter: segmentTrips(jitter).length,
+                   loop: segmentTrips(loop).length };
+        }""")
+        if trip_check["jitter"] != 0:
+            problems.append(
+                f"trips.js: parked jitter formed {trip_check['jitter']} "
+                "trip(s), want 0")
+        if trip_check["loop"] != 1:
+            problems.append(
+                f"trips.js: loop ride formed {trip_check['loop']} "
+                "trip(s), want 1")
+
         # Logs page: rows render, WRN filter narrows, ALL widens.
         page.goto(args.url + "/#logs", wait_until="networkidle")
         page.wait_for_timeout(600)

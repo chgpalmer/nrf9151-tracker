@@ -17,6 +17,12 @@ const MOVE_MPS   = 0.8;  // Doppler speed above this counts as moving
 const STEP_M     = 10;   // or a positional step above this
 const MIN_TRIP_S = 60;   // discard shorter trips
 const MIN_DIST_M = 80;   // discard trips that never went anywhere
+const TRIP_RADIUS_M = 150; // and must actually GO somewhere: max distance
+                           // from the start fix. Parked multipath jitter
+                           // accumulates path length without ever leaving
+                           // the garden (2026-07-12: 27 fakes <= 102 m,
+                           // real rides >= 1565 m); loop rides still range
+                           // far out before returning, so this keeps them.
 
 export function haversineM(lat1, lon1, lat2, lon2) {
   const r = 6371000, toRad = Math.PI / 180;
@@ -54,7 +60,12 @@ export function segmentTrips(fixes) {
       dist += haversineM(pts[i - 1].lat, pts[i - 1].lon, pts[i].lat, pts[i].lon);
     }
     const dur = pts[pts.length - 1].received_ts - pts[0].received_ts;
-    if (dur >= MIN_TRIP_S && dist >= MIN_DIST_M) {
+    let far = 0;
+    for (let i = 1; i < pts.length; i++) {
+      far = Math.max(far,
+        haversineM(pts[0].lat, pts[0].lon, pts[i].lat, pts[i].lon));
+    }
+    if (dur >= MIN_TRIP_S && dist >= MIN_DIST_M && far >= TRIP_RADIUS_M) {
       trips.push({
         start_ts: pts[0].received_ts,
         end_ts:   pts[pts.length - 1].received_ts,
