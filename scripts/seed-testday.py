@@ -17,7 +17,16 @@ db.execute("""CREATE TABLE IF NOT EXISTS positions (
     lat REAL, lon REAL, alt REAL, acc REAL, spd REAL, hdg REAL, sats INTEGER)""")
 db.execute("DELETE FROM positions")
 
+# Anchor "now" so the seeded 3-hour spread NEVER straddles local midnight:
+# rows land at now-3h..now-10min, so within 3 h after midnight the real clock
+# would scatter them across two dates and the day-scoped UI assertions break
+# (webtest flaked 00:00-03:00 local). Clamping to >= 03:10 keeps every row on
+# today; pre-dawn runs just see the data slightly in the future, which the
+# day-window queries include anyway.
 now = time.time()
+lt = time.localtime(now)
+midnight = now - (lt.tm_hour * 3600 + lt.tm_min * 60 + lt.tm_sec)
+now = max(now, midnight + 3 * 3600 + 600)
 dev = "web-test"
 
 
