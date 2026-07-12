@@ -144,7 +144,9 @@ scan, NTN.
 **Make targets:** `setup-zephyr` (venv + west + SDK), `setup-tools`,
 `windows-usb-passthrough`, `build`, `flash`, `recover`, `uart`, `gdb`,
 `clean`, `sim`, `proto`, `fsmtest`, `demo`, `serve`, `webtest`,
-`servertest`, `update-cells`. Variables: `APP` (`tracker`|`gnss`|`hello`),
+`servertest`, `update-cells`. Variables: `APP`
+(`tracker`|`gnss`|`hello`|`atprobe` — the last is a bare AT console for
+modem diagnostics like carrier scans),
 `BOARD` (`nrf9151dk/nrf9151/ns` — non-secure, required for modem/GNSS),
 `PORT`, `BAUD`, `RUNNER`.
 
@@ -168,7 +170,7 @@ nrf9151-tracker-ws/          workspace root (created by setup.sh)
     west.yml                 imports sdk-nrf v3.4.0 (name-allowlist)
     proto/tracker.proto      wire schema — single source for both codecs
     mk/fw.mk  mk/server.mk   firmware / server make targets
-    apps/tracker/            the firmware (gnss/, hello/ = bring-up apps)
+    apps/tracker/            the firmware (gnss/, hello/ = bring-up; atprobe/ = AT console)
     server/                  aiocoap ingest + FastAPI + static webapp
     docs/loc-fsm-decision-table.md   normative FSM spec
     tests/fsm/               ztest suite for loc_fsm + motion
