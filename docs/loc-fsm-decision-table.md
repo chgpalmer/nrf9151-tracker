@@ -46,7 +46,7 @@ the sky on its own evidence.
 | # | Condition | Next | |
 |---|---|---|---|
 | C1 | `fix` | REPORT_GNSS | "fix acquired" |
-| C2 | `lte_chops_gnss` | GNSS_EXCLUSIVE | "LTE chops GNSS" |
+| C2 | `lte_chops_gnss` and `!stationary` | GNSS_EXCLUSIVE | "LTE chops GNSS" — parked trackers never escalate: no urgent fix need, and each escalation costs an LTE deactivate + ~35 s re-attach (7 pointless cycles measured in one parked night); parked no-fix resolves via CELL_LOOP → REST |
 | C3 | in-state > 300 s (`ACQUIRE_TIMEOUT`) | CELL_LOOP | "acquire timeout" |
 | C4 | in-state > 30 s (`SKY_GRACE`) and `sky_empty` | CELL_LOOP | "sky empty" |
 

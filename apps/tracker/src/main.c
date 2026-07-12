@@ -348,20 +348,29 @@ static void print_status(const struct nrf_modem_gnss_pvt_data_frame *p,
 		bool short_window =
 			p->flags & NRF_MODEM_GNSS_PVT_FLAG_NOT_ENOUGH_WINDOW_TIME;
 
-		if (no_window != no_window_prev) {
+		/* These edges diagnose LTE/GNSS contention during CONTINUOUS
+		 * tracking. In periodic mode every uplink flush trivially chops
+		 * the sleeping receiver — the overnight parked log was 137 WRNs
+		 * of exactly that. Meaningless there; don't evaluate. */
+		if (loc->gnss_mode != LOC_GNSS_CONTINUOUS) {
 			no_window_prev = no_window;
-			if (no_window) {
-				LOG_WRN("GNSS: no window since last PVT (LTE active)");
-			} else {
-				LOG_INF("GNSS: windows back");
-			}
-		}
-		if (short_window != short_window_prev) {
 			short_window_prev = short_window;
-			if (short_window) {
-				LOG_WRN("GNSS: windows too short (no PSM/eDRX?)");
-			} else {
-				LOG_INF("GNSS: window length ok");
+		} else {
+			if (no_window != no_window_prev) {
+				no_window_prev = no_window;
+				if (no_window) {
+					LOG_WRN("GNSS: no window since last PVT (LTE active)");
+				} else {
+					LOG_INF("GNSS: windows back");
+				}
+			}
+			if (short_window != short_window_prev) {
+				short_window_prev = short_window;
+				if (short_window) {
+					LOG_WRN("GNSS: windows too short (no PSM/eDRX?)");
+				} else {
+					LOG_INF("GNSS: window length ok");
+				}
 			}
 		}
 	}
@@ -488,7 +497,8 @@ int main(void)
 		if (pvt.flags & NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID) {
 			fix_pvt = pvt;
 			fix_pvt_ms = now;
-			motion_note_gps(pvt.latitude, pvt.longitude, now);
+			motion_note_gps(pvt.latitude, pvt.longitude,
+					(double)pvt.accuracy, now);
 		}
 
 		/* Policy first: it owns the fix-staleness and ephemeris bookkeeping. */

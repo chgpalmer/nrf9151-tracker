@@ -316,10 +316,15 @@ void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 		 * empty sky, and never inside the cold-start grace. */
 		if (fix) {
 			next_state(LOC_REPORT_GNSS, now_ms, "fix acquired");
-		} else if (lte_chops_gnss) {
+		} else if (lte_chops_gnss && !stationary) {
 			/* Registered-but-silent isn't enough here: idle DRX or
 			 * coverage-edge reselection is slicing GNSS. Take the
-			 * radio outright; the re-attach is paid post-fix. */
+			 * radio outright; the re-attach is paid post-fix.
+			 * NOT while stationary: a parked tracker has no urgent
+			 * need for a fix, and each escalation costs an LTE
+			 * deactivate + ~35 s re-attach (measured 7 pointless
+			 * cycles in one parked night). Parked no-fix resolves
+			 * through CELL_LOOP -> REST instead. */
 			next_state(LOC_GNSS_EXCLUSIVE, now_ms, "LTE chops GNSS");
 		} else if (in_state > ACQUIRE_CAP_MS) {
 			if (acquire_failures < UINT8_MAX) {

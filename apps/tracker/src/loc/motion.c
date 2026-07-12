@@ -56,29 +56,45 @@ static double dist_m(double lat1, double lon1, double lat2, double lon2)
 	return sqrt(dx * dx + dy * dy);
 }
 
-void motion_note_gps(double lat_deg, double lon_deg, int64_t now_ms)
+void motion_note_gps(double lat_deg, double lon_deg, double acc_m,
+		     int64_t now_ms)
 {
 	last_gps_ms = now_ms;
 
-	if (!anchor_valid ||
-	    dist_m(anchor_lat, anchor_lon, lat_deg, lon_deg) > RADIUS_M) {
-		if (gps_stationary) {
-			LOG_INF("motion: moving (left %d m parked radius)",
-				RADIUS_M);
-		}
+	if (!anchor_valid) {
 		anchor_lat = lat_deg;
 		anchor_lon = lon_deg;
 		anchor_valid = true;
 		anchor_since_ms = now_ms;
-		gps_stationary = false;
 		return;
 	}
 
-	if (!gps_stationary && (now_ms - anchor_since_ms) >= ENTRY_MS) {
-		gps_stationary = true;
-		LOG_INF("motion: stationary (within %d m for %d s)",
-			RADIUS_M, CONFIG_TRACKER_MOTION_ENTRY_S);
+	double d = dist_m(anchor_lat, anchor_lon, lat_deg, lon_deg);
+
+	if (d <= RADIUS_M) {
+		/* In-radius: dwell accumulates. */
+		if (!gps_stationary && (now_ms - anchor_since_ms) >= ENTRY_MS) {
+			gps_stationary = true;
+			LOG_INF("motion: stationary (within %d m for %d s)",
+				RADIUS_M, CONFIG_TRACKER_MOTION_ENTRY_S);
+		}
+		return;
 	}
+	if (d <= 2.0 * acc_m) {
+		/* Outside the radius but inside the fix's own error bars:
+		 * evidence of NOTHING (indoor multipath jumps live here).
+		 * Neither wake nor re-anchor — the dwell stands. */
+		return;
+	}
+	/* A displacement the fix quality actually supports: motion. */
+	if (gps_stationary) {
+		LOG_INF("motion: moving (%d m from anchor, acc %d m)",
+			(int)d, (int)acc_m);
+	}
+	anchor_lat = lat_deg;
+	anchor_lon = lon_deg;
+	anchor_since_ms = now_ms;
+	gps_stationary = false;
 }
 
 void motion_note_cell(uint32_t cell_id, int64_t now_ms)

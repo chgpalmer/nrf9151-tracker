@@ -24,8 +24,12 @@
 
 void motion_init(int64_t now_ms);
 
-/* Feed one fix-valid position. Never call with an unfixed frame's lat/lon. */
-void motion_note_gps(double lat_deg, double lon_deg, int64_t now_ms);
+/* Feed one fix-valid position with its reported accuracy (metres). Never
+ * call with an unfixed frame's lat/lon. Accuracy gates the EXIT: a fix 30 m
+ * away with 50 m accuracy is not evidence of motion (overnight parked data:
+ * 17 of 18 quiescent wakes were indoor multipath jumps). */
+void motion_note_gps(double lat_deg, double lon_deg, double acc_m,
+		     int64_t now_ms);
 
 /* Feed the serving cell ID whenever one is read. */
 void motion_note_cell(uint32_t cell_id, int64_t now_ms);

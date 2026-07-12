@@ -234,6 +234,22 @@ ZTEST(loc_fsm, test_c2_clean_window_resets_streak)
 	ASSERT_STATE(step(false, 0, CHOPPED), LOC_GNSS_EXCLUSIVE);
 }
 
+/* Parked trackers never escalate to EXCLUSIVE: no urgent fix need, and each
+ * escalation costs an LTE deactivate + re-attach (7 pointless cycles in one
+ * parked night). Chopped windows while stationary ride out to the C3/C4
+ * exits and resolve via CELL_LOOP -> REST. */
+ZTEST(loc_fsm, test_c2_stationary_never_escalates)
+{
+	to_acquire();
+	g_stationary = true;
+	for (int i = 0; i < 3 * CHOPPED_EPOCHS; i++) {
+		ASSERT_STATE(step(false, 0, CHOPPED), LOC_GNSS_ACQUIRE);
+	}
+	/* ...and the timeout still ends it the parked way. */
+	t += ACQUIRE_CAP_MS;
+	ASSERT_STATE(step(false, 1, CHOPPED), LOC_CELL_LOOP);
+}
+
 /* F-4: a blanked epoch (DEADLINE_MISSED, GNSS never had the radio) neither
  * advances nor resets the chopped streak. */
 ZTEST(loc_fsm, test_c2_blanked_carries_chopped_streak)

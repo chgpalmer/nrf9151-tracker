@@ -19,11 +19,17 @@ static double lon_at(double east_m)
 	return BASE_LON + east_m / (111320.0 * 0.62251); /* cos(51.5 deg) */
 }
 
-/* One fix per second at the given offset from base. */
-static void gps(double north_m, double east_m)
+/* One fix per second at the given offset from base; acc defaults sharp so
+ * the classic scenarios behave exactly as before the accuracy gate. */
+static void gps_acc(double north_m, double east_m, double acc_m)
 {
 	t += 1000;
-	motion_note_gps(lat_at(north_m), lon_at(east_m), t);
+	motion_note_gps(lat_at(north_m), lon_at(east_m), acc_m, t);
+}
+
+static void gps(double north_m, double east_m)
+{
+	gps_acc(north_m, east_m, 5.0);
 }
 
 static void cell(uint32_t cid)
@@ -69,8 +75,25 @@ ZTEST(motion, test_outlier_exits_immediately)
 		gps(0, 0);
 	}
 	zassert_true(motion_stationary(t), "precondition: parked");
-	gps(4.0 * RADIUS_M, 0); /* the bike leaves */
+	gps(4.0 * RADIUS_M, 0); /* the bike leaves (sharp fix) */
 	zassert_false(motion_stationary(t), "one outlier must exit");
+}
+
+/* The overnight field data: indoor multipath jumps 30-130 m with accuracy
+ * figures to match woke the tracker 17 times. A jump inside its own error
+ * bars is evidence of nothing — no wake, and the dwell survives. */
+ZTEST(motion, test_blurry_jump_does_not_wake)
+{
+	for (int i = 0; i <= CONFIG_TRACKER_MOTION_ENTRY_S; i++) {
+		gps(0, 0);
+	}
+	zassert_true(motion_stationary(t), "precondition: parked");
+	gps_acc(3.0 * RADIUS_M, 0, 60.0); /* 75 m jump, 60 m accuracy */
+	zassert_true(motion_stationary(t), "blurry jump must not wake");
+	gps(0, 0); /* back in the cluster: still parked, dwell intact */
+	zassert_true(motion_stationary(t), "cluster return keeps parking");
+	gps_acc(3.0 * RADIUS_M, 0, 10.0); /* same jump, SHARP: real motion */
+	zassert_false(motion_stationary(t), "sharp displacement must wake");
 }
 
 ZTEST(motion, test_cell_flap_within_lru_is_stationary)
