@@ -174,7 +174,10 @@ static int send_one_datagram(void)
 		return 0; /* nothing was pending after all */
 	}
 
-	int err = coap_pub_send(buf, stream.bytes_written);
+	/* Encoding advanced the sources' taken-cursors, so any_pending() now
+	 * answers "is there more after THIS datagram" — the RAI hint. */
+	bool last = !any_pending();
+	int err = coap_pub_send(buf, stream.bytes_written, last);
 
 	for (int i = 0; i < UPLINK_MAX_SOURCES; i++) {
 		if (!cur.touched[i]) {
@@ -223,9 +226,8 @@ int uplink_poll(int64_t now_ms)
 		last_log_wake_ms = now_ms;
 	}
 
-	/* One radio wake, as many datagrams as it takes. RAI's LAST hint goes
-	 * on every send (coap_pub does it); consecutive sends land in the same
-	 * RRC window, so only the final one's hint matters in practice. */
+	/* One radio wake, as many datagrams as it takes: intermediates carry
+	 * RAI_ONGOING (hold the connection), the final one RAI_LAST. */
 	int sent = 0;
 
 	while (any_pending()) {

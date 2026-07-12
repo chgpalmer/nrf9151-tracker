@@ -92,7 +92,11 @@ void obs_queue_add_gps(const struct nrf_modem_gnss_pvt_data_frame *p,
 	};
 	gps_count++;
 
-	if (gps_count - gps_taken >= MAX_SEG_POINTS) {
+	/* Pressure valve, not a cadence: flushing every full segment made one
+	 * RRC session per ~50 s of riding, and the session's fixed radio hold
+	 * (~5-10 s) chopped GNSS each time. Let the flush timer batch several
+	 * segments per session; announce fullness only under real pressure. */
+	if (gps_count - gps_taken >= CONFIG_TRACKER_OBS_FLUSH_PENDING) {
 		uplink_request_flush(UPLINK_FLUSH_FULL);
 	}
 }

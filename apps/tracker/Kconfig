@@ -213,6 +213,18 @@ config TRACKER_AGNSS_COOLDOWN_S
 	  tracking ~= 8-12 fetches ~= 12 KB/day (~0.35 MB/mo); this floor
 	  caps the pathological case at 48/day (~1.6 MB/mo).
 
+config TRACKER_OBS_FLUSH_PENDING
+	int "Queued GPS points that force a flush (pressure valve)"
+	default 300
+	range 60 1800
+	help
+	  NOT the send cadence — that is TRACKER_FLUSH_INTERVAL_S, which
+	  batches several 50-point segments into ONE radio session (each
+	  session's fixed RRC hold chops GNSS for ~5-10 s regardless of
+	  payload, so fewer+fatter sessions = fewer track holes AND fewer
+	  billed sessions). This threshold only guards the ring under real
+	  pressure. 300 points = 5 min of 1 Hz.
+
 config TRACKER_LTE_CHECKPOINT
 	bool "Persist modem network state at the first parked entry"
 	default y

@@ -20,10 +20,11 @@ int coap_pub_init(const char *host, uint16_t port);
 
 bool coap_pub_ready(void);
 
-/* Send one encoded observation as NON POST /obs (application/cbor). Sets
- * RAI_LAST on the socket right before the send so the modem can ask for RRC
- * release as soon as the datagram is out. */
-int coap_pub_send(const uint8_t *payload, size_t len);
+/* Send one encoded observation as NON POST /obs. The RAI hint tells the
+ * modem whether more datagrams follow in this burst: last=false sets
+ * RAI_ONGOING (hold the RRC connection open), last=true sets RAI_LAST
+ * (release right after this send). One burst = one RRC session. */
+int coap_pub_send(const uint8_t *payload, size_t len, bool last);
 
 /* The one request/RESPONSE exchange (A-GNSS): NON POST `path` with req as
  * payload, then block up to timeout_ms for the matching response (token

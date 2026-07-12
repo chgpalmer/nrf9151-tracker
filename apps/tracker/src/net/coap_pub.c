@@ -70,21 +70,24 @@ bool coap_pub_ready(void)
 	return sock >= 0;
 }
 
-/* Tell the modem this send is the last of the burst so it can ask the network
- * to release RRC immediately (no reply is coming: messages are NON). Compiled
- * out on native_sim, where there is no modem. */
-static void rai_last_before_send(void)
+/* RAI hint per send: LAST releases RRC right after the datagram (no reply is
+ * coming: messages are NON); ONGOING holds the connection for the rest of the
+ * burst — telling the network "done" three times per flush invited an RRC
+ * release mid-burst. Compiled out on native_sim, where there is no modem. */
+static void rai_hint_before_send(bool last)
 {
 #if defined(CONFIG_LTE_LC_RAI_MODULE)
-	int rai = RAI_LAST;
+	int rai = last ? RAI_LAST : RAI_ONGOING;
 
 	if (zsock_setsockopt(sock, SOL_SOCKET, SO_RAI, &rai, sizeof(rai)) < 0) {
 		LOG_DBG("SO_RAI: %d", -errno);
 	}
+#else
+	(void)last;
 #endif
 }
 
-int coap_pub_send(const uint8_t *payload, size_t len)
+int coap_pub_send(const uint8_t *payload, size_t len, bool last)
 {
 	static uint8_t buf[PKT_BUF_LEN]; /* 1 KB+: keep off the 4 KB main stack */
 	struct coap_packet pkt;
@@ -129,7 +132,7 @@ int coap_pub_send(const uint8_t *payload, size_t len)
 		return err;
 	}
 
-	rai_last_before_send();
+	rai_hint_before_send(last);
 	if (zsock_send(sock, pkt.data, pkt.offset, 0) < 0) {
 		LOG_WRN("send: errno %d (%s)", errno, strerror(errno));
 		return -errno;
