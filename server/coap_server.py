@@ -75,6 +75,22 @@ def init_db(path: Path) -> sqlite3.Connection:
         CREATE INDEX IF NOT EXISTS idx_log_dev_time
         ON logs(device_id, received_ts)
     """)
+    # One row per datagram: the device's data-usage ledger. bytes is the CoAP
+    # payload length (kind 'agnss' counts request + response — downlink bills
+    # too); the API adds per-datagram framing when estimating on-air cost.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS usage (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_id   TEXT    NOT NULL,
+            received_ts REAL    NOT NULL,
+            bytes       INTEGER NOT NULL,
+            kind        TEXT    NOT NULL DEFAULT 'obs'
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_usage_dev_time
+        ON usage(device_id, received_ts)
+    """)
     # Migrate older DBs created before the source column existed.
     cols = {r[1] for r in conn.execute("PRAGMA table_info(positions)")}
     if "source" not in cols:
@@ -255,6 +271,11 @@ class ObsResource(resource.Resource):
             return aiocoap.Message(code=aiocoap.Code.BAD_REQUEST)
 
         store_obs(self.conn, obs, self.cells, int(time.time()))
+        self.conn.execute(
+            "INSERT INTO usage (device_id, received_ts, bytes, kind) "
+            "VALUES (?, ?, ?, 'obs')",
+            (obs.device_id, time.time(), len(request.payload)))
+        self.conn.commit()
 
         # Devices set No-Response, so aiocoap drops this on the floor for
         # them; it still answers curious human clients (coap-client etc).
@@ -296,6 +317,12 @@ class AgnssResource(resource.Resource):
         data = pb.AgnssData.FromString(payload)
         print(f"[agnss] {req.device_id}: served {len(data.ephemeris)} ephe, "
               f"{len(payload)} B (flags 0x{req.data_flags:02x})")
+        self.conn.execute(
+            "INSERT INTO usage (device_id, received_ts, bytes, kind) "
+            "VALUES (?, ?, ?, 'agnss')",
+            (req.device_id, time.time(),
+             len(request.payload) + len(payload)))
+        self.conn.commit()
         return aiocoap.Message(code=aiocoap.Code.CONTENT, payload=payload)
 
 

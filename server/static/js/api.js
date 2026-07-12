@@ -39,6 +39,16 @@ export async function fetchPositions(deviceId, opts = {}) {
  * GET /api/logs — device log lines, chronological.
  * min_level uses Zephyr numbering (1=ERR … 4=DBG); lower = more severe.
  */
+/**
+ * GET /api/usage — per-UTC-day data usage from the ingest ledger.
+ */
+export async function fetchUsage(deviceId, days = 14) {
+  const params = new URLSearchParams({ device: deviceId, days });
+  const r = await fetch(`/api/usage?${params}`);
+  if (!r.ok) throw new Error(`/api/usage: ${r.status}`);
+  return r.json();
+}
+
 export async function fetchLogs(deviceId, opts = {}) {
   const params = new URLSearchParams({ device: deviceId });
   if (opts.from_ts   != null) params.set('from_ts',   opts.from_ts);

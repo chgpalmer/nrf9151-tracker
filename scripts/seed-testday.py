@@ -68,5 +68,21 @@ log_rows = [
 db.executemany(
     "INSERT INTO logs (device_id, received_ts, level, module, text)"
     " VALUES (?,?,?,?,?)", log_rows)
+# Usage ledger rows for the Usage page: a few "days" of history plus today.
+db.execute("""CREATE TABLE IF NOT EXISTS usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT NOT NULL,
+    received_ts REAL NOT NULL, bytes INTEGER NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'obs')""")
+db.execute("DELETE FROM usage")
+usage_rows = []
+for day_back in range(4):
+    base = now - day_back * 86400
+    for i in range(30 + day_back * 10):
+        usage_rows.append((dev, base - 3600 - i * 60, 180 + (i % 40), 'obs'))
+    usage_rows.append((dev, base - 1800, 1030, 'agnss'))
+db.executemany(
+    "INSERT INTO usage (device_id, received_ts, bytes, kind)"
+    " VALUES (?,?,?,?)", usage_rows)
 db.commit()
-print(f"seeded {len(rows)} positions + {len(log_rows)} logs for {dev} into {sys.argv[1]}")
+print(f"seeded {len(rows)} positions + {len(log_rows)} logs + "
+      f"{len(usage_rows)} usage rows for {dev} into {sys.argv[1]}")

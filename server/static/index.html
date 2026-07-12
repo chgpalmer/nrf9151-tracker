@@ -62,6 +62,10 @@
           <span class="nav-icon">≣</span>
           <span class="nav-label">Logs</span>
         </a>
+        <a href="#usage"    class="nav-item" data-page="usage">
+          <span class="nav-icon">▤</span>
+          <span class="nav-label">Usage</span>
+        </a>
         <a href="#events"   class="nav-item" data-page="events">
           <span class="nav-icon">◈</span>
           <span class="nav-label">Events</span>
@@ -184,6 +188,23 @@
               <tr><th>Time</th><th>Lvl</th><th>Module</th><th>Message</th></tr>
             </thead>
             <tbody id="log-tbody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ── USAGE PAGE (data spent per day, from the ingest ledger) ── -->
+      <section class="page hidden" id="page-usage" data-page="usage">
+        <div class="page-controls">
+          <span class="control-label">DATA USAGE — LAST 14 DAYS</span>
+          <span class="hist-hint" id="usage-note">on-air estimate: payload + framing; the SIM bill adds per-session rounding (~2x observed on quiet days)</span>
+        </div>
+        <div class="usage-today" id="usage-today"></div>
+        <div class="log-scroll">
+          <table class="log-table usage-table">
+            <thead>
+              <tr><th>Day</th><th>Datagrams</th><th>Obs</th><th>A-GNSS</th><th>Est. on-air</th><th></th></tr>
+            </thead>
+            <tbody id="usage-tbody"></tbody>
           </table>
         </div>
       </section>

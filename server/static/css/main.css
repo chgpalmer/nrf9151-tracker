@@ -1366,3 +1366,11 @@ tr.lvl-4 .log-text, tr.lvl-4 .log-mod { color: var(--text-dim); }
   transition: color 0.12s, border-color 0.12s;
 }
 .date-step:hover { color: var(--signal); border-color: var(--border-hi); }
+
+/* ── Usage page ────────────────────────────────────────────── */
+.usage-today { padding: 14px 18px 4px; display: flex; align-items: baseline; gap: 10px; }
+.usage-big { font-size: 1.6rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.usage-big-label { color: var(--text-dim, #888); font-size: 0.85rem; }
+.usage-table td { font-variant-numeric: tabular-nums; }
+.usage-bar-cell { width: 38%; min-width: 120px; }
+.usage-bar { height: 10px; border-radius: 5px; background: var(--accent, #4a9eda); opacity: 0.75; min-width: 2px; }

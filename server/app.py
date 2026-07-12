@@ -113,6 +113,40 @@ async def logs(device: str, from_ts: float = 0, to_ts: float = 0,
     return JSONResponse([dict(r) for r in reversed(rows)])
 
 
+# Per-datagram framing estimate for on-air bytes: 20 IP + 8 UDP + ~44 CoAP
+# header/token/options. Billed usage additionally rounds per RRC session
+# (field-calibrated ~2x on quiet days), which no per-datagram sum can see --
+# the UI says so instead of pretending.
+WIRE_OVERHEAD_B = 72
+
+
+@app.get("/api/usage")
+async def usage(device: str, days: int = 14):
+    """Per-UTC-day data usage from the ingest ledger: datagram count, payload
+    bytes, and estimated on-air bytes (payload + framing), split by kind."""
+    db = app.state.db
+    since = time.time() - days * 86400
+    rows = db.execute(
+        """SELECT date(received_ts, 'unixepoch') AS day,
+                  kind,
+                  COUNT(*)   AS datagrams,
+                  SUM(bytes) AS payload
+           FROM usage WHERE device_id = ? AND received_ts >= ?
+           GROUP BY day, kind ORDER BY day""",
+        (device, since)).fetchall()
+    out = {}
+    for r in rows:
+        d = out.setdefault(r["day"], {
+            "day": r["day"], "datagrams": 0, "payload": 0,
+            "obs_bytes": 0, "agnss_bytes": 0, "est_wire": 0,
+        })
+        d["datagrams"] += r["datagrams"]
+        d["payload"] += r["payload"]
+        d[r["kind"] + "_bytes"] = r["payload"]
+        d["est_wire"] += r["payload"] + r["datagrams"] * WIRE_OVERHEAD_B
+    return JSONResponse(list(out.values()))
+
+
 # Static frontend. Mounted last so /api/* routes above take precedence.
 # html=True serves index.html for "/" (and as the SPA fallback).
 app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")

@@ -105,6 +105,17 @@ def main():
         if page.locator("#log-tbody tr").count() <= n_inf:
             problems.append("ALL level filter did not widen the row set")
 
+        # Usage page: ledger table renders with day rows and bars.
+        page.goto(args.url + "/#usage", wait_until="networkidle")
+        page.wait_for_timeout(600)
+        n_days = page.locator("#usage-tbody tr").count()
+        if n_days < 2:
+            problems.append(f"usage page rendered {n_days} day rows (want >=2)")
+        if page.locator("#usage-tbody .usage-bar").count() == 0:
+            problems.append("usage page rendered no bars")
+        if "KB" not in (page.locator("#usage-today").inner_text() or ""):
+            problems.append("usage page has no today headline")
+
         page.wait_for_timeout(500)
 
         if args.screenshot:

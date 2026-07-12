@@ -6,6 +6,7 @@
 import { loadDevices, onDeviceChange as onDeviceChangeCb } from '/js/devices.js';
 import { start as mapStart, stop as mapStop, onDeviceChange as mapDeviceChange } from '/js/map.js';
 import { start as logsStart, stop as logsStop, onDeviceChange as logsDeviceChange } from '/js/logs.js';
+import { start as usageStart, stop as usageStop, onDeviceChange as usageDeviceChange } from '/js/usage.js';
 
 // ── Clock ───────────────────────────────────────────────────
 const clockEl = document.getElementById('clock');
@@ -18,7 +19,7 @@ tickClock();
 setInterval(tickClock, 1000);
 
 // ── Router ───────────────────────────────────────────────────
-const PAGES    = ['map', 'logs', 'events', 'settings'];
+const PAGES    = ['map', 'logs', 'usage', 'events', 'settings'];
 const navItems = document.querySelectorAll('.nav-item[data-page]');
 let currentPage = null;
 
@@ -32,6 +33,7 @@ function navigate(page) {
 
   if (currentPage === 'map') mapStop();
   if (currentPage === 'logs') logsStop();
+  if (currentPage === 'usage') usageStop();
 
   PAGES.forEach(p => {
     const el = document.getElementById(`page-${p}`);
@@ -50,6 +52,8 @@ function navigate(page) {
     }, 50);
   } else if (page === 'logs') {
     logsStart();
+  } else if (page === 'usage') {
+    usageStart();
   }
 }
 
@@ -59,6 +63,7 @@ window.addEventListener('hashchange', () => navigate(getPage()));
 onDeviceChangeCb(() => {
   mapDeviceChange();
   logsDeviceChange();
+  usageDeviceChange();
 });
 
 // ── Bootstrap ────────────────────────────────────────────────
