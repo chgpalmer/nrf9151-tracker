@@ -1387,3 +1387,9 @@ tr.lvl-4 .log-text, tr.lvl-4 .log-mod { color: var(--text-dim); }
 .toggle-track { display: block; width: 40px; height: 22px; border-radius: 11px; background: var(--accent, #4a9eda); opacity: 0.45; position: relative; }
 .toggle-track::after { content: ''; position: absolute; top: 3px; right: 3px; width: 16px; height: 16px; border-radius: 50%; background: #fff; opacity: 0.9; }
 .toggle.disabled { cursor: not-allowed; }
+.settings-badge { font-size: 0.65rem; padding: 2px 6px; border-radius: 4px; background: var(--border, #333); color: var(--text-dim, #999); vertical-align: middle; margin-left: 6px; font-weight: 500; }
+.settings-badge.planned { background: rgba(220,160,60,0.18); color: #d9a24a; }
+.settings-value { font-variant-numeric: tabular-nums; color: var(--text-dim, #999); font-size: 0.9rem; }
+.toggle.off .toggle-track { background: var(--border, #444); }
+.toggle.off .toggle-track::after { right: auto; left: 3px; }
+.settings-btn { padding: 8px 14px; border-radius: 6px; border: 1px solid var(--border, #333); background: transparent; color: var(--text-dim, #888); cursor: not-allowed; }

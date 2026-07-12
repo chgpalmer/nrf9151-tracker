@@ -241,6 +241,49 @@
               <input type="checkbox" checked disabled /><span class="toggle-track"></span>
             </label>
           </div>
+          <div class="settings-row">
+            <div class="settings-info">
+              <div class="settings-name">Live update rate / track holes <span class="settings-badge">device Kconfig</span></div>
+              <div class="settings-desc">One knob, one trade: how often the radio wakes to ship (currently 120 s while moving). Rarer + fatter sessions = fewer GNSS holes and fewer billed sessions, but a laggier live view. The future slider lives here.</div>
+            </div>
+            <label class="toggle disabled" title="TRACKER_FLUSH_INTERVAL_S — rebuild to change, remote control later">
+              <span class="settings-value">120 s</span>
+            </label>
+          </div>
+          <div class="settings-row">
+            <div class="settings-info">
+              <div class="settings-name">GPS sample rate <span class="settings-badge">device Kconfig</span></div>
+              <div class="settings-desc">Points per second while moving (resolution vs data). 1 Hz is the hardware ceiling; race-mode dead reckoning would slot in here too.</div>
+            </div>
+            <label class="toggle disabled" title="TRACKER_POST_INTERVAL_S — rebuild to change">
+              <span class="settings-value">1 Hz</span>
+            </label>
+          </div>
+          <div class="settings-row">
+            <div class="settings-info">
+              <div class="settings-name">Fast search pattern <span class="settings-badge">shell: fastsearch</span></div>
+              <div class="settings-desc">Front-loaded out-of-coverage retry schedule (5/10/20/40 s). Persisted in modem NVM.</div>
+            </div>
+            <label class="toggle disabled" title="Device shell: fastsearch on|off">
+              <input type="checkbox" checked disabled /><span class="toggle-track"></span>
+            </label>
+          </div>
+          <div class="settings-row">
+            <div class="settings-info">
+              <div class="settings-name">Quiet while parked <span class="settings-badge planned">PLANNED</span></div>
+              <div class="settings-desc">Skip radio wakes entirely when parked and nothing changed; heartbeat every couple of hours. Takes a parked month from ~1 MB to ~0.1 MB. Waiting on parked-day usage data to justify it.</div>
+            </div>
+            <label class="toggle disabled off" title="Not built yet">
+              <input type="checkbox" disabled /><span class="toggle-track"></span>
+            </label>
+          </div>
+          <div class="settings-row">
+            <div class="settings-info">
+              <div class="settings-name">Find my bike <span class="settings-badge planned">PLANNED</span></div>
+              <div class="settings-desc">Force continuous 1 Hz + live flushes for 10 minutes, from here. Needs the authenticated downlink first.</div>
+            </div>
+            <button class="settings-btn" disabled title="Needs authenticated downlink">Locate now</button>
+          </div>
           <div class="settings-note">These mirror device-side switches (shell: <code>agnss on|off</code>, <code>checkpoint on|off</code>). Remote control arrives with an authenticated downlink — an unauthenticated settings channel would let anyone reconfigure the tracker.</div>
         </div>
       </section>
