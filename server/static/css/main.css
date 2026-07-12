@@ -768,6 +768,8 @@ body.map-has-fullscreen .top-rail { display: none; }
 
 .drawer-body {
   padding: 16px;
+  flex: 1;        /* fill the drawer column… */
+  min-height: 0;  /* …so overflow-y actually engages */
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -1560,10 +1562,23 @@ tr.lvl-4 .log-text, tr.lvl-4 .log-mod { color: var(--text-dim); }
 @media (max-width: 1099px) {
   /* Overview, not inspection: the SOURCES row is desktop furniture; the
    * SHOW group slims to just the LIVE/DAY chips, inline after the date
-   * (journey selection lives in the Journeys table). */
+   * (journey selection lives in the Journeys table). ALL control labels
+   * go — DATE/SHOW are obvious, and narrow phones wrapped the chips
+   * onto a second row, shoving the side panel off-screen. */
   .page-controls .cg-sources { display: none; }
-  .cg-show .control-label,
+  .page-controls .control-label,
   .cg-show .hist-range-label { display: none; }
+  /* One-row budget at 360px: tighter gaps, compact date input. */
+  .page-controls { gap: 8px; padding: 8px 10px; }
+  .page-controls .control-group { gap: 5px; }
+  .date-input { font-size: 11px; padding: 4px 4px; max-width: 118px; }
+
+  /* Safety net for short/narrow screens: if the stack still doesn't
+   * fit, the page scrolls instead of silently clipping the tables. */
+  #page-map { overflow-y: auto; }
+
+  /* Fix-detail header slims down; the body scrolls (see .drawer-body). */
+  .drawer-header { padding: 6px 12px; }
 
   /* The map is the point of the page: keep it roughly square (bounded
    * by 42dvh so short/landscape phones still fit the stack). The zone

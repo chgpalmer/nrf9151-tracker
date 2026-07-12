@@ -263,10 +263,10 @@ def main():
         if args.screenshot:
             page.screenshot(path=args.screenshot)
 
-        # ── Mobile pass (390x844): vertical stack, overview mode (the
-        # SHOW/SOURCES control rows hide), and fix detail opens INLINE in
-        # the DETAIL tab — same as desktop, no fullscreen takeover.
-        mob = browser.new_page(viewport={"width": 390, "height": 844})
+        # ── Mobile pass (360x740 — a NARROW phone, the class that wrapped
+        # the chips row): vertical stack, overview mode, fix detail INLINE
+        # in the DETAIL tab — no fullscreen takeover.
+        mob = browser.new_page(viewport={"width": 360, "height": 740})
         mob.on("pageerror", lambda e: console_errors.append(f"mobile pageerror: {e}"))
         mob.goto(args.url, wait_until="networkidle", timeout=30000)
         mob.wait_for_timeout(800)
@@ -278,9 +278,14 @@ def main():
             "getComputedStyle(document.querySelector('.cg-sources')).display")
         if vis != "none":
             problems.append("mobile: .cg-sources row should be hidden")
-        # LIVE/DAY chips stay reachable on the phone (slimmed SHOW group).
+        # LIVE/DAY chips stay reachable on the phone (slimmed SHOW group)
+        # and the controls fit ONE row even on a narrow screen.
         if mob.locator("#trip-chips button").count() == 0:
             problems.append("mobile: LIVE/DAY chips missing")
+        ch = mob.evaluate(
+            "document.querySelector('.page-controls').getBoundingClientRect().height")
+        if ch > 56:
+            problems.append(f"mobile controls bar is {ch:.0f}px tall — wrapped?")
         # Charts start collapsed on the phone — the map is king.
         if mob.locator(".chart-panel.collapsed").count() == 0:
             problems.append("mobile: chart panel should start collapsed")
