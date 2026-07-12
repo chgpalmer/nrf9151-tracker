@@ -29,6 +29,18 @@ static int64_t anchor_since_ms;
 static bool    gps_stationary;
 static int64_t last_gps_ms;
 
+/* The last CONFIRMED parked spot. A false wake (multipath jump, brief walk
+ * to the door) shouldn't cost a fresh 300 s dwell when fixes return to the
+ * same place — measured: each such wake shipped ~300 points of 1 Hz jitter.
+ * Returning within the radius for RETURN_MS restores stationary; wandering
+ * far (a real departure) forgets the spot. */
+#define RETURN_MS   60000
+#define FORGET_MULT 4.0
+static double  parked_lat, parked_lon;
+static bool    parked_valid;
+static bool    returning;
+static int64_t return_since_ms;
+
 /* Cell evidence: LRU of recent cell IDs + when the last NOVEL one appeared. */
 static uint32_t cells[CELL_LRU];
 static uint8_t  cell_count;
@@ -39,6 +51,8 @@ void motion_init(int64_t now_ms)
 {
 	anchor_valid = false;
 	gps_stationary = false;
+	parked_valid = false;
+	returning = false;
 	last_gps_ms = now_ms - GPS_HOLD_MS; /* no fix yet = GPS not fresh */
 	cell_count = 0;
 	cell_seen = false;
@@ -71,10 +85,39 @@ void motion_note_gps(double lat_deg, double lon_deg, double acc_m,
 
 	double d = dist_m(anchor_lat, anchor_lon, lat_deg, lon_deg);
 
+	/* Return-to-parked shortcut: back inside the remembered spot's radius
+	 * for RETURN_MS restores stationary without the full entry dwell. */
+	if (!gps_stationary && parked_valid) {
+		double dp = dist_m(parked_lat, parked_lon, lat_deg, lon_deg);
+
+		if (dp <= RADIUS_M) {
+			if (!returning) {
+				returning = true;
+				return_since_ms = now_ms;
+			} else if ((now_ms - return_since_ms) >= RETURN_MS) {
+				anchor_lat = parked_lat;
+				anchor_lon = parked_lon;
+				anchor_since_ms = now_ms;
+				gps_stationary = true;
+				returning = false;
+				LOG_INF("motion: back at parked spot");
+				return;
+			}
+		} else {
+			returning = false;
+			if (dp > FORGET_MULT * RADIUS_M) {
+				parked_valid = false; /* genuinely departed */
+			}
+		}
+	}
+
 	if (d <= RADIUS_M) {
 		/* In-radius: dwell accumulates. */
 		if (!gps_stationary && (now_ms - anchor_since_ms) >= ENTRY_MS) {
 			gps_stationary = true;
+			parked_lat = anchor_lat;
+			parked_lon = anchor_lon;
+			parked_valid = true;
 			LOG_INF("motion: stationary (within %d m for %d s)",
 				RADIUS_M, CONFIG_TRACKER_MOTION_ENTRY_S);
 		}

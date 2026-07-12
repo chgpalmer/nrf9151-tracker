@@ -96,6 +96,40 @@ ZTEST(motion, test_blurry_jump_does_not_wake)
 	zassert_false(motion_stationary(t), "sharp displacement must wake");
 }
 
+/* A false wake must not cost a fresh 300 s dwell: fixes returning to the
+ * remembered parked spot restore stationary after ~60 s (measured cost of
+ * the old behaviour: ~300 shipped jitter points per wake). */
+ZTEST(motion, test_return_to_parked_shortcut)
+{
+	for (int i = 0; i <= CONFIG_TRACKER_MOTION_ENTRY_S; i++) {
+		gps(0, 0);
+	}
+	zassert_true(motion_stationary(t), "precondition: parked");
+	gps(3.0 * RADIUS_M, 0); /* sharp jump: wake, spot stays remembered */
+	zassert_false(motion_stationary(t), "woke");
+	for (int i = 0; i < 62; i++) {
+		gps(0, 0);
+	}
+	zassert_true(motion_stationary(t), "return shortcut must restore");
+}
+
+/* A genuine departure (beyond FORGET_MULT x radius) forgets the spot:
+ * the next arrival anywhere needs the full entry dwell. */
+ZTEST(motion, test_departure_forgets_parked_spot)
+{
+	for (int i = 0; i <= CONFIG_TRACKER_MOTION_ENTRY_S; i++) {
+		gps(0, 0);
+	}
+	zassert_true(motion_stationary(t), "precondition: parked");
+	gps(6.0 * RADIUS_M, 0); /* really gone */
+	gps(7.0 * RADIUS_M, 0);
+	zassert_false(motion_stationary(t), "departed");
+	for (int i = 0; i < 62; i++) {
+		gps(0, 0);
+	}
+	zassert_false(motion_stationary(t), "no shortcut after departure");
+}
+
 ZTEST(motion, test_cell_flap_within_lru_is_stationary)
 {
 	/* No GPS at all: cell evidence only. Two towers ping-ponging.
