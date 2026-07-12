@@ -241,23 +241,47 @@
               <input type="checkbox" checked disabled /><span class="toggle-track"></span>
             </label>
           </div>
-          <div class="settings-row">
+          <div class="settings-row settings-slider-row">
             <div class="settings-info">
-              <div class="settings-name">Live update rate / track holes <span class="settings-badge">device Kconfig</span></div>
-              <div class="settings-desc">One knob, one trade: how often the radio wakes to ship (currently 120 s while moving). Rarer + fatter sessions = fewer GNSS holes and fewer billed sessions, but a laggier live view. The future slider lives here.</div>
+              <div class="settings-name">Live update interval <span class="settings-badge">estimator — device runs 120 s (Kconfig)</span></div>
+              <div class="settings-desc">Seconds between radio sessions while moving. Watching a borrowed bike live? Drag left and read the price below. Realistic floor ~15 s: each session blinds GNSS for ~8 s regardless of payload.</div>
+              <div class="slider-line">
+                <input type="range" id="set-flush" min="15" max="900" step="5" value="120" />
+                <span class="settings-value" id="set-flush-val"></span>
+              </div>
             </div>
-            <label class="toggle disabled" title="TRACKER_FLUSH_INTERVAL_S — rebuild to change, remote control later">
-              <span class="settings-value">120 s</span>
-            </label>
           </div>
-          <div class="settings-row">
+          <div class="settings-row settings-slider-row">
             <div class="settings-info">
-              <div class="settings-name">GPS sample rate <span class="settings-badge">device Kconfig</span></div>
-              <div class="settings-desc">Points per second while moving (resolution vs data). 1 Hz is the hardware ceiling; race-mode dead reckoning would slot in here too.</div>
+              <div class="settings-name">GPS sample interval <span class="settings-badge">estimator — device runs 1 s (Kconfig)</span></div>
+              <div class="settings-desc">Seconds between track points while moving. 1 s (1 Hz) is the hardware ceiling; slower trades resolution for data.</div>
+              <div class="slider-line">
+                <input type="range" id="set-sample" min="1" max="60" step="1" value="1" />
+                <span class="settings-value" id="set-sample-val"></span>
+              </div>
             </div>
-            <label class="toggle disabled" title="TRACKER_POST_INTERVAL_S — rebuild to change">
-              <span class="settings-value">1 Hz</span>
-            </label>
+          </div>
+          <div class="settings-row settings-slider-row">
+            <div class="settings-info">
+              <div class="settings-name">Riding hours per day <span class="settings-badge">estimator input</span></div>
+              <div class="settings-desc">How much moving time the estimate assumes; parked + logs background is added automatically from the calibrated model.</div>
+              <div class="slider-line">
+                <input type="range" id="set-riding" min="0" max="8" step="0.5" value="1" />
+                <span class="settings-value" id="set-riding-val"></span>
+              </div>
+            </div>
+          </div>
+          <div class="settings-row est-panel" id="est-panel">
+            <div class="settings-info">
+              <div class="settings-name">What this configuration costs</div>
+              <div class="est-grid">
+                <div class="est-cell"><div class="est-label">live latency</div><div class="est-num" id="est-latency"></div></div>
+                <div class="est-cell"><div class="est-label">GNSS track holes</div><div class="est-num" id="est-holes"></div></div>
+                <div class="est-cell"><div class="est-label">data</div><div class="est-num" id="est-data"></div></div>
+              </div>
+              <div class="settings-desc" id="est-detail"></div>
+              <div class="settings-desc">Model: js/usage-model.js — constants calibrated from the 2026-07-12 ride and Velocity billing; retune them as the Usage ledger accumulates.</div>
+            </div>
           </div>
           <div class="settings-row">
             <div class="settings-info">

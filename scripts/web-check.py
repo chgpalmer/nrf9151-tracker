@@ -122,6 +122,15 @@ def main():
         if page.locator("#page-settings .settings-row").count() < 2:
             problems.append("settings page missing placeholder rows")
 
+        # Settings estimator: sliders drive the cost model.
+        before = page.locator("#est-data").inner_text()
+        page.locator("#set-flush").evaluate(
+            "el => { el.value = 15; el.dispatchEvent(new Event('input')); }")
+        page.wait_for_timeout(200)
+        after = page.locator("#est-data").inner_text()
+        if not before or before == after:
+            problems.append(f"settings estimator not reactive ({before!r} -> {after!r})")
+
         page.wait_for_timeout(500)
 
         if args.screenshot:

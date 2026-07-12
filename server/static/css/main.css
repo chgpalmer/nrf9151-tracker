@@ -1393,3 +1393,11 @@ tr.lvl-4 .log-text, tr.lvl-4 .log-mod { color: var(--text-dim); }
 .toggle.off .toggle-track { background: var(--border, #444); }
 .toggle.off .toggle-track::after { right: auto; left: 3px; }
 .settings-btn { padding: 8px 14px; border-radius: 6px; border: 1px solid var(--border, #333); background: transparent; color: var(--text-dim, #888); cursor: not-allowed; }
+.slider-line { display: flex; align-items: center; gap: 12px; margin-top: 8px; }
+.slider-line input[type=range] { flex: 1; accent-color: var(--accent, #4a9eda); }
+.slider-line .settings-value { min-width: 84px; text-align: right; color: var(--text, #ddd); }
+.est-panel { background: rgba(74,158,218,0.06); }
+.est-grid { display: flex; gap: 24px; margin: 10px 0; flex-wrap: wrap; }
+.est-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-dim, #888); }
+.est-num { font-size: 1.25rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.est-num.over { color: #e05555; }

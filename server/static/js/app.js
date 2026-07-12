@@ -7,6 +7,7 @@ import { loadDevices, onDeviceChange as onDeviceChangeCb } from '/js/devices.js'
 import { start as mapStart, stop as mapStop, onDeviceChange as mapDeviceChange } from '/js/map.js';
 import { start as logsStart, stop as logsStop, onDeviceChange as logsDeviceChange } from '/js/logs.js';
 import { start as usageStart, stop as usageStop, onDeviceChange as usageDeviceChange } from '/js/usage.js';
+import { init as settingsInit } from '/js/settings.js';
 
 // ── Clock ───────────────────────────────────────────────────
 const clockEl = document.getElementById('clock');
@@ -69,6 +70,7 @@ onDeviceChangeCb(() => {
 // ── Bootstrap ────────────────────────────────────────────────
 async function boot() {
   await loadDevices();
+  settingsInit();
   navigate(getPage());
 }
 
