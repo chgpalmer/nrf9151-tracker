@@ -93,10 +93,10 @@ def main():
                 problems.append(
                     f"DAY drew {dc['trackLines']} track lines, want 3 "
                     "(one per journey; parked noise must draw no line)")
-            if dc["points"] > 10:
+            if dc["points"] > 3:
                 problems.append(
                     f"DAY drew {dc['points']} point markers with POINTS "
-                    "off (want ~latest+cells)")
+                    "off (want latest + in-journey cells only)")
             page.click("#show-points")
             page.wait_for_timeout(400)
             dc = page.evaluate("window._mapView.debugCounts()")
@@ -106,6 +106,25 @@ def main():
                     "the escape hatch should show everything")
             page.click("#show-points")
             page.wait_for_timeout(300)
+
+            # The SOURCES chips filter the timeline too: both off = empty.
+            def density_ticks():
+                return page.evaluate(
+                    "(() => { const c = document.getElementById('tl-density');"
+                    " const d = c.getContext('2d')"
+                    ".getImageData(0, 0, c.width, c.height).data;"
+                    " let n = 0; for (let i = 3; i < d.length; i += 4)"
+                    " if (d[i]) n++; return n; })()")
+            if density_ticks() == 0:
+                problems.append("timeline density empty with sources on")
+            page.click("#filter-gps")
+            page.click("#filter-cell")
+            page.wait_for_timeout(200)
+            if density_ticks() != 0:
+                problems.append("timeline density ignores the source filter")
+            page.click("#filter-gps")
+            page.click("#filter-cell")
+            page.wait_for_timeout(200)
         else:
             problems.append("no DAY chip found for the density check")
 

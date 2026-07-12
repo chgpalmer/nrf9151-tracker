@@ -278,6 +278,13 @@ export function createMapView(containerId, onFixClick) {
       }
       const isGps = fix.source === 'gps';
       if (isGps && !showPoints) return; // the polyline represents it
+      // Cell dots follow the same journeys-only rule as the track: a
+      // parked day piles hundreds of amber dots on one spot. POINTS
+      // reveals them like everything else.
+      if (!isGps && !showPoints && tripWindows &&
+          !tripWindows.some(w => fix.received_ts >= w[0] && fix.received_ts <= w[1])) {
+        return;
+      }
       // interactive:false — canvas hit-testing is O(layers) per mousemove;
       // the map-level nearest-fix handler below covers hover AND click for
       // every fix, drawn or not.
@@ -347,9 +354,9 @@ export function createMapView(containerId, onFixClick) {
    * 16k (sub-ms), throttled to animation frames.
    */
   /** Only what's drawn is inspectable — hovering an invisible parked
-   * fix would ring thin air. */
+   * fix would ring thin air. Applies to GPS and cell alike. */
   function fixVisible(f) {
-    if (f.source !== 'gps' || showPoints || !tripWindows) return true;
+    if (showPoints || !tripWindows) return true;
     if (f === currentFixes[currentFixes.length - 1]) return true; // latest marker
     return tripWindows.some(w => f.received_ts >= w[0] && f.received_ts <= w[1]);
   }

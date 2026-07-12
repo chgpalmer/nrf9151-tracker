@@ -88,6 +88,7 @@ document.getElementById('date-next').addEventListener('click', () => stepDay(1))
   chip.addEventListener('click', () => {
     chip.classList.toggle('active');
     chip.setAttribute('aria-pressed', String(chip.classList.contains('active')));
+    renderDensity(); // the timeline respects the source filter too
     applyView(false);
   });
 });
@@ -424,13 +425,17 @@ function renderDensity() {
   const ctx = densityEl.getContext('2d');
   ctx.scale(dpr, dpr);
   ctx.clearRect(0, 0, w, h);
-  // GPS ticks only inside journeys: parked wakes are 80%+ of a day's
-  // points (measured 2026-07-12) and pure static here — the trip bands
-  // ARE the shape of the day. Sparse cell ticks stay: they show the
-  // tracker was alive while parked.
+  // Ticks only inside journeys — parked wakes (GPS jitter AND cell
+  // heartbeats) are the vast majority of a day's points (measured
+  // 2026-07-12: 86% GPS alone) and pure static here; the trip bands ARE
+  // the shape of the day. The SOURCES chips filter here like everywhere
+  // else.
   const wins = tripWindows(trips);
+  const gps  = gpsChip.classList.contains('active');
+  const cell = cellChip.classList.contains('active');
   for (const f of dayFixes) {
-    if (f.source === 'gps' && !inAnyWindow(f.received_ts, wins)) continue;
+    if (!(f.source === 'gps' ? gps : cell)) continue;
+    if (!inAnyWindow(f.received_ts, wins)) continue;
     const frac = (f.received_ts - dayStart) / DAY;
     if (frac < 0 || frac > 1) continue;
     ctx.fillStyle = f.source === 'cell' ? 'rgba(245,166,35,0.7)' : 'rgba(0,229,160,0.55)';
