@@ -29,6 +29,11 @@ static uint32_t need_flags;
 static uint64_t need_mask;
 static uint8_t consec_fails;
 static int     last_exchange_err;
+/* Edge-logged failure episode: one WRN when exchanges start failing, one INF
+ * when assistance flows again. Field lesson (2026-07-12 ride): two boot-time
+ * responses died on the air invisibly (failures were DBG-only) and the
+ * diagnosis needed the server's ledger. */
+static bool    exchange_failing;
 
 static const char *device_id_str;
 
@@ -232,12 +237,26 @@ void agnss_poll(int64_t now_ms, const struct loc_status *loc)
 		return;
 	}
 
-	if (fetch_and_inject() == 0) {
+	int err = fetch_and_inject();
+
+	if (err == 0) {
+		if (exchange_failing) {
+			LOG_INF("exchange recovered");
+			exchange_failing = false;
+		}
 		consec_fails = 0;
 		need = false;
 		last_need_check_ms = now_ms; /* re-evaluate in NEED_CHECK_MS */
 		next_attempt_ms = now_ms +
 			(int64_t)CONFIG_TRACKER_AGNSS_COOLDOWN_S * 1000;
+	} else if (!exchange_failing) {
+		/* Episode onset. -EAGAIN = response lost on the air (NON both
+		 * ways, nobody retransmits); -EBADMSG/-ENODATA = it arrived
+		 * broken. */
+		LOG_WRN("exchange failed (%d) — will retry", err);
+		exchange_failing = true;
+		consec_fails = 1;
+		next_attempt_ms = now_ms + RETRY_S * 1000;
 	} else if (++consec_fails >= MAX_CONSEC_FAILS) {
 		/* Edge-logged: one WRN per lockout, not one per failure. */
 		LOG_WRN("%u fetches failed (last err %d), backing off %d min",
