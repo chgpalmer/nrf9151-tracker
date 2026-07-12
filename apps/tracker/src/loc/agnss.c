@@ -32,6 +32,25 @@ static int     last_exchange_err;
 
 static const char *device_id_str;
 
+/* Runtime kill-switch: the fallback (plain over-the-air demodulation) must
+ * stay testable on hardware without a rebuild. `agnss off` on the shell. */
+static bool agnss_enabled = true;
+
+#if defined(CONFIG_SHELL)
+#include <zephyr/shell/shell.h>
+
+static int cmd_agnss(const struct shell *sh, size_t argc, char **argv)
+{
+	if (argc == 2) {
+		agnss_enabled = (strcmp(argv[1], "on") == 0);
+	}
+	shell_print(sh, "agnss %s", agnss_enabled ? "on" : "off");
+	return 0;
+}
+SHELL_CMD_ARG_REGISTER(agnss, NULL, "A-GNSS assistance fetch (on|off)",
+		       cmd_agnss, 1, 1);
+#endif
+
 void agnss_set_device_id(const char *id)
 {
 	device_id_str = id;
@@ -205,7 +224,7 @@ void agnss_poll(int64_t now_ms, const struct loc_status *loc)
 			loc->state == LOC_CELL_LOOP) &&
 		       loc->publish_allowed && coap_pub_ready();
 
-	if (!allowed || now_ms < next_attempt_ms) {
+	if (!agnss_enabled || !allowed || now_ms < next_attempt_ms) {
 		return;
 	}
 	refresh_need(now_ms);

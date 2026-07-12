@@ -116,6 +116,12 @@ def main():
         if "KB" not in (page.locator("#usage-today").inner_text() or ""):
             problems.append("usage page has no today headline")
 
+        # Settings page: placeholder toggles render.
+        page.goto(args.url + "/#settings", wait_until="networkidle")
+        page.wait_for_timeout(400)
+        if page.locator("#page-settings .settings-row").count() < 2:
+            problems.append("settings page missing placeholder rows")
+
         page.wait_for_timeout(500)
 
         if args.screenshot:

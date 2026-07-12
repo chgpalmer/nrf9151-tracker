@@ -219,13 +219,29 @@
         </div>
       </section>
 
-      <!-- ── SETTINGS PAGE ── -->
+      <!-- ── SETTINGS PAGE (placeholders: remote control needs an
+           authenticated downlink first; today these are shell commands) ── -->
       <section class="page hidden" id="page-settings" data-page="settings">
-        <div class="coming-soon">
-          <div class="coming-soon-icon">◧</div>
-          <div class="coming-soon-title">Settings</div>
-          <div class="coming-soon-body">Device naming, reporting interval, and geofence configuration will be available here.</div>
-          <div class="coming-soon-tag">NOT YET IMPLEMENTED</div>
+        <div class="settings-list">
+          <div class="settings-row">
+            <div class="settings-info">
+              <div class="settings-name">A-GNSS assistance</div>
+              <div class="settings-desc">Fetch ephemeris/time/location from the server on boot and when the inventory runs thin. Off = plain over-the-air demodulation (the fallback this toggle exists to exercise).</div>
+            </div>
+            <label class="toggle disabled" title="Remote control needs an authenticated downlink — use the device shell: agnss on|off">
+              <input type="checkbox" checked disabled /><span class="toggle-track"></span>
+            </label>
+          </div>
+          <div class="settings-row">
+            <div class="settings-info">
+              <div class="settings-name">Attach checkpoint / band memory</div>
+              <div class="settings-desc">Persist the modem's network state at the first parked entry so the next cold boot attaches warm instead of full-scanning. Off = every boot scans from scratch.</div>
+            </div>
+            <label class="toggle disabled" title="Remote control needs an authenticated downlink — use the device shell: checkpoint on|off">
+              <input type="checkbox" checked disabled /><span class="toggle-track"></span>
+            </label>
+          </div>
+          <div class="settings-note">These mirror device-side switches (shell: <code>agnss on|off</code>, <code>checkpoint on|off</code>). Remote control arrives with an authenticated downlink — an unauthenticated settings channel would let anyone reconfigure the tracker.</div>
         </div>
       </section>
 

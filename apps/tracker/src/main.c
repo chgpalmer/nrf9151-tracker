@@ -159,7 +159,19 @@ static int gnss_start(void)
 static void lte_handler(const struct lte_lc_evt *const evt)
 {
 	switch (evt->type) {
-	case LTE_LC_EVT_NW_REG_STATUS:
+	case LTE_LC_EVT_NW_REG_STATUS: {
+		/* The searching EDGE splits the attach time: boot->searching is
+		 * modem init, searching->registered is scan + PLMN walk +
+		 * registration — the part band memory can shrink. One INF per
+		 * episode. */
+		static enum lte_lc_nw_reg_status prev_status =
+			LTE_LC_NW_REG_NOT_REGISTERED;
+
+		if (evt->nw_reg_status == LTE_LC_NW_REG_SEARCHING &&
+		    prev_status != LTE_LC_NW_REG_SEARCHING) {
+			LOG_INF("LTE: searching");
+		}
+		prev_status = evt->nw_reg_status;
 		lte_status = evt->nw_reg_status;
 		if (lte_status == LTE_LC_NW_REG_REGISTERED_HOME ||
 		    lte_status == LTE_LC_NW_REG_REGISTERED_ROAMING) {
@@ -171,6 +183,7 @@ static void lte_handler(const struct lte_lc_evt *const evt)
 			lte_connected = false;
 		}
 		break;
+	}
 	case LTE_LC_EVT_PSM_UPDATE:
 		/* active_time == -1 means the network refused PSM. Roaming networks
 		 * often do. Without PSM the modem keeps monitoring pagings and GNSS
@@ -391,6 +404,34 @@ static void print_status(const struct nrf_modem_gnss_pvt_data_frame *p,
 		pdn_active ? "active" : "down");
 }
 
+/* ── attach-speed experiment: network-state checkpoint ────────────────────
+ * The modem persists its network history (band, channel, PLMN — and GNSS
+ * data) to its own NVM only on CFUN=0, which an abrupt dev reset never
+ * performs — so every cold boot pays a full scan (measured ~90 s vs 32-39 s
+ * warm). Once per boot, at the first parked entry (radio idle, nobody
+ * waiting), cycle power-off -> normal: one extra re-attach at the quietest
+ * possible moment buys the NEXT reset a warm start. `checkpoint off` on the
+ * shell disables it at runtime. */
+static bool checkpoint_enabled = IS_ENABLED(CONFIG_TRACKER_LTE_CHECKPOINT);
+static bool checkpoint_done;
+
+#if defined(CONFIG_SHELL)
+#include <zephyr/shell/shell.h>
+
+static int cmd_checkpoint(const struct shell *sh, size_t argc, char **argv)
+{
+	if (argc == 2) {
+		checkpoint_enabled = (strcmp(argv[1], "on") == 0);
+	}
+	shell_print(sh, "checkpoint %s%s", checkpoint_enabled ? "on" : "off",
+		    checkpoint_done ? " (already ran this boot)" : "");
+	return 0;
+}
+SHELL_CMD_ARG_REGISTER(checkpoint, NULL,
+		       "LTE network-state checkpoint (on|off)",
+		       cmd_checkpoint, 1, 1);
+#endif
+
 /* A datagram left the device: pulse the TX LED, stamp the RRC-tail
  * measurement, and tell the FSM when the coarse position is on the map (it
  * holds the radio for GNSS until the boot cell report is out). */
@@ -505,6 +546,22 @@ int main(void)
 		loc_fsm_update(&pvt, now, lte_connected, motion_stationary(now),
 			       &loc);
 		leds_update(&loc, lte_connected);
+
+		/* First parked entry of this boot: checkpoint the modem's NVM
+		 * (see the block comment at checkpoint_enabled). CFUN=0 takes
+		 * everything down — socket, registration, GNSS — so close the
+		 * socket and force the GNSS mode to be reapplied; the FSM sees
+		 * the registration drop and walks the normal re-attach path. */
+		if (checkpoint_enabled && !checkpoint_done &&
+		    (loc.state == LOC_QUIESCENT || loc.state == LOC_REST)) {
+			checkpoint_done = true;
+			LOG_INF("LTE: checkpoint — persisting network state "
+				"(one re-attach)");
+			coap_pub_close();
+			(void)lte_lc_func_mode_set(LTE_LC_FUNC_MODE_POWER_OFF);
+			(void)lte_lc_func_mode_set(LTE_LC_FUNC_MODE_NORMAL);
+			gnss_mode_applied = LOC_GNSS_OFF;
+		}
 
 		/* Apply the FSM's GNSS mode. Runs GNSS only when the FSM says
 		 * so (a searching modem owns the radio), and switches between

@@ -1374,3 +1374,16 @@ tr.lvl-4 .log-text, tr.lvl-4 .log-mod { color: var(--text-dim); }
 .usage-table td { font-variant-numeric: tabular-nums; }
 .usage-bar-cell { width: 38%; min-width: 120px; }
 .usage-bar { height: 10px; border-radius: 5px; background: var(--accent, #4a9eda); opacity: 0.75; min-width: 2px; }
+
+/* ── Settings page ─────────────────────────────────────────── */
+.settings-list { max-width: 640px; padding: 18px; display: flex; flex-direction: column; gap: 14px; }
+.settings-row { display: flex; align-items: center; gap: 16px; padding: 14px 16px; border: 1px solid var(--border, #333); border-radius: 8px; }
+.settings-info { flex: 1; }
+.settings-name { font-weight: 600; margin-bottom: 4px; }
+.settings-desc { color: var(--text-dim, #888); font-size: 0.85rem; line-height: 1.4; }
+.settings-note { color: var(--text-dim, #888); font-size: 0.8rem; line-height: 1.5; padding: 0 4px; }
+.toggle { position: relative; flex-shrink: 0; }
+.toggle input { position: absolute; opacity: 0; }
+.toggle-track { display: block; width: 40px; height: 22px; border-radius: 11px; background: var(--accent, #4a9eda); opacity: 0.45; position: relative; }
+.toggle-track::after { content: ''; position: absolute; top: 3px; right: 3px; width: 16px; height: 16px; border-radius: 50%; background: #fff; opacity: 0.9; }
+.toggle.disabled { cursor: not-allowed; }
