@@ -84,6 +84,7 @@ export function createMapView(containerId, onFixClick) {
   let showPoints      = false;
   let liveDot         = false;
   let selectedFixId   = null;
+  let tripWindows     = null; // [[from,to],...] = draw track per journey only
 
   // One canvas renderer for all per-fix geometry: a 1 Hz day is 10k+ fixes,
   // and per-fix DOM markers (the old approach) hang the page. Canvas paths
@@ -211,6 +212,7 @@ export function createMapView(containerId, onFixClick) {
   function render(fixes, opts = {}) {
     if (opts.showPoints != null) showPoints = opts.showPoints;
     if (opts.liveDot    != null) liveDot    = opts.liveDot;
+    if ('tripWindows' in opts)   tripWindows = opts.tripWindows;
 
     currentFixes = fixes;
 
@@ -228,21 +230,29 @@ export function createMapView(containerId, onFixClick) {
 
     hideEmpty();
 
-    // Track polyline: GPS fixes only. Cell fixes are tower-resolution
+    // Track polylines: GPS fixes only. Cell fixes are tower-resolution
     // estimates — a line through them draws travel that never happened.
-    // White casing under the brand-green line: the green was picked for
-    // the dark UI, and on the light basemap it washed out — the casing
-    // makes the track read on any background (classic cartography).
-    const gpsLatlngs = fixes.filter(f => f.source === 'gps').map(f => [f.lat, f.lon]);
-    if (gpsLatlngs.length > 1) {
-      L.polyline(gpsLatlngs, {
+    // With tripWindows set (DAY view), one line PER JOURNEY: parked
+    // scatter draws no line (86% of a day's points are parked wakes,
+    // measured 2026-07-12) and no phantom straight line joins distant
+    // journeys. White casing under the brand-green line: the green was
+    // picked for the dark UI and washed out on the light basemap.
+    const gps = fixes.filter(f => f.source === 'gps');
+    const segs = tripWindows
+      ? tripWindows.map(([a, b]) =>
+          gps.filter(f => f.received_ts >= a && f.received_ts <= b))
+      : [gps];
+    for (const seg of segs) {
+      if (seg.length < 2) continue;
+      const latlngs = seg.map(f => [f.lat, f.lon]);
+      L.polyline(latlngs, {
         renderer: canvasRenderer,
         color:   '#FFFFFF',
         weight:  6,
         opacity: 0.9,
         interactive: false,
       }).addTo(trackLayer);
-      L.polyline(gpsLatlngs, {
+      L.polyline(latlngs, {
         renderer: canvasRenderer,
         color:   TOKEN.signal,
         weight:  3,
@@ -336,9 +346,18 @@ export function createMapView(containerId, onFixClick) {
    * line IS the data, no per-fix markers needed. Linear scan is fine at
    * 16k (sub-ms), throttled to animation frames.
    */
+  /** Only what's drawn is inspectable — hovering an invisible parked
+   * fix would ring thin air. */
+  function fixVisible(f) {
+    if (f.source !== 'gps' || showPoints || !tripWindows) return true;
+    if (f === currentFixes[currentFixes.length - 1]) return true; // latest marker
+    return tripWindows.some(w => f.received_ts >= w[0] && f.received_ts <= w[1]);
+  }
+
   function nearestFix(cpt, maxPx) {
     let best = null, bestD = maxPx;
     for (const f of currentFixes) {
+      if (!fixVisible(f)) continue;
       const p = map.latLngToContainerPoint([f.lat, f.lon]);
       const d = cpt.distanceTo(p);
       if (d < bestD) { bestD = d; best = f; }
@@ -423,5 +442,13 @@ export function createMapView(containerId, onFixClick) {
     }).addTo(hoverLayer);
   }
 
-  return { render, setShowPoints, focusFix, hoverFix, invalidate, map };
+  /** Webtest hook: structural counts of what's actually drawn. */
+  function debugCounts() {
+    return {
+      trackLines: trackLayer.getLayers().length / 2, // casing + line pairs
+      points: markerLayer.getLayers().length,
+    };
+  }
+
+  return { render, setShowPoints, focusFix, hoverFix, invalidate, debugCounts, map };
 }

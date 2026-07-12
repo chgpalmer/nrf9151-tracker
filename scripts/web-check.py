@@ -86,6 +86,26 @@ def main():
                 problems.append(
                     f"Day view created {n_dom} DOM markers (>300) — "
                     "per-fix DOM is back")
+            # DAY = journeys + current position: one track line per
+            # journey, parked noise draws nothing until POINTS reveals it.
+            dc = page.evaluate("window._mapView.debugCounts()")
+            if dc["trackLines"] != 3:
+                problems.append(
+                    f"DAY drew {dc['trackLines']} track lines, want 3 "
+                    "(one per journey; parked noise must draw no line)")
+            if dc["points"] > 10:
+                problems.append(
+                    f"DAY drew {dc['points']} point markers with POINTS "
+                    "off (want ~latest+cells)")
+            page.click("#show-points")
+            page.wait_for_timeout(400)
+            dc = page.evaluate("window._mapView.debugCounts()")
+            if dc["points"] < 5000:
+                problems.append(
+                    f"POINTS revealed only {dc['points']} markers — "
+                    "the escape hatch should show everything")
+            page.click("#show-points")
+            page.wait_for_timeout(300)
         else:
             problems.append("no DAY chip found for the density check")
 
@@ -125,8 +145,11 @@ def main():
         if disp != "grid":
             problems.append(f"desktop map page display is {disp}, want grid")
         n_rows = page.locator("#journeys-table tbody tr").count()
+        if n_rows != 3:
+            problems.append(f"journeys table has {n_rows} rows, want 3 "
+                            "(parked noise must not form a trip)")
         if n_rows == 0:
-            problems.append("journeys table has no rows")
+            pass
         else:
             page.locator("#journeys-table tbody tr").first.click()
             page.wait_for_timeout(300)

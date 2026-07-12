@@ -25,7 +25,7 @@ import { initCharts, updateCharts, setActiveFix, resizeCharts } from '/js/charts
 import { open as openDrawer, onClose as onDrawerClose } from '/js/drawer.js';
 import { currentDevice, setStatus } from '/js/devices.js';
 import { fmtAcc, mpsToKph, deviceStatus } from '/js/format.js';
-import { segmentTrips, haversineM, fmtDistM } from '/js/trips.js';
+import { segmentTrips, haversineM, fmtDistM, tripWindows, inAnyWindow } from '/js/trips.js';
 
 const DAY        = 86400;
 const MIN_FRAC   = 0.002;
@@ -370,6 +370,10 @@ function applyView(fit) {
   mapView.render(win, {
     fitBounds: fit,
     showPoints: pointsChip.classList.contains('active'),
+    // DAY = journeys + current position: the track draws per-journey,
+    // parked scatter hides behind the POINTS chip. Other modes are
+    // explicit windows the user asked for — show everything.
+    tripWindows: sel.mode === 'day' ? tripWindows(trips) : null,
     liveDot: sel.mode === 'live',
     emptyMsg: filtered ? 'All fixes hidden by source filter' : undefined,
     emptySub: filtered ? 'Re-enable GPS or CELL above.' : undefined,
@@ -420,7 +424,13 @@ function renderDensity() {
   const ctx = densityEl.getContext('2d');
   ctx.scale(dpr, dpr);
   ctx.clearRect(0, 0, w, h);
+  // GPS ticks only inside journeys: parked wakes are 80%+ of a day's
+  // points (measured 2026-07-12) and pure static here — the trip bands
+  // ARE the shape of the day. Sparse cell ticks stay: they show the
+  // tracker was alive while parked.
+  const wins = tripWindows(trips);
   for (const f of dayFixes) {
+    if (f.source === 'gps' && !inAnyWindow(f.received_ts, wins)) continue;
     const frac = (f.received_ts - dayStart) / DAY;
     if (frac < 0 || frac > 1) continue;
     ctx.fillStyle = f.source === 'cell' ? 'rgba(245,166,35,0.7)' : 'rgba(0,229,160,0.55)';

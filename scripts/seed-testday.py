@@ -42,14 +42,22 @@ def trip(t0, secs, lat0, lon0, spd=4.0):
 
 
 rows = []
-rows += trip(now - 3 * 3600, 300, 51.505, -0.09)           # trip 1: 5 min
-rows += [(dev, now - 3 * 3600 + 900, 'cell', 51.507, -0.088,
+# Parked noise: QUIESCENT-style wakes 2 min apart with sub-10 m jitter —
+# never "moving", so they must form NO trip, draw NO timeline ticks and
+# NO track line (the UI's journeys-only filtering is asserted on these).
+for i in range(6):
+    rows.append((dev, now - 3 * 3600 + i * 120, 'gps',
+                 51.52 + (0.00004 if i % 2 else -0.00004), -0.11,
+                 30.0, 25.0, 0.2, None, 4))
+rows += trip(now - 2 * 3600 - 2400, 300, 51.505, -0.09)    # trip 1: 5 min
+rows += [(dev, now - 2 * 3600 - 1500, 'cell', 51.507, -0.088,
           None, 1500.0, None, None, None)]
 rows += trip(now - 2 * 3600, 420, 51.508, -0.086, spd=6)   # trip 2: 7 min
-# Dense 1 Hz trip covering now-3h..now (~10800 fixes): a realistic heavy
-# day. The old per-fix-DOM renderer hung the page on this; webtest clicks
-# DAY and asserts the page stays responsive.
-rows += trip(now - 3 * 3600 + 1, 10800 - 2, 51.512, -0.10, spd=5)
+# Dense 1 Hz trip (~6300 fixes): a realistic heavy ride. The old
+# per-fix-DOM renderer hung the page on this; webtest clicks DAY and
+# asserts the page stays responsive. Starts 180 s after trip 2 ends —
+# past STOP_S, so it segments as its own journey (3 total).
+rows += trip(now - 6600, 6300, 51.512, -0.10, spd=5)
 rows += [(dev, now - 600, 'cell', 51.509, -0.084, None, 1200.0, None, None, None)]
 
 db.executemany(

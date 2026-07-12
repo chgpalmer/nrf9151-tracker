@@ -98,3 +98,13 @@ export function segmentTrips(fixes) {
 export function fmtDistM(m) {
   return m >= 1000 ? `${(m / 1000).toFixed(1)} km` : `${Math.round(m)} m`;
 }
+
+/** Trip windows with the same ±30 s slack the trip selection uses. */
+export function tripWindows(trips) {
+  return trips.map(t => [t.start_ts - 30, t.end_ts + 30]);
+}
+
+/** Is a timestamp inside any [from, to] window? */
+export function inAnyWindow(ts, windows) {
+  return windows.some(w => ts >= w[0] && ts <= w[1]);
+}
