@@ -12,8 +12,11 @@
 
 LOG_MODULE_REGISTER(agnss, CONFIG_TRACKER_LOG_LEVEL);
 
-/* One exchange: ~25 B up, ~1 KB down. See Kconfig for the trigger knobs. */
-#define EXCHANGE_TIMEOUT_MS 2500
+/* One exchange: ~25 B up, ~1 KB down. See Kconfig for the trigger knobs.
+ * The timeout must survive an RRC release + paging cycle on a roaming
+ * network: if RAI released the connection right after our request went out,
+ * the ~1 KB response has to page us back — measured multi-second. */
+#define EXCHANGE_TIMEOUT_MS 8000
 #define NEED_CHECK_MS       30000
 #define RETRY_S             60
 #define LOCKOUT_S           900
@@ -25,6 +28,7 @@ static bool    need;
 static uint32_t need_flags;
 static uint64_t need_mask;
 static uint8_t consec_fails;
+static int     last_exchange_err;
 
 static const char *device_id_str;
 
@@ -184,6 +188,7 @@ static int fetch_and_inject(void)
 				  resp, sizeof(resp), EXCHANGE_TIMEOUT_MS);
 
 	if (n < 0) {
+		last_exchange_err = n;
 		LOG_DBG("exchange failed (%d)", n);
 		return n;
 	}
@@ -216,8 +221,8 @@ void agnss_poll(int64_t now_ms, const struct loc_status *loc)
 			(int64_t)CONFIG_TRACKER_AGNSS_COOLDOWN_S * 1000;
 	} else if (++consec_fails >= MAX_CONSEC_FAILS) {
 		/* Edge-logged: one WRN per lockout, not one per failure. */
-		LOG_WRN("%u fetches failed, backing off %d min",
-			consec_fails, LOCKOUT_S / 60);
+		LOG_WRN("%u fetches failed (last err %d), backing off %d min",
+			consec_fails, last_exchange_err, LOCKOUT_S / 60);
 		consec_fails = 0;
 		next_attempt_ms = now_ms + LOCKOUT_S * 1000;
 	} else {
