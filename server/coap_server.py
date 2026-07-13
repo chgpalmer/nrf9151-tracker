@@ -79,6 +79,25 @@ def init_db(path: Path) -> sqlite3.Connection:
         CREATE INDEX IF NOT EXISTS idx_log_dev_time
         ON logs(device_id, received_ts)
     """)
+    # Serving-cell history: who the device was connected to over time — a
+    # connectivity record, deliberately separate from the location timeline.
+    # EVERY reported cell lands here, including ones cells.db can't place
+    # (lat/lon/acc NULL — before 2026-07-13 those were dropped entirely).
+    # act = 3GPP access technology (7 LTE-M, 9 NB-IoT, 0 = old firmware).
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS cell_events (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_id   TEXT    NOT NULL,
+            received_ts REAL    NOT NULL,
+            mcc INTEGER, mnc INTEGER, tac INTEGER, cell_id INTEGER,
+            rsrp_dbm INTEGER, act INTEGER,
+            lat REAL, lon REAL, acc REAL
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_cell_dev_time
+        ON cell_events(device_id, received_ts)
+    """)
     # One row per datagram: the device's data-usage ledger. bytes is the CoAP
     # payload length (kind 'agnss' counts request + response — downlink bills
     # too); the API adds per-datagram framing when estimating on-air cost.
@@ -261,11 +280,22 @@ def store_obs(conn, obs, cells, now: int) -> tuple[int, int, int]:
         elif kind == "cell":
             c = e.cell
             fix = resolve_cell(c.mcc, c.mnc, c.tac, c.cell_id, cells)
+            lat = lon = acc = None
             if fix is None:
                 slog(conn, 2, "coap", f"cell unresolved (mcc={c.mcc} "
                      f"mnc={c.mnc} tac={c.tac} cid={c.cell_id})", device=dev)
+            else:
+                lat, lon, acc, how = fix
+            # Connectivity history first: recorded whether or not the tower
+            # is in cells.db — "who was I connected to" outlives "where".
+            conn.execute(
+                """INSERT INTO cell_events (device_id, received_ts, mcc, mnc,
+                   tac, cell_id, rsrp_dbm, act, lat, lon, acc)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (dev, base_ts, c.mcc, c.mnc, c.tac, c.cell_id,
+                 c.rsrp_dbm, c.act, lat, lon, acc))
+            if fix is None:
                 continue
-            lat, lon, acc, how = fix
             conn.execute(
                 """INSERT INTO positions
                    (device_id, received_ts, source, lat, lon, alt, acc, spd, hdg, sats)

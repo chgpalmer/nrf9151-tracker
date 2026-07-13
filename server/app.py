@@ -80,14 +80,40 @@ async def positions(device: str, since: int = 0,
     """
     db = app.state.db
     params = [device]
-    sql = ("SELECT id, source, lat, lon, alt, acc, spd, hdg, sats, received_ts "
-           "FROM positions WHERE device_id = ?")
+    # Cell rows carry their tower identity (cell_events shares the insert
+    # timestamp) so the detail pane can say WHICH tower, not just where.
+    sql = ("SELECT p.id, p.source, p.lat, p.lon, p.alt, p.acc, p.spd, p.hdg, "
+           "p.sats, p.received_ts, "
+           "ce.mcc, ce.mnc, ce.tac, ce.cell_id, ce.rsrp_dbm, ce.act "
+           "FROM positions p LEFT JOIN cell_events ce "
+           "ON p.source = 'cell' AND ce.device_id = p.device_id "
+           "AND ce.received_ts = p.received_ts "
+           "WHERE p.device_id = ?")
+    if from_ts and to_ts:
+        sql += " AND p.received_ts BETWEEN ? AND ?"
+        params += [from_ts, to_ts]
+    elif since > 0:
+        sql += " AND p.received_ts >= ?"
+        params.append(int(time.time()) - since * 60)
+    sql += " ORDER BY p.received_ts DESC LIMIT ?"
+    params.append(limit)
+    rows = db.execute(sql, params).fetchall()
+    return JSONResponse([dict(r) for r in reversed(rows)])
+
+
+@app.get("/api/cells")
+async def cells(device: str, from_ts: float = 0, to_ts: float = 0,
+                limit: int = 2000):
+    """Serving-cell history, chronological: which tower, what technology
+    (3GPP AcT: 7 LTE-M, 9 NB-IoT, 0 unknown), what signal. Includes cells
+    the tower DB couldn't place (lat/lon null)."""
+    db = app.state.db
+    params = [device]
+    sql = ("SELECT id, received_ts, mcc, mnc, tac, cell_id, rsrp_dbm, act, "
+           "lat, lon, acc FROM cell_events WHERE device_id = ?")
     if from_ts and to_ts:
         sql += " AND received_ts BETWEEN ? AND ?"
         params += [from_ts, to_ts]
-    elif since > 0:
-        sql += " AND received_ts >= ?"
-        params.append(int(time.time()) - since * 60)
     sql += " ORDER BY received_ts DESC LIMIT ?"
     params.append(limit)
     rows = db.execute(sql, params).fetchall()

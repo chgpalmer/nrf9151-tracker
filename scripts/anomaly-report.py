@@ -145,6 +145,26 @@ def report(db, args):
                 tag = "?EWID"[lvl] if lvl and 0 < lvl <= 4 else "?"
                 print(f"{utc(ts)[11:]}  <{tag}> {mod}: {text}")
 
+        # Serving-cell history: a tower swap right at the anomaly is prime
+        # context ("well, there was a cell change there!").
+        try:
+            cells = db.execute(
+                """SELECT received_ts, mcc, mnc, tac, cell_id, rsrp_dbm, act
+                   FROM cell_events WHERE device_id = ?
+                   AND received_ts BETWEEN ? AND ? ORDER BY received_ts""",
+                (dev, t0, t1)).fetchall()
+        except sqlite3.OperationalError:
+            cells = []  # pre-cell_events schema
+        print(f"--- cell events ({len(cells)}) ---")
+        prev_cid = None
+        for ts, mcc, mnc, tac, cid, rsrp, act in cells:
+            swap = ("  <<< tower change"
+                    if prev_cid is not None and cid != prev_cid else "")
+            tech = {7: "LTE-M", 9: "NB-IoT"}.get(act, "?")
+            print(f"{utc(ts)[11:]}  {mcc}-{mnc:02d} cell {cid} "
+                  f"(tac 0x{tac:X}) {rsrp} dBm {tech}{swap}")
+            prev_cid = cid
+
         usage = db.execute(
             """SELECT received_ts, kind, bytes FROM usage
                WHERE device_id = ? AND received_ts BETWEEN ? AND ?
