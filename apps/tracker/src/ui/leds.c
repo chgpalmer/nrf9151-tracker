@@ -27,6 +27,40 @@ static bool ready;
 static bool blink_phase;
 static int64_t tx_until_ms;
 
+static void set(int led, bool on)
+{
+	gpio_pin_set_dt(&leds[led], on);
+}
+
+/* ── GPS acquisition progress: counted blips ─────────────────────────
+ * While acquiring, LED2 blips N times per 2 s cycle, N = satellites both
+ * tracked AND carrying an ephemeris (loc_status.ephemeris_visible, capped
+ * at the 4 a fix needs) — a glanceable "how close is the fix" meter.
+ * Zero usable satellites renders as one long slow pulse instead
+ * ("searching, nothing usable yet"). Sub-second timing needs its own
+ * clock: a 100 ms k_timer renders the pattern, and it runs ONLY while
+ * acquiring — solid/off are set directly and the timer is stopped. */
+static struct k_timer gps_timer;
+static atomic_t gps_blips; /* 0 = long pulse; 1..4 = counted blips */
+static bool gps_pattern_on;
+
+static void gps_pattern_tick(struct k_timer *timer)
+{
+	static uint8_t slot;               /* 20 slots x 100 ms = 2 s cycle */
+	int n = atomic_get(&gps_blips);
+	bool on;
+
+	ARG_UNUSED(timer);
+	slot = (slot + 1) % 20;
+	if (n == 0) {
+		on = slot < 6;             /* 600 ms pulse, 1.4 s dark */
+	} else {
+		/* Blip k occupies slot 3k: 100 ms on, 200 ms off, crisp. */
+		on = slot < 3 * n && (slot % 3) == 0;
+	}
+	set(LED_GPS, on);
+}
+
 void leds_init(void)
 {
 	for (int i = 0; i < LED_COUNT; i++) {
@@ -36,12 +70,8 @@ void leds_init(void)
 			return;
 		}
 	}
+	k_timer_init(&gps_timer, gps_pattern_tick, NULL);
 	ready = true;
-}
-
-static void set(int led, bool on)
-{
-	gpio_pin_set_dt(&leds[led], on);
 }
 
 void leds_update(const struct loc_status *loc, bool lte_up)
@@ -56,9 +86,24 @@ void leds_update(const struct loc_status *loc, bool lte_up)
 	 * FSM turned the radio off on purpose (GNSS_EXCLUSIVE). */
 	set(LED_LTE, lte_up || (loc->lte_wanted && blink_phase));
 
-	/* GPS: solid on a current fix; blink while acquiring; dark when off. */
-	set(LED_GPS, loc->gps_current ||
-		     (loc->gnss_mode != LOC_GNSS_OFF && blink_phase));
+	/* GPS: solid on a current fix; dark when off; while acquiring, the
+	 * pattern timer blips the usable-satellite count (see above). */
+	bool acquiring = !loc->gps_current && loc->gnss_mode != LOC_GNSS_OFF;
+
+	if (acquiring) {
+		atomic_set(&gps_blips,
+			   MIN(loc->ephemeris_visible, 4));
+		if (!gps_pattern_on) {
+			gps_pattern_on = true;
+			k_timer_start(&gps_timer, K_MSEC(100), K_MSEC(100));
+		}
+	} else {
+		if (gps_pattern_on) {
+			gps_pattern_on = false;
+			k_timer_stop(&gps_timer);
+		}
+		set(LED_GPS, loc->gps_current);
+	}
 
 	/* TX: pulse armed by leds_tx_pulse(), cleared here once it expires. */
 	set(LED_TX, k_uptime_get() < tx_until_ms);

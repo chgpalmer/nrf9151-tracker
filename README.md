@@ -155,11 +155,14 @@ modem diagnostics like carrier scans),
 | LED | Meaning | Off | Blink | Solid |
 |---|---|---|---|---|
 | 1 | LTE | radio off on purpose | attaching | registered |
-| 2 | GPS | GNSS not running | acquiring | fix current |
+| 2 | GPS | GNSS not running | acquiring — see below | fix current |
 | 3 | TX | — | — | pulse per successful send |
 | 4 | help | normal | CELL_LOOP (retry on sight) | GNSS_EXCLUSIVE (radio dark) |
 
-LED2 solid = safe to start moving; LED4 lit explains a dark LED1.
+LED2's acquiring blink is a progress meter (2 s cycle): one long slow pulse =
+searching with nothing usable; 1–4 crisp blips = that many tracked satellites
+with ephemeris — 4 blips means the fix is imminent. LED2 solid = safe to
+start moving; LED4 lit explains a dark LED1.
 
 **Layout:**
 

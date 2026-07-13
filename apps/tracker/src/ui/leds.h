@@ -3,16 +3,21 @@
  *
  *   LED1  LTE   off = radio deliberately off (GNSS_EXCLUSIVE)
  *               blink = attaching        solid = registered
- *   LED2  GPS   off = GNSS not running
- *               blink = acquiring        solid = fix current
+ *   LED2  GPS   off = GNSS not running   solid = fix current
+ *               acquiring = a counted progress meter every 2 s:
+ *                 one LONG slow pulse    searching, 0 usable satellites
+ *                 1..4 crisp blips       that many tracked satellites with
+ *                                        ephemeris (4 = fix imminent)
  *   LED3  TX    short pulse on every successful CoAP send
  *   LED4  HELP  off = normal
  *               blink = CELL_LOOP (gave up acquiring, retrying on sight)
  *               solid = GNSS_EXCLUSIVE (radio dark, deep hunt)
  *
  * The glance rules: LED2 solid means "safe to start moving" (fix held, hot
- * re-fix from here is seconds). LED4 lit at all means GPS is struggling and
- * explains an unlit LED1. LED3 flickering periodically means data is flowing.
+ * re-fix from here is seconds); its blip count while acquiring is "how
+ * close" — 4 blips means the geometry is assembled. LED4 lit at all means
+ * GPS is struggling and explains an unlit LED1. LED3 flickering
+ * periodically means data is flowing.
  *
  * On boards without LED aliases (native_sim) everything compiles to no-ops.
  */
