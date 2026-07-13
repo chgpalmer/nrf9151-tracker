@@ -59,8 +59,11 @@ def init_db(path: Path) -> sqlite3.Connection:
         CREATE INDEX IF NOT EXISTS idx_pos_dev_time
         ON positions(device_id, received_ts)
     """)
-    # Device log lines shipped over the uplink (level uses Zephyr numbering:
-    # 1=ERR 2=WRN 3=INF 4=DBG).
+    # Log lines (level uses Zephyr numbering: 1=ERR 2=WRN 3=INF 4=DBG).
+    # origin 'device' = shipped over the uplink; 'server' = this process's
+    # own events (slog), stored so anomaly investigations can correlate
+    # them — device_id then names the device the event concerns, or
+    # '_server' for global events (startup, cache refresh).
     conn.execute("""
         CREATE TABLE IF NOT EXISTS logs (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -68,7 +71,8 @@ def init_db(path: Path) -> sqlite3.Connection:
             received_ts REAL    NOT NULL,
             level       INTEGER NOT NULL,
             module      TEXT,
-            text        TEXT
+            text        TEXT,
+            origin      TEXT    NOT NULL DEFAULT 'device'
         )
     """)
     conn.execute("""
@@ -96,8 +100,26 @@ def init_db(path: Path) -> sqlite3.Connection:
     if "source" not in cols:
         conn.execute(
             "ALTER TABLE positions ADD COLUMN source TEXT NOT NULL DEFAULT 'gps'")
+    # ...and before logs grew the origin column (2026-07-13).
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(logs)")}
+    if "origin" not in cols:
+        conn.execute(
+            "ALTER TABLE logs ADD COLUMN origin TEXT NOT NULL DEFAULT 'device'")
     conn.commit()
     return conn
+
+
+def slog(conn, level, module, text, device="_server"):
+    """Server-side log: printed (serve.log keeps working) AND stored with
+    origin='server' so `scripts/anomaly-report.py at` and the webapp can
+    correlate server events with device logs and positions. Not for
+    per-datagram chatter — the usage table already ledgers arrivals."""
+    print(f"[{module}] {text}", file=sys.stderr if level <= 2 else sys.stdout)
+    conn.execute(
+        """INSERT INTO logs (device_id, received_ts, level, module, text, origin)
+           VALUES (?, ?, ?, ?, ?, 'server')""",
+        (device, time.time(), level, module, text))
+    conn.commit()
 
 
 def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -187,14 +209,14 @@ def store_track(conn, dev, base_ts, seg) -> int:
     a = seg.anchor
     n = len(seg.dlat)
     if len(seg.dlon) != n:
-        print(f"[coap] {dev} track: dlat/dlon length mismatch "
-              f"({n}/{len(seg.dlon)}) — dropped", file=sys.stderr)
+        slog(conn, 2, "coap", f"track: dlat/dlon length mismatch "
+             f"({n}/{len(seg.dlon)}) — dropped", device=dev)
         return 0
     # (0,0) is the Gulf of Guinea, not this tracker: an unfixed PVT frame used
     # to leak it. Drop the whole segment if its anchor is (0,0).
     if a.lat_e7 == 0 and a.lon_e7 == 0:
-        print(f"[coap] {dev} track: dropped (0,0) anchor — unfixed frame?",
-              file=sys.stderr)
+        slog(conn, 2, "coap", "track: dropped (0,0) anchor — unfixed frame?",
+             device=dev)
         return 0
 
     dt = seg.dt_ms / 1000.0
@@ -240,8 +262,8 @@ def store_obs(conn, obs, cells, now: int) -> tuple[int, int, int]:
             c = e.cell
             fix = resolve_cell(c.mcc, c.mnc, c.tac, c.cell_id, cells)
             if fix is None:
-                print(f"[coap] {dev} cell unresolved "
-                      f"(mcc={c.mcc} mnc={c.mnc} tac={c.tac} cid={c.cell_id})")
+                slog(conn, 2, "coap", f"cell unresolved (mcc={c.mcc} "
+                     f"mnc={c.mnc} tac={c.tac} cid={c.cell_id})", device=dev)
                 continue
             lat, lon, acc, how = fix
             conn.execute(
@@ -266,8 +288,8 @@ class ObsResource(resource.Resource):
         try:
             obs = pb.Obs.FromString(request.payload)
         except Exception as e:
-            print(f"[coap] rejected payload ({len(request.payload)} B): {e}",
-                  file=sys.stderr)
+            slog(self.conn, 1, "coap",
+                 f"rejected payload ({len(request.payload)} B): {e}")
             return aiocoap.Message(code=aiocoap.Code.BAD_REQUEST)
 
         store_obs(self.conn, obs, self.cells, int(time.time()))
@@ -310,13 +332,14 @@ class AgnssResource(resource.Resource):
         try:
             req = pb.AgnssRequest.FromString(request.payload)
         except Exception as e:
-            print(f"[agnss] rejected request ({len(request.payload)} B): {e}",
-                  file=sys.stderr)
+            slog(self.conn, 1, "agnss",
+                 f"rejected request ({len(request.payload)} B): {e}")
             return aiocoap.Message(code=aiocoap.Code.BAD_REQUEST)
         payload = assemble(self.cache, self._last_pos(req.device_id))
         data = pb.AgnssData.FromString(payload)
-        print(f"[agnss] {req.device_id}: served {len(data.ephemeris)} ephe, "
-              f"{len(payload)} B (flags 0x{req.data_flags:02x})")
+        slog(self.conn, 3, "agnss",
+             f"served {len(data.ephemeris)} ephe, {len(payload)} B "
+             f"(flags 0x{req.data_flags:02x})", device=req.device_id)
         self.conn.execute(
             "INSERT INTO usage (device_id, received_ts, bytes, kind) "
             "VALUES (?, ?, ?, 'agnss')",
@@ -326,14 +349,14 @@ class AgnssResource(resource.Resource):
         return aiocoap.Message(code=aiocoap.Code.CONTENT, payload=payload)
 
 
-async def agnss_refresh(cache):
+async def agnss_refresh(cache, conn):
     """Keep the ephemeris cache ~15-30 min fresh, forever. Failures keep the
     last good data (assistance is an accelerator, never a dependency)."""
     while True:
         try:
             await asyncio.get_running_loop().run_in_executor(None, cache.fetch)
         except Exception as exc:
-            print(f"[agnss] refresh error: {exc}", file=sys.stderr)
+            slog(conn, 2, "agnss", f"refresh error: {exc}")
         await asyncio.sleep(1800)
 
 
@@ -348,18 +371,20 @@ async def serve(args):
         n = cells.execute("SELECT COUNT(*) FROM cells").fetchone()[0]
         print(f"[coap] cell DB: {args.cells_db} ({n} cells)")
     else:
-        print(f"[coap] no cell DB at {args.cells_db} — cell fixes won't "
-              f"resolve (run: make cells)")
+        slog(conn, 2, "coap", f"no cell DB at {args.cells_db} — cell fixes "
+             f"won't resolve (run: make cells)")
 
     cache = AgnssCache(persist=Path(args.db).parent / "agnss_cache.json")
-    asyncio.create_task(agnss_refresh(cache))
+    asyncio.create_task(agnss_refresh(cache, conn))
 
     site = resource.Site()
     site.add_resource(["obs"], ObsResource(conn, cells))
     site.add_resource(["agnss"], AgnssResource(conn, cache))
 
     await aiocoap.Context.create_server_context(site, bind=("::", args.port))
-    print(f"[coap] listening on UDP {args.port} (POST /obs + /agnss, protobuf)")
+    # The one INF every start: a restart marker in every anomaly report.
+    slog(conn, 3, "coap",
+         f"listening on UDP {args.port} (POST /obs + /agnss, protobuf)")
     await asyncio.get_running_loop().create_future()  # run forever
 
 

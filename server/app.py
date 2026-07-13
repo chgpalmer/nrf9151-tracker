@@ -96,14 +96,17 @@ async def positions(device: str, since: int = 0,
 
 @app.get("/api/logs")
 async def logs(device: str, from_ts: float = 0, to_ts: float = 0,
-               min_level: int = 4, limit: int = 2000):
-    """Device log lines, chronological. min_level filters by severity
-    (Zephyr numbering: 1=ERR 2=WRN 3=INF 4=DBG — lower is more severe, so
-    min_level=2 returns ERR+WRN)."""
+               min_level: int = 4, limit: int = 2000,
+               origin: str = "device"):
+    """Log lines, chronological. min_level filters by severity (Zephyr
+    numbering: 1=ERR 2=WRN 3=INF 4=DBG — lower is more severe, so
+    min_level=2 returns ERR+WRN). origin 'device' (default) = the device's
+    uplinked logs; 'server' = the server's own events concerning that
+    device (device=_server for global ones like startup)."""
     db = app.state.db
-    params = [device, min_level]
+    params = [device, origin, min_level]
     sql = ("SELECT id, received_ts, level, module, text "
-           "FROM logs WHERE device_id = ? AND level <= ?")
+           "FROM logs WHERE device_id = ? AND origin = ? AND level <= ?")
     if from_ts and to_ts:
         sql += " AND received_ts BETWEEN ? AND ?"
         params += [from_ts, to_ts]

@@ -124,12 +124,22 @@ def report(db, args):
                       f"spd={(spd or 0) * 3.6:5.1f}km/h sats={sats}{imp}")
             prev = (ts, lat, lon)
 
-        for label, dev_filter in (("device logs", f"device_id = '{dev}'"),
-                                  ("server logs", "device_id = '_server'")):
+        has_origin = any(r[1] == "origin"
+                         for r in db.execute("PRAGMA table_info(logs)"))
+        if has_origin:
+            sections = (
+                ("device logs", "origin = 'device' AND device_id = ?", (dev,)),
+                ("server logs",
+                 "origin = 'server' AND device_id IN (?, '_server')", (dev,)),
+            )
+        else:  # pre-origin schema: everything in the table is device logs
+            sections = (("device logs", "device_id = ?", (dev,)),
+                        ("server logs (schema too old)", "0 = 1", ()))
+        for label, where, extra in sections:
             logs = db.execute(
                 f"""SELECT received_ts, level, module, text FROM logs
-                    WHERE {dev_filter} AND received_ts BETWEEN ? AND ?
-                    ORDER BY received_ts""", (t0, t1)).fetchall()
+                    WHERE {where} AND received_ts BETWEEN ? AND ?
+                    ORDER BY received_ts""", (*extra, t0, t1)).fetchall()
             print(f"--- {label} ({len(logs)}) ---")
             for ts, lvl, mod, text in logs:
                 tag = "?EWID"[lvl] if lvl and 0 < lvl <= 4 else "?"
