@@ -77,6 +77,8 @@ message CellFix {
   uint32 tac      = 3;
   uint32 cell_id  = 4;   // 28-bit ECI
   sint32 rsrp_dbm = 5;
+  uint32 act      = 6;   // 3GPP access technology: 7 = LTE-M, 9 = NB-IoT
+                         // (0 = unknown / firmware predating the field)
 }
 
 // One device log line. level uses Zephyr's numbering (1=ERR 2=WRN 3=INF

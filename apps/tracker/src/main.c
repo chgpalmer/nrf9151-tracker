@@ -61,6 +61,7 @@ struct serving_cell {
 	uint32_t tac;
 	uint32_t cid;
 	int      rsrp_dbm;
+	int      act;  /* 3GPP AcT: 7 = LTE-M, 9 = NB-IoT */
 	int      band;
 	char     op[32];
 	bool     valid;
@@ -326,7 +327,7 @@ static int read_serving_cell(struct serving_cell *sc)
 	xmon_field(NULL);                  /* 3: short name */
 	char *plmn = xmon_field(NULL);     /* 4: plmn "MCCMNC" */
 	char *tac  = xmon_field(NULL);     /* 5: tac (hex)  */
-	xmon_field(NULL);                  /* 6: AcT        */
+	char *act  = xmon_field(NULL);     /* 6: AcT (7=LTE-M, 9=NB-IoT) */
 	char *band = xmon_field(NULL);     /* 7: band       */
 	char *cid  = xmon_field(NULL);     /* 8: cell id (hex) */
 	xmon_field(NULL);                  /* 9: phys cell  */
@@ -344,6 +345,7 @@ static int read_serving_cell(struct serving_cell *sc)
 	sc->mnc = atoi(plmn + 3);
 	sc->tac = strtoul(tac, NULL, 16);
 	sc->cid = strtoul(cid, NULL, 16);
+	sc->act = act ? atoi(act) : 0;
 	sc->band = band ? atoi(band) : 0;
 	sc->rsrp_dbm = rsrp ? RSRP_IDX_TO_DBM(atoi(rsrp)) : 0;
 	if (longn) {
@@ -856,7 +858,8 @@ int main(void)
 				if (read_serving_cell(&sc) == 0 && sc.valid) {
 					cell_unavail = false;
 					obs_queue_add_cell(sc.mcc, sc.mnc, sc.tac,
-							   sc.cid, sc.rsrp_dbm, now);
+							   sc.cid, sc.rsrp_dbm,
+							   sc.act, now);
 					motion_note_cell(sc.cid, now);
 				} else if (!cell_unavail) {
 					cell_unavail = true;

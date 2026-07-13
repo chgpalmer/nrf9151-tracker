@@ -27,7 +27,7 @@ void obs_queue_add_gps(const struct nrf_modem_gnss_pvt_data_frame *p,
 /* Queue a serving-cell observation; requests an urgent uplink flush (the
  * FSM's GNSS handover waits on the cell report reaching the server). */
 void obs_queue_add_cell(int mcc, int mnc, uint32_t tac, uint32_t cid,
-			int rsrp_dbm, int64_t obs_uptime_ms);
+			int rsrp_dbm, int act, int64_t obs_uptime_ms);
 
 size_t obs_queue_len(void);
 

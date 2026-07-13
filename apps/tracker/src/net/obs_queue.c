@@ -36,6 +36,7 @@ struct cell_obs {
 	int64_t t_ms;
 	uint32_t mcc, mnc, tac, cid;
 	int32_t rsrp;
+	uint32_t act; /* 3GPP AcT: 7 = LTE-M, 9 = NB-IoT */
 };
 
 /* Circular rings with a transactional read cursor: `taken` marks entries
@@ -102,7 +103,7 @@ void obs_queue_add_gps(const struct nrf_modem_gnss_pvt_data_frame *p,
 }
 
 void obs_queue_add_cell(int mcc, int mnc, uint32_t tac, uint32_t cid,
-			int rsrp_dbm, int64_t obs_uptime_ms)
+			int rsrp_dbm, int act, int64_t obs_uptime_ms)
 {
 	if (cell_count == CELL_RING_CAP) {
 		cell_start = (cell_start + 1) % CELL_RING_CAP;
@@ -114,7 +115,7 @@ void obs_queue_add_cell(int mcc, int mnc, uint32_t tac, uint32_t cid,
 	cell_ring[(cell_start + cell_count) % CELL_RING_CAP] = (struct cell_obs){
 		.t_ms = obs_uptime_ms,
 		.mcc = mcc, .mnc = mnc, .tac = tac, .cid = cid,
-		.rsrp = rsrp_dbm,
+		.rsrp = rsrp_dbm, .act = act,
 	};
 	cell_count++;
 
@@ -317,6 +318,7 @@ static int cell_encode_next(pb_ostream_t *stream, size_t budget, uint32_t *kind)
 	e.kind.cell.tac = c->tac;
 	e.kind.cell.cell_id = c->cid;
 	e.kind.cell.rsrp_dbm = c->rsrp;
+	e.kind.cell.act = c->act;
 
 	size_t sz;
 

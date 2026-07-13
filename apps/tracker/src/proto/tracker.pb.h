@@ -56,6 +56,7 @@ typedef struct _CellFix {
     uint32_t tac;
     uint32_t cell_id; /* 28-bit ECI */
     int32_t rsrp_dbm;
+    uint32_t act; /* 3GPP access technology: 7 = LTE-M, 9 = NB-IoT */
 } CellFix;
 
 /* One device log line. level uses Zephyr's numbering (1=ERR 2=WRN 3=INF
@@ -200,7 +201,7 @@ extern "C" {
 /* Initializer values for message structs */
 #define GpsFix_init_default                      {0, 0, 0, 0, 0, 0, 0}
 #define TrackSegment_init_default                {false, GpsFix_init_default, 0, {{NULL}, NULL}, {{NULL}, NULL}, {{NULL}, NULL}}
-#define CellFix_init_default                     {0, 0, 0, 0, 0}
+#define CellFix_init_default                     {0, 0, 0, 0, 0, 0}
 #define LogLine_init_default                     {0, 0, {{NULL}, NULL}, {{NULL}, NULL}}
 #define LogBatch_init_default                    {{{NULL}, NULL}}
 #define Entry_init_default                       {0, 0, {TrackSegment_init_default}}
@@ -214,7 +215,7 @@ extern "C" {
 #define AgnssData_init_default                   {false, AgnssTime_init_default, false, AgnssLocation_init_default, false, AgnssUtc_init_default, false, AgnssKlobuchar_init_default, {{NULL}, NULL}}
 #define GpsFix_init_zero                         {0, 0, 0, 0, 0, 0, 0}
 #define TrackSegment_init_zero                   {false, GpsFix_init_zero, 0, {{NULL}, NULL}, {{NULL}, NULL}, {{NULL}, NULL}}
-#define CellFix_init_zero                        {0, 0, 0, 0, 0}
+#define CellFix_init_zero                        {0, 0, 0, 0, 0, 0}
 #define LogLine_init_zero                        {0, 0, {{NULL}, NULL}, {{NULL}, NULL}}
 #define LogBatch_init_zero                       {{{NULL}, NULL}}
 #define Entry_init_zero                          {0, 0, {TrackSegment_init_zero}}
@@ -245,6 +246,7 @@ extern "C" {
 #define CellFix_tac_tag                          3
 #define CellFix_cell_id_tag                      4
 #define CellFix_rsrp_dbm_tag                     5
+#define CellFix_act_tag                          6
 #define LogLine_age_s_tag                        1
 #define LogLine_level_tag                        2
 #define LogLine_module_tag                       3
@@ -345,7 +347,8 @@ X(a, STATIC,   SINGULAR, UINT32,   mcc,               1) \
 X(a, STATIC,   SINGULAR, UINT32,   mnc,               2) \
 X(a, STATIC,   SINGULAR, UINT32,   tac,               3) \
 X(a, STATIC,   SINGULAR, UINT32,   cell_id,           4) \
-X(a, STATIC,   SINGULAR, SINT32,   rsrp_dbm,          5)
+X(a, STATIC,   SINGULAR, SINT32,   rsrp_dbm,          5) \
+X(a, STATIC,   SINGULAR, UINT32,   act,               6)
 #define CellFix_CALLBACK NULL
 #define CellFix_DEFAULT NULL
 
@@ -519,7 +522,7 @@ extern const pb_msgdesc_t AgnssData_msg;
 #define AgnssRequest_size                        42
 #define AgnssTime_size                           18
 #define AgnssUtc_size                            48
-#define CellFix_size                             30
+#define CellFix_size                             36
 #define GpsFix_size                              42
 #define TRACKER_PB_H_MAX_SIZE                    AgnssEphemeris_size
 
