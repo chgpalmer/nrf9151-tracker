@@ -73,9 +73,15 @@ function renderFix(fix) {
         ? `${field('Speed',   kph != null ? `${kph} km/h` : null)}
            ${field('Heading', fmtHdg(fix.hdg))}
            ${field('Satellites', fix.sats != null ? fix.sats : null)}`
-        : `${field('Speed',      '<span class="na">n/a — cell fix</span>')}
-           ${field('Heading',    '<span class="na">n/a — cell fix</span>')}
-           ${field('Satellites', '<span class="na">n/a — cell fix</span>')}`
+        : `${field('Network', fix.mcc != null
+             ? `${fix.mcc}-${String(fix.mnc).padStart(2, '0')}` : null)}
+           ${field('Cell ID', fix.cell_id != null
+             ? `${fix.cell_id} (0x${fix.cell_id.toString(16).toUpperCase()})` : null)}
+           ${field('TAC', fix.tac != null
+             ? `0x${fix.tac.toString(16).toUpperCase()}` : null)}
+           ${field('Signal', fix.rsrp_dbm ? `${fix.rsrp_dbm} dBm` : null)}
+           ${field('Technology', fix.act === 9 ? 'NB-IoT'
+             : fix.act === 7 ? 'LTE-M' : null)}`
       }
     </div>
 

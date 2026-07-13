@@ -468,6 +468,11 @@ button { cursor: pointer; }
   font-size: 10px;
   color: var(--text-dim);
 }
+/* CELLS tab: a tower CHANGE from the previous sample gets an amber top
+ * edge (the "was there a swap there?" glance); cells the tower DB can't
+ * place dim but stay — connectivity outlives location. */
+.jtable-table tbody tr.cell-swap td { border-top: 1px solid var(--amber); }
+.jtable-table tbody tr.cell-unresolved td { color: var(--text-dim); }
 
 /* ── Page controls bar ── */
 .page-controls {

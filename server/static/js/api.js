@@ -36,6 +36,22 @@ export async function fetchPositions(deviceId, opts = {}) {
 }
 
 /**
+ * GET /api/cells — serving-cell history, chronological. Each row: mcc/mnc/
+ * tac/cell_id/rsrp_dbm/act (3GPP: 7 LTE-M, 9 NB-IoT, 0 unknown) + resolved
+ * lat/lon/acc (null when the tower DB couldn't place it).
+ */
+export async function fetchCells(deviceId, opts = {}) {
+  const params = new URLSearchParams({ device: deviceId });
+  if (opts.from_ts != null) params.set('from_ts', opts.from_ts);
+  if (opts.to_ts   != null) params.set('to_ts',   opts.to_ts);
+  if (opts.limit   != null) params.set('limit',   opts.limit);
+
+  const r = await fetch(`/api/cells?${params}`);
+  if (!r.ok) throw new Error(`/api/cells: ${r.status}`);
+  return r.json();
+}
+
+/**
  * GET /api/logs — device log lines, chronological.
  * min_level uses Zephyr numbering (1=ERR … 4=DBG); lower = more severe.
  */

@@ -17,10 +17,11 @@
  * table rings the same point on the map.
  */
 
-import { fetchPositions }  from '/js/api.js';
+import { fetchPositions, fetchCells } from '/js/api.js';
 import { createMapView }   from '/js/mapview.js';
 import { createFixTable }  from '/js/fixtable.js';
 import { createJourneysTable } from '/js/journeys.js';
+import { createCellsTable } from '/js/cells.js';
 import { initCharts, updateCharts, setActiveFix, resizeCharts } from '/js/charts.js';
 import { open as openDrawer, onClose as onDrawerClose } from '/js/drawer.js';
 import { currentDevice, setStatus } from '/js/devices.js';
@@ -35,12 +36,14 @@ const DAY_LIMIT  = 50000; // API rows per day-load; a full 1 Hz day can exceed t
 let mapView  = null;
 let fixTable = null;
 let journeysTable = null;
+let cellsTable = null;
 let isInitialized = false;
 let timer    = null;
 
 let dayStart = 0;      // epoch of 00:00 local for the selected day
 let isToday  = false;
 let dayFixes = [];     // chronological
+let dayCells = [];     // serving-cell history for the day (/api/cells)
 let trips    = [];
 let sel      = { mode: 'day' };   // 'live' | 'day' | {mode:'trip', i} | 'range'
 let selFrac  = [0, 1]; // current window as day fractions (source of truth for 'range')
@@ -250,6 +253,11 @@ document.querySelectorAll('#side-tabs .side-tab').forEach(b =>
 
 onDrawerClose(() => setTab(lastTab));
 
+// The popup's "Full detail →" is the one EXPLICIT ask for the detail pane
+// (incidental selection deliberately never yanks there). drawer.js fills
+// the pane on this event; without the tab switch that happened invisibly.
+document.addEventListener('fix-detail-click', () => setTab('detail'));
+
 // Chart tabs: one canvas visible at a time; Chart.js needs a resize poke
 // when a hidden canvas becomes visible. The whole panel collapses to its
 // tab bar (▾/▸) — default-collapsed on phones, where the map is king.
@@ -307,6 +315,17 @@ export function init() {
       applyView(true);
     },
   });
+  cellsTable = createCellsTable('cells-table', {
+    onSelect: i => {
+      const c = dayCells[i];
+      cellsTable.render(dayCells, i);
+      // A resolved cell has a twin positions row (same insert timestamp):
+      // ring it on the map. Unresolved ones have nowhere to point.
+      const fix = c && c.lat != null && dayFixes.find(f =>
+        f.source === 'cell' && f.received_ts === c.received_ts);
+      if (fix) selectPoint(fix);
+    },
+  });
   initCharts({
     onHover: fix => mapView.hoverFix(fix),
     onSelect: selectPoint,
@@ -343,7 +362,7 @@ async function loadDay() {
   document.getElementById('date-next').disabled = isToday;
 
   if (!deviceId) {
-    dayFixes = []; trips = [];
+    dayFixes = []; trips = []; dayCells = [];
     summaryEl.innerHTML = `<span class="hist-hint">Select a device.</span>`;
     return;
   }
@@ -357,6 +376,17 @@ async function loadDay() {
     summaryEl.innerHTML = `<span class="hist-hint err">Failed to load: ${e.message}</span>`;
     return;
   }
+
+  // Serving-cell history (CELLS tab) — sparse, best-effort, never blocks
+  // the map on failure.
+  try {
+    dayCells = await fetchCells(deviceId, {
+      from_ts: dayStart, to_ts: dayStart + DAY,
+    });
+  } catch (e) {
+    dayCells = [];
+  }
+  cellsTable.render(dayCells);
 
   // Live must always show where the device is: an empty *today* falls back to
   // the single most recent fix so the device never vanishes from the map.
@@ -394,6 +424,13 @@ async function refresh() {
     renderTripBands();
     renderChips();
     applyView(false);
+    // Cell reports are sparse; a full-day refetch is a few dozen rows.
+    try {
+      dayCells = await fetchCells(deviceId, {
+        from_ts: dayStart, to_ts: dayStart + DAY,
+      });
+      cellsTable.render(dayCells);
+    } catch (e) { /* keep the old table */ }
   }
   if (dayFixes.length > 0) {
     setStatus(deviceStatus(dayFixes[dayFixes.length - 1].received_ts));

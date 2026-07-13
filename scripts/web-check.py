@@ -219,6 +219,25 @@ def main():
                     problems.append("trip band click ignored inside a "
                                     "custom range window")
 
+        # CELLS tab: serving-cell history with a tower-swap marker and a
+        # dimmed unresolved row; clicking a row marks it active.
+        page.click('#side-tabs .side-tab[data-tab="cells"]')
+        page.wait_for_timeout(300)
+        n_cells = page.locator("#cells-table tbody tr").count()
+        if n_cells != 3:
+            problems.append(f"cells table has {n_cells} rows, want 3")
+        if page.locator("#cells-table tbody tr.cell-swap").count() < 1:
+            problems.append("cells table shows no tower-change marker")
+        if page.locator("#cells-table tbody tr.cell-unresolved").count() != 1:
+            problems.append("cells table should dim exactly 1 unresolved row")
+        if n_cells:
+            page.locator("#cells-table tbody tr").first.click()
+            page.wait_for_timeout(200)
+            if page.locator("#cells-table tbody tr.active").count() == 0:
+                problems.append("cells row click did not mark it active")
+        page.click('#side-tabs .side-tab[data-tab="journeys"]')
+        page.wait_for_timeout(100)
+
         # Chart tabs: ACCURACY tab must reveal the accuracy canvas.
         page.click('#chart-tabs .chart-tab[data-chart="acc"]')
         page.wait_for_timeout(200)

@@ -64,10 +64,34 @@ db.executemany(
     "INSERT INTO positions (device_id, received_ts, source, lat, lon, alt, acc,"
     " spd, hdg, sats) VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
 
+# Serving-cell history for the CELLS tab: matches the two resolved cell
+# positions above (same timestamps — the API joins on them), plus one the
+# tower DB "couldn't place" (lat NULL) that is also a tower CHANGE, so the
+# swap marker and the dimmed row are both assertable.
+db.execute("""CREATE TABLE IF NOT EXISTS cell_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT NOT NULL,
+    received_ts REAL NOT NULL, mcc INTEGER, mnc INTEGER, tac INTEGER,
+    cell_id INTEGER, rsrp_dbm INTEGER, act INTEGER,
+    lat REAL, lon REAL, acc REAL)""")
+db.execute("DELETE FROM cell_events")
+cell_rows = [
+    (dev, now - 2 * 3600 - 1500, 234, 15, 0x432, 131126283, -95, 9,
+     51.507, -0.088, 1500.0),
+    (dev, now - 3600, 234, 15, 0x432, 99887766, -108, 9, None, None, None),
+    (dev, now - 600, 234, 15, 0x433, 131126284, -101, 9,
+     51.509, -0.084, 1200.0),
+]
+db.executemany(
+    "INSERT INTO cell_events (device_id, received_ts, mcc, mnc, tac,"
+    " cell_id, rsrp_dbm, act, lat, lon, acc) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+    cell_rows)
+
 # Device log lines (level: 1=ERR 2=WRN 3=INF 4=DBG) for the Logs page.
+# origin mirrors the live schema — /api/logs filters on it.
 db.execute("""CREATE TABLE IF NOT EXISTS logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT NOT NULL,
-    received_ts REAL NOT NULL, level INTEGER NOT NULL, module TEXT, text TEXT)""")
+    received_ts REAL NOT NULL, level INTEGER NOT NULL, module TEXT, text TEXT,
+    origin TEXT NOT NULL DEFAULT 'device')""")
 db.execute("DELETE FROM logs")
 log_rows = [
     (dev, now - 3 * 3600 - 90, 3, 'tracker', 'tracker starting'),
@@ -96,5 +120,6 @@ db.executemany(
     "INSERT INTO usage (device_id, received_ts, bytes, kind)"
     " VALUES (?,?,?,?)", usage_rows)
 db.commit()
-print(f"seeded {len(rows)} positions + {len(log_rows)} logs + "
+print(f"seeded {len(cell_rows)} cell events + "
+      f"{len(rows)} positions + {len(log_rows)} logs + "
       f"{len(usage_rows)} usage rows for {dev} into {sys.argv[1]}")
