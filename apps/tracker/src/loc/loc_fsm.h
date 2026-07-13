@@ -214,6 +214,15 @@ void loc_fsm_init(int64_t now_ms);
  * longer than any timeout worth waiting. */
 void loc_fsm_note_cell_sent(void);
 
+/* The A-GNSS supply verdict (agnss_supply_ok(): assistance enabled and not
+ * locked out), reported by main.c each pass. Gates the C2 escalation: with
+ * an inventory too thin to fix AND a live supply, going radio-dark cuts
+ * the supply line exactly when a ~1 KB fetch beats 50 bps demodulation by
+ * two orders of magnitude (two field incidents, 2026-07-12 ride and
+ * 2026-07-13 commute: 10-11 min blind each). Defaults false, so callers
+ * that never report a supply keep the old escalation behavior. */
+void loc_fsm_set_agnss_supply(bool available);
+
 /* Feed one PVT frame (or a stale one, if GNSS produced no event) and get the
  * current policy back. Call at the PVT rate; it is cheap and has no side
  * effects beyond its own state. */

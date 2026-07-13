@@ -32,6 +32,10 @@
 #define REST_MIN_S CONFIG_TRACKER_REST_BACKOFF_MIN_S
 #define REST_MAX_S CONFIG_TRACKER_REST_BACKOFF_MAX_S
 
+/* Mirrors loc_fsm.c's private constant: the inventory floor below which no
+ * fix is computable (the C2 cold-with-supply gate keys on it). */
+#define SATS_FOR_FIX 4
+
 /* ── fake clock ─────────────────────────────────────────────────────────── */
 
 static int64_t t;
@@ -259,6 +263,51 @@ ZTEST(loc_fsm, test_c2_blanked_carries_chopped_streak)
 		ASSERT_STATE(step(false, 0, CHOPPED), LOC_GNSS_ACQUIRE);
 	}
 	ASSERT_STATE(step(false, 0, BLANKED), LOC_GNSS_ACQUIRE);
+	ASSERT_STATE(step(false, 0, CHOPPED), LOC_GNSS_EXCLUSIVE);
+}
+
+/* C2 cold-with-supply gate: an inventory too thin to fix (< SATS_FOR_FIX)
+ * plus a live A-GNSS supply refuses the escalation — LTE IS the supply
+ * line, and going dark trades a seconds-scale fetch for minutes of 50 bps
+ * demodulation (2026-07-12 ride + 2026-07-13 commute: 10-11 min blind
+ * each). The C3 timeout still bounds the stay, exiting to CELL_LOOP with
+ * LTE up. reset_fsm()'s set_ephe(0,0) is the cold inventory. */
+ZTEST(loc_fsm, test_c2_cold_with_supply_never_goes_dark)
+{
+	loc_fsm_set_agnss_supply(true);
+	to_acquire();
+	for (int i = 0; i < 3 * CHOPPED_EPOCHS; i++) {
+		ASSERT_STATE(step(false, 0, CHOPPED), LOC_GNSS_ACQUIRE);
+	}
+	t += ACQUIRE_CAP_MS;
+	ASSERT_STATE(step(false, 1, CHOPPED), LOC_CELL_LOOP);
+}
+
+/* A warm inventory (>= SATS_FOR_FIX ephemerides held) escalates as before:
+ * the chop is then genuinely blocking tracking of usable satellites, and
+ * radio silence is the correct cure. */
+ZTEST(loc_fsm, test_c2_warm_inventory_still_escalates)
+{
+	loc_fsm_set_agnss_supply(true);
+	set_ephe(SATS_FOR_FIX, 60);
+	to_acquire();
+	for (int i = 0; i < CHOPPED_EPOCHS - 1; i++) {
+		ASSERT_STATE(step(false, 0, CHOPPED), LOC_GNSS_ACQUIRE);
+	}
+	ASSERT_STATE(step(false, 0, CHOPPED), LOC_GNSS_EXCLUSIVE);
+}
+
+/* The supply verdict going false mid-hold (agnss lockout after repeated
+ * fetch failures) re-opens the escalation: EXCLUSIVE stays available as
+ * the genuine no-server fallback. */
+ZTEST(loc_fsm, test_c2_supply_lost_restores_escalation)
+{
+	loc_fsm_set_agnss_supply(true);
+	to_acquire();
+	for (int i = 0; i < 2 * CHOPPED_EPOCHS; i++) {
+		ASSERT_STATE(step(false, 0, CHOPPED), LOC_GNSS_ACQUIRE);
+	}
+	loc_fsm_set_agnss_supply(false);
 	ASSERT_STATE(step(false, 0, CHOPPED), LOC_GNSS_EXCLUSIVE);
 }
 

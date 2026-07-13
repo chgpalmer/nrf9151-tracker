@@ -26,6 +26,7 @@ Usage:
 import argparse
 import asyncio
 import math
+import os
 import sqlite3
 import sys
 import time
@@ -343,6 +344,10 @@ class AgnssResource(resource.Resource):
         super().__init__()
         self.conn = conn
         self.cache = cache
+        # Test knob (smoke's cold-retry phase): answer the first N requests
+        # with 5.03 so the device's retry path gets exercised end-to-end.
+        # Zero-cost when unset.
+        self.drop_left = int(os.environ.get("TRACKER_AGNSS_DROP_FIRST", "0"))
 
     def _last_pos(self, dev):
         row = self.conn.execute(
@@ -365,6 +370,11 @@ class AgnssResource(resource.Resource):
             slog(self.conn, 1, "agnss",
                  f"rejected request ({len(request.payload)} B): {e}")
             return aiocoap.Message(code=aiocoap.Code.BAD_REQUEST)
+        if self.drop_left > 0:
+            self.drop_left -= 1
+            slog(self.conn, 2, "agnss", f"test knob: dropping response "
+                 f"({self.drop_left} more)", device=req.device_id)
+            return aiocoap.Message(code=aiocoap.Code.SERVICE_UNAVAILABLE)
         payload = assemble(self.cache, self._last_pos(req.device_id))
         data = pb.AgnssData.FromString(payload)
         slog(self.conn, 3, "agnss",

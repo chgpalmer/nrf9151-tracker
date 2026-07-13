@@ -171,6 +171,17 @@ int32_t nrf_modem_gnss_agnss_expiry_get(struct nrf_modem_gnss_agnss_expiry *agns
 	}
 	memset(agnss_expiry, 0, sizeof(*agnss_expiry));
 
+	/* TRACKER_SIM_COLD_EPHE: report an EMPTY inventory (a power-cycled
+	 * modem) so the cold-boot A-GNSS path — 15 s retries, fetch from
+	 * ACQUIRE, the C2 gate — runs in the sim (smoke's drop phase). */
+	const char *cold = nsi_host_getenv("TRACKER_SIM_COLD_EPHE");
+
+	if (cold != NULL && cold[0] != '\0' && cold[0] != '0') {
+		agnss_expiry->data_flags =
+			NRF_MODEM_GNSS_AGNSS_GPS_SYS_TIME_AND_SV_TOW_REQUEST;
+		return 0; /* sv_count 0: nothing held */
+	}
+
 	agnss_expiry->data_flags = 0; /* GPS system time is known */
 	agnss_expiry->sv_count = 6;
 	for (int i = 0; i < agnss_expiry->sv_count; i++) {

@@ -67,6 +67,10 @@ static uint8_t chopped_streak;
 static int64_t last_visible_ok_ms;
 static bool cell_sent;
 
+/* A-GNSS supply verdict from main.c (default false = no supply). See the
+ * setter's contract in loc_fsm.h; consumed by the C2 escalation gate. */
+static bool agnss_supply;
+
 /* Consecutive ACQUIRE/EXCLUSIVE attempts since the last fix that ended in
  * timeout or an empty sky. Unlike the sky streaks this survives state
  * changes: it is the "stop trying so hard" evidence for REST. Reset by any
@@ -119,6 +123,7 @@ void loc_fsm_init(int64_t now_ms)
 	cell_sent = false;
 	ephe_valid = false;
 	acquire_failures = 0;
+	agnss_supply = false;
 	rest_backoff_s = CONFIG_TRACKER_REST_BACKOFF_MIN_S;
 	rest_backoff_bumped_ms = now_ms;
 }
@@ -126,6 +131,11 @@ void loc_fsm_init(int64_t now_ms)
 void loc_fsm_note_cell_sent(void)
 {
 	cell_sent = true;
+}
+
+void loc_fsm_set_agnss_supply(bool available)
+{
+	agnss_supply = available;
 }
 
 static void poll_ephemeris(int64_t now_ms)
@@ -316,7 +326,9 @@ void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 		 * empty sky, and never inside the cold-start grace. */
 		if (fix) {
 			next_state(LOC_REPORT_GNSS, now_ms, "fix acquired");
-		} else if (lte_chops_gnss && !stationary) {
+		} else if (lte_chops_gnss && !stationary &&
+			   !(agnss_supply &&
+			     out->ephemeris_held < SATS_FOR_FIX)) {
 			/* Registered-but-silent isn't enough here: idle DRX or
 			 * coverage-edge reselection is slicing GNSS. Take the
 			 * radio outright; the re-attach is paid post-fix.
@@ -324,7 +336,18 @@ void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 			 * need for a fix, and each escalation costs an LTE
 			 * deactivate + ~35 s re-attach (measured 7 pointless
 			 * cycles in one parked night). Parked no-fix resolves
-			 * through CELL_LOOP -> REST instead. */
+			 * through CELL_LOOP -> REST instead.
+			 * NOT while the inventory cannot support a fix AND
+			 * the A-GNSS supply is alive: LTE *is* the supply
+			 * line, and going dark trades a seconds fetch for
+			 * minutes of 50 bps demodulation — twice measured at
+			 * 10-11 min blind (2026-07-12 ride, 2026-07-13
+			 * commute). Cold-with-supply holds here: LTE stays
+			 * up, agnss_poll retries on its cold cadence, and
+			 * the acquire-timeout exit still bounds the stay.
+			 * The supply verdict goes false after repeated fetch
+			 * failures (lockout), which re-opens this gate — the
+			 * genuine no-server fallback is preserved. */
 			next_state(LOC_GNSS_EXCLUSIVE, now_ms, "LTE chops GNSS");
 		} else if (in_state > ACQUIRE_CAP_MS) {
 			if (acquire_failures < UINT8_MAX) {

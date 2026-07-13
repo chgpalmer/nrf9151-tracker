@@ -19,8 +19,17 @@ LOG_MODULE_REGISTER(agnss, CONFIG_TRACKER_LOG_LEVEL);
 #define EXCHANGE_TIMEOUT_MS 8000
 #define NEED_CHECK_MS       30000
 #define RETRY_S             60
+/* Cold retry: with no fixable inventory the fetch IS the fast path to a
+ * fix, and the RF changes second to second when moving — 60 s pacing gave
+ * exactly one attempt per 5-min FSM cycle on the 2026-07-13 commute. */
+#define RETRY_COLD_S        15
 #define LOCKOUT_S           900
 #define MAX_CONSEC_FAILS    5
+
+/* Below this many healthy ephemerides no fix is computable at all —
+ * mirrors loc_fsm.c's SATS_FOR_FIX. "Cold" switches the retry pacing and
+ * unlocks fetching from GNSS_ACQUIRE. */
+#define SATS_FOR_FIX        4
 
 static int64_t next_attempt_ms;
 static int64_t last_need_check_ms = -NEED_CHECK_MS;
@@ -34,6 +43,12 @@ static int     last_exchange_err;
  * responses died on the air invisibly (failures were DBG-only) and the
  * diagnosis needed the server's ledger. */
 static bool    exchange_failing;
+/* In lockout: 5 straight failures said the supply is down. Cleared only by
+ * the next successful exchange — the C2 gate (loc_fsm) errs toward "supply
+ * alive" and demands positive proof of death. */
+static bool    locked_out;
+/* Fewer than SATS_FOR_FIX healthy ephemerides at the last need check. */
+static bool    inventory_cold = true; /* boot = cold until proven otherwise */
 
 static const char *device_id_str;
 
@@ -49,7 +64,8 @@ static int cmd_agnss(const struct shell *sh, size_t argc, char **argv)
 	if (argc == 2) {
 		agnss_enabled = (strcmp(argv[1], "on") == 0);
 	}
-	shell_print(sh, "agnss %s", agnss_enabled ? "on" : "off");
+	shell_print(sh, "agnss %s%s", agnss_enabled ? "on" : "off",
+		    locked_out ? " (locked out)" : "");
 	return 0;
 }
 SHELL_CMD_ARG_REGISTER(agnss, NULL, "A-GNSS assistance fetch (on|off)",
@@ -91,6 +107,7 @@ static void refresh_need(int64_t now_ms)
 		}
 	}
 	need_flags = exp.data_flags;
+	inventory_cold = healthy < SATS_FOR_FIX;
 	need = (healthy < CONFIG_TRACKER_AGNSS_MIN_HEALTHY) ||
 	       (exp.data_flags &
 		(NRF_MODEM_GNSS_AGNSS_GPS_SYS_TIME_AND_SV_TOW_REQUEST |
@@ -219,17 +236,28 @@ static int fetch_and_inject(void)
 	return inject(resp, n);
 }
 
+bool agnss_supply_ok(void)
+{
+	return agnss_enabled && !locked_out;
+}
+
 void agnss_poll(int64_t now_ms, const struct loc_status *loc)
 {
 	/* Only when the radio is already ours to use: publishing states with
-	 * the socket up. ACQUIRE/EXCLUSIVE need silence; QUIESCENT/REST need
-	 * sleep — both re-enter a publishing state before they could benefit. */
-	bool allowed = (loc->state == LOC_REPORT_CELL ||
-			loc->state == LOC_REPORT_GNSS ||
-			loc->state == LOC_CELL_LOOP) &&
-		       loc->publish_allowed && coap_pub_ready();
+	 * the socket up. EXCLUSIVE needs silence; QUIESCENT/REST need sleep —
+	 * both re-enter a publishing state before they could benefit.
+	 * ACQUIRE's radio quiet protects acquisition — moot when the
+	 * inventory cannot support one: LTE is up there anyway, and the
+	 * fetch IS the fast path to having anything to acquire with (this
+	 * pairs with the FSM's C2 cold-with-supply gate holding us here). */
+	bool allowed = ((loc->state == LOC_REPORT_CELL ||
+			 loc->state == LOC_REPORT_GNSS ||
+			 loc->state == LOC_CELL_LOOP) &&
+			loc->publish_allowed) ||
+		       (loc->state == LOC_GNSS_ACQUIRE && inventory_cold);
 
-	if (!agnss_enabled || !allowed || now_ms < next_attempt_ms) {
+	if (!agnss_enabled || !allowed || !coap_pub_ready() ||
+	    now_ms < next_attempt_ms) {
 		return;
 	}
 	refresh_need(now_ms);
@@ -238,32 +266,39 @@ void agnss_poll(int64_t now_ms, const struct loc_status *loc)
 	}
 
 	int err = fetch_and_inject();
+	/* A cold inventory retries on a short leash: the fetch is the fast
+	 * path to a fix, and moving RF changes second to second. */
+	int32_t retry_s = inventory_cold ? RETRY_COLD_S : RETRY_S;
 
 	if (err == 0) {
 		if (exchange_failing) {
 			LOG_INF("exchange recovered");
 			exchange_failing = false;
 		}
+		locked_out = false;
 		consec_fails = 0;
 		need = false;
 		last_need_check_ms = now_ms; /* re-evaluate in NEED_CHECK_MS */
 		next_attempt_ms = now_ms +
 			(int64_t)CONFIG_TRACKER_AGNSS_COOLDOWN_S * 1000;
 	} else if (!exchange_failing) {
-		/* Episode onset. -EAGAIN = response lost on the air (NON both
-		 * ways, nobody retransmits); -EBADMSG/-ENODATA = it arrived
+		/* Episode onset. -EAGAIN = the response never arrived (CON
+		 * retransmits exhausted); -EBADMSG/-ENODATA = it arrived
 		 * broken. */
 		LOG_WRN("exchange failed (%d) — will retry", err);
 		exchange_failing = true;
 		consec_fails = 1;
-		next_attempt_ms = now_ms + RETRY_S * 1000;
+		next_attempt_ms = now_ms + retry_s * 1000;
 	} else if (++consec_fails >= MAX_CONSEC_FAILS) {
-		/* Edge-logged: one WRN per lockout, not one per failure. */
+		/* Edge-logged: one WRN per lockout, not one per failure.
+		 * locked_out flips agnss_supply_ok() false, which re-opens
+		 * the FSM's EXCLUSIVE escalation — supply proven dead. */
 		LOG_WRN("%u fetches failed (last err %d), backing off %d min",
 			consec_fails, last_exchange_err, LOCKOUT_S / 60);
+		locked_out = true;
 		consec_fails = 0;
 		next_attempt_ms = now_ms + LOCKOUT_S * 1000;
 	} else {
-		next_attempt_ms = now_ms + RETRY_S * 1000;
+		next_attempt_ms = now_ms + retry_s * 1000;
 	}
 }

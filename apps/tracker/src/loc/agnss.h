@@ -30,6 +30,13 @@ void agnss_set_device_id(const char *id);
  * main-loop pass, after the FSM update. */
 void agnss_poll(int64_t now_ms, const struct loc_status *loc);
 
+/* Is the assistance supply believed alive? True unless disabled (`agnss
+ * off` on the shell) or fetch-locked-out (5 consecutive failures). Feeds
+ * loc_fsm_set_agnss_supply(): the FSM refuses the radio-dark EXCLUSIVE
+ * escalation while this is true and the inventory is cold. Deliberately
+ * optimistic at boot — the lockout is the debounced proof of failure. */
+bool agnss_supply_ok(void);
+
 #else
 
 static inline void agnss_set_device_id(const char *id) { (void)id; }
@@ -38,6 +45,7 @@ static inline void agnss_poll(int64_t now_ms, const struct loc_status *loc)
 	(void)now_ms;
 	(void)loc;
 }
+static inline bool agnss_supply_ok(void) { return false; }
 
 #endif /* CONFIG_TRACKER_AGNSS */
 

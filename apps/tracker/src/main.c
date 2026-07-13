@@ -691,7 +691,9 @@ int main(void)
 					(double)pvt.accuracy, now);
 		}
 
-		/* Policy first: it owns the fix-staleness and ephemeris bookkeeping. */
+		/* Policy first: it owns the fix-staleness and ephemeris bookkeeping.
+		 * The supply verdict gates the C2 escalation (see loc_fsm.h). */
+		loc_fsm_set_agnss_supply(agnss_supply_ok());
 		loc_fsm_update(&pvt, now, lte_connected, motion_stationary(now),
 			       &loc);
 		leds_update(&loc, lte_connected);

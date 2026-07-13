@@ -19,6 +19,8 @@ row by row. If code and table disagree, one of them is wrong — fix whichever.
 | `hotstart_dead` | > 10 s (`VISIBLE_LOST_MS`) since an observed epoch had ≥ 4 ephemeris-bearing satellites in view | visible ≠ held: held ephemerides may have set |
 | `stationary` | motion.c verdict (GPS centroid / cell-set LRU) | an input, like `lte_registered`; consumed by QUIESCENT/REST |
 | `acquire_failures` | consecutive ACQUIRE/EXCLUSIVE give-ups (timeout or sky-empty) since the last fix | SURVIVES state changes; reset by any fix, and by leaving REST on motion |
+| `agnss_supply` | main.c reports `agnss_supply_ok()` each pass: assistance compiled in, enabled, and not fetch-locked-out | an input, like `stationary`; defaults false (no supply). Goes false after 5 consecutive fetch failures (agnss lockout) and true again on the next success — the C2 gate inherits that hysteresis for free |
+| `cold` | `ephemeris_held < 4` (`SATS_FOR_FIX`) | the inventory cannot support ANY fix; distinct from `hotstart_dead` (visibility) |
 
 Streaks and `last_visible_ok` reset on every state change: each state judges
 the sky on its own evidence.
@@ -46,7 +48,7 @@ the sky on its own evidence.
 | # | Condition | Next | |
 |---|---|---|---|
 | C1 | `fix` | REPORT_GNSS | "fix acquired" |
-| C2 | `lte_chops_gnss` and `!stationary` | GNSS_EXCLUSIVE | "LTE chops GNSS" — parked trackers never escalate: no urgent fix need, and each escalation costs an LTE deactivate + ~35 s re-attach (7 pointless cycles measured in one parked night); parked no-fix resolves via CELL_LOOP → REST |
+| C2 | `lte_chops_gnss` and `!stationary` and not (`agnss_supply` and `cold`) | GNSS_EXCLUSIVE | "LTE chops GNSS" — parked trackers never escalate: no urgent fix need, and each escalation costs an LTE deactivate + ~35 s re-attach (7 pointless cycles measured in one parked night); parked no-fix resolves via CELL_LOOP → REST. Cold-with-supply never escalates either: LTE *is* the ephemeris supply line, and going dark trades a seconds-scale fetch for minutes of 50 bps demodulation (measured twice: 2026-07-12 ride and 2026-07-13 commute, 10–11 min blind each — one boot-time response lost to a −109 dBm cell, then EXCLUSIVE cut the supply while driving toward towers where the same fetch took 2 s). While held here, agnss_poll retries on its cold cadence (15 s) and may fetch from ACQUIRE; C3's timeout still bounds the stay, and a supply lockout flips `agnss_supply` false, restoring the escalation as the genuine no-server fallback |
 | C3 | in-state > 300 s (`ACQUIRE_TIMEOUT`) | CELL_LOOP | "acquire timeout" |
 | C4 | in-state > 30 s (`SKY_GRACE`) and `sky_empty` | CELL_LOOP | "sky empty" |
 
