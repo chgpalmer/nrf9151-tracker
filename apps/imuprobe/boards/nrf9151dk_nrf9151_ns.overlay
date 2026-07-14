@@ -1,0 +1,30 @@
+/* No MCUboot — TF-M boots directly */
+#include <samples/cellular/nrf91_no_bootloader_partitions.dtsi>
+#include <samples/cellular/nrf91_sram_partitions.dtsi>
+#include <zephyr/dt-bindings/sensor/lis2dh.h>
+
+/* Adafruit LIS3DH breakout on the Arduino header:
+ *   SDA -> P0.30 (D14), SCL -> P0.31 (D15), VIN -> VDD, INT1 -> P0.19 (A5).
+ * SDO/CS untouched: breakout defaults give I2C mode at address 0x18.
+ * INT1 shares Button 4 (P0.19, disabled below). Only INT1 is wired, so
+ * any-motion routes there (anym-on-int1).
+ */
+&button3 {
+	status = "disabled";
+};
+
+&arduino_i2c {
+	status = "okay";
+	lis3dh: lis3dh@18 {
+		compatible = "st,lis2dh";
+		reg = <0x18>;
+		irq-gpios = <&gpio0 19 GPIO_ACTIVE_HIGH>;
+		anym-on-int1;
+		/* OR-mode (default) — safe with a small threshold ONLY
+		 * because main.c routes the high-pass filter into the INT
+		 * engine (gravity never reaches the comparator). 6D modes
+		 * tried and rejected: they fire on entering recognized
+		 * orientation zones, so wild tumbling between zones is
+		 * invisible — field-tested 2026-07-14. */
+	};
+};
