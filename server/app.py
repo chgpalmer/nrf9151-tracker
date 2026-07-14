@@ -62,9 +62,18 @@ async def no_stale_assets(request, call_next):
 @app.get("/api/devices")
 async def devices():
     db = app.state.db
+    # last_seen = anything the server has heard, not just positions: a
+    # registered device with no sky (CELL_LOOP between heartbeats) still
+    # ships logs, and the status badge should reflect "alive", not "has a
+    # recent fix". Devices still appear only once they have a position.
     rows = db.execute(
-        "SELECT device_id, MAX(received_ts) AS last_seen, COUNT(*) AS n "
-        "FROM positions GROUP BY device_id ORDER BY last_seen DESC"
+        "SELECT p.device_id, MAX(p.ls, COALESCE(l.ls, 0)) AS last_seen, p.n "
+        "FROM (SELECT device_id, MAX(received_ts) AS ls, COUNT(*) AS n "
+        "      FROM positions GROUP BY device_id) p "
+        "LEFT JOIN (SELECT device_id, MAX(received_ts) AS ls "
+        "           FROM logs WHERE origin = 'device' GROUP BY device_id) l "
+        "  ON l.device_id = p.device_id "
+        "ORDER BY last_seen DESC"
     ).fetchall()
     return JSONResponse([dict(r) for r in rows])
 

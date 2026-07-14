@@ -363,6 +363,11 @@ def main():
         if not before or before == after:
             problems.append(f"settings estimator not reactive ({before!r} -> {after!r})")
 
+        # Keepalive row: status thresholds rendered from cadence.js.
+        derive = page.locator("#keepalive-derive").inner_text() or ""
+        if "ONLINE" not in derive or "OFFLINE" not in derive:
+            problems.append(f"keepalive derive text missing/empty ({derive!r})")
+
         page.wait_for_timeout(500)
 
         if args.screenshot:

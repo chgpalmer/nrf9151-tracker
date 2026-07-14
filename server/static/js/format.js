@@ -2,6 +2,8 @@
  * format.js — display helpers
  */
 
+import { KEEPALIVE_S } from '/js/cadence.js';
+
 /**
  * Format unix epoch (seconds) as local time string
  */
@@ -61,14 +63,19 @@ export function fmtAcc(metres) {
 }
 
 /**
- * Determine status from last_seen epoch
- * <30s → online, <5min → stale, else → offline
+ * Status from last_seen vs the device's contact contract (cadence.js).
+ * The server can't know whether the device is moving or parked, so the
+ * contract is the parked worst case — KEEPALIVE_S between check-ins:
+ *   on schedule (25% grace)   → online
+ *   missed one check-in       → stale
+ *   missed two or more        → offline
+ * A moving device reports far more often, so it is always "on schedule".
  */
 export function deviceStatus(lastSeenEpoch) {
   if (!lastSeenEpoch) return 'offline';
   const age = Date.now() / 1000 - lastSeenEpoch;
-  if (age < 30)  return 'online';
-  if (age < 300) return 'stale';
+  if (age < KEEPALIVE_S * 1.25) return 'online';
+  if (age < KEEPALIVE_S * 2.5)  return 'stale';
   return 'offline';
 }
 

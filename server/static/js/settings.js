@@ -9,6 +9,7 @@
  */
 
 import { estimate } from '/js/usage-model.js';
+import { KEEPALIVE_S } from '/js/cadence.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -41,5 +42,11 @@ export function init() {
   if (!$('set-sample')) return;
   ['set-sample', 'set-flush', 'set-riding'].forEach((id) =>
     $(id).addEventListener('input', recalc));
+  // Status thresholds derive from the keepalive (format.js deviceStatus);
+  // render them from the same constant so the page can't drift from it.
+  $('keepalive-derive').textContent =
+    `ONLINE within ${fmtInterval(KEEPALIVE_S * 1.25)} of last contact, ` +
+    `STALE after a missed check-in, ` +
+    `OFFLINE after two (${fmtInterval(KEEPALIVE_S * 2.5)})`;
   recalc();
 }
