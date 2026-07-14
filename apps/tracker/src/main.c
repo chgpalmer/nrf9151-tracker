@@ -25,9 +25,11 @@
 
 #include "loc_fsm.h"
 #include "motion.h"
+#include "imu.h"
 #include "agnss.h"
 #include "coap_pub.h"
 #include "obs_queue.h"
+#include "event_queue.h"
 #include "uplink.h"
 #include "log_uplink.h"
 #include "leds.h"
@@ -357,7 +359,8 @@ static int read_serving_cell(struct serving_cell *sc)
 
 /* ── status block ─────────────────────────────────────────────────  */
 static void print_status(const struct nrf_modem_gnss_pvt_data_frame *p,
-			 const struct loc_status *loc, int64_t uptime_ms)
+			 const struct loc_status *loc, int64_t uptime_ms,
+			 bool gnss_live)
 {
 	LOG_DBG("===== status @ %llds =====", (long long)(uptime_ms / 1000));
 
@@ -372,8 +375,11 @@ static void print_status(const struct nrf_modem_gnss_pvt_data_frame *p,
 		LOG_DBG("LTE:  %s", lte_status_str());
 	}
 
-	/* GNSS status */
-	if (p->flags & NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID) {
+	/* GNSS status. With the receiver stopped, the pvt buffer is a frozen
+	 * frame — narrating it as "searching" misled a live debug session. */
+	if (!gnss_live) {
+		LOG_DBG("GNSS: off");
+	} else if (p->flags & NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID) {
 		LOG_DBG("GNSS: FIX  %.6f, %.6f  alt %.1fm  acc %.1fm  sats %u/%u",
 			p->latitude, p->longitude,
 			(double)p->altitude, (double)p->accuracy,
@@ -571,6 +577,7 @@ int main(void)
 	uplink_init(device_id);
 	uplink_on_sent(on_uplink_sent);
 	obs_queue_init(POST_INTERVAL_MS);
+	event_queue_init();
 	log_uplink_init();
 	agnss_set_device_id(device_id);
 	leds_init();
@@ -647,10 +654,17 @@ int main(void)
 	int64_t last_status_ms = 0;
 	int64_t next_net_ms    = 0;
 	enum loc_state prev_state = LOC_LTE_ATTACH;
-	struct loc_status loc;
+	struct loc_status loc = { .state = LOC_LTE_ATTACH };
 
 	loc_fsm_init(k_uptime_get());
 	motion_init(k_uptime_get());
+	/* Boot picks the parked mode: IMU present = GNSS off while parked,
+	 * accelerometer owns departure; absent = legacy periodic checks.
+	 * Trusted absolutely after this probe — no runtime health checks. */
+	loc_fsm_set_imu_wake(imu_init());
+	LOG_INF("IMU: %s", imu_present() ?
+		"present — quiescent wake source is the accelerometer" :
+		"absent — quiescent wake source is GPS checks");
 
 	for (;;) {
 		/* Wait for next PVT event (1 Hz) with a 2s timeout so the
@@ -659,8 +673,16 @@ int main(void)
 
 		int64_t now = k_uptime_get();
 
-		if (pvt.flags & (NRF_MODEM_GNSS_PVT_FLAG_SLEEP_BETWEEN_PVT |
-				 NRF_MODEM_GNSS_PVT_FLAG_SCHED_DOWNLOAD)) {
+		/* With GNSS stopped (PARKED in IMU mode, LTE_ATTACH) the pvt
+		 * buffer is a FROZEN copy of the last frame — often FIX_VALID
+		 * from the parking fix. Re-processing it every 2 s tick would
+		 * ghost-refresh staleness, motion evidence and wake forensics
+		 * forever; treat it as no observation at all. */
+		bool gnss_live = (gnss_mode_applied != LOC_GNSS_OFF);
+
+		if (gnss_live &&
+		    (pvt.flags & (NRF_MODEM_GNSS_PVT_FLAG_SLEEP_BETWEEN_PVT |
+				  NRF_MODEM_GNSS_PVT_FLAG_SCHED_DOWNLOAD))) {
 			last_wake.ms    = now;
 			last_wake.slept = pvt.flags &
 				NRF_MODEM_GNSS_PVT_FLAG_SLEEP_BETWEEN_PVT;
@@ -674,7 +696,12 @@ int main(void)
 			sched_pvts += last_wake.sched;
 		}
 
-		if (pvt.flags & NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID) {
+		static const struct nrf_modem_gnss_pvt_data_frame quiet = {
+			.flags = NRF_MODEM_GNSS_PVT_FLAG_DEADLINE_MISSED,
+		};
+
+		if (gnss_live &&
+		    (pvt.flags & NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID)) {
 			/* Known cosmetic quirk, deliberately NOT special-cased:
 			 * the first fix after a periodic-mode sleep can carry a
 			 * near-pre-sleep position (solver seeded with held state;
@@ -691,11 +718,23 @@ int main(void)
 					(double)pvt.accuracy, now);
 		}
 
+		/* IMU any-motion interrupt. While quiescent it is the WAKE:
+		 * raise an alert event (jumps the uplink queue, so the server
+		 * learns "your asset moved" within seconds) and break the
+		 * stationary verdict so the FSM leaves for REPORT_CELL.
+		 * While already moving it is noise the verdict reflects. */
+		if (imu_take_motion()) {
+			if (loc.state == LOC_QUIESCENT) {
+				event_queue_add(EVENT_REASON_IMU_WAKE, now);
+			}
+			motion_note_imu(now);
+		}
+
 		/* Policy first: it owns the fix-staleness and ephemeris bookkeeping.
 		 * The supply verdict gates the C2 escalation (see loc_fsm.h). */
 		loc_fsm_set_agnss_supply(agnss_supply_ok());
-		loc_fsm_update(&pvt, now, lte_connected, motion_stationary(now),
-			       &loc);
+		loc_fsm_update(gnss_live ? &pvt : &quiet, now, lte_connected,
+			       motion_stationary(now), &loc);
 		leds_update(&loc, lte_connected);
 
 		/* First parked entry of this boot: checkpoint the modem's NVM
@@ -704,7 +743,7 @@ int main(void)
 		 * socket and force the GNSS mode to be reapplied; the FSM sees
 		 * the registration drop and walks the normal re-attach path. */
 		if (checkpoint_enabled && !checkpoint_done &&
-		    (loc.state == LOC_QUIESCENT || loc.state == LOC_REST)) {
+		    loc.state == LOC_QUIESCENT) {
 			checkpoint_done = true;
 			LOG_INF("LTE: checkpoint — persisting network state "
 				"(one re-attach)");
@@ -726,7 +765,9 @@ int main(void)
 			}
 			gnss_mode_applied = LOC_GNSS_OFF;
 			if (loc.gnss_mode == LOC_GNSS_OFF) {
-				LOG_INF("GNSS off (modem unregistered)");
+				/* Off while unregistered (search owns the
+				 * radio) or IMU-parked (nothing to check). */
+				LOG_INF("GNSS off");
 			} else {
 				bool cont = (loc.gnss_mode == LOC_GNSS_CONTINUOUS);
 				uint16_t ivl = cont ? GNSS_INTERVAL_S
@@ -826,9 +867,13 @@ int main(void)
 		}
 
 		/* Status block every STATUS_INTERVAL_MS */
-		if (now - last_status_ms >= STATUS_INTERVAL_MS) {
+		/* While quiescent nothing changes second to second; a calm
+		 * device should read calm on the console too. */
+		int64_t status_ivl = (loc.state == LOC_QUIESCENT)
+			? 60000 : STATUS_INTERVAL_MS;
+		if (now - last_status_ms >= status_ivl) {
 			last_status_ms = now;
-			print_status(&pvt, &loc, now);
+			print_status(&pvt, &loc, now, gnss_live);
 			if (wake_pvts) {
 				/* UART-only prevalence stats (DBG never
 				 * ships): do ALL wakes carry the flag? */
@@ -877,8 +922,7 @@ int main(void)
 		if (loc.state != prev_state) {
 			/* Departure forensics: label what the wake's PVT
 			 * claimed, once, before prev_state is overwritten. */
-			if ((prev_state == LOC_QUIESCENT ||
-			     prev_state == LOC_REST) && last_wake.ms != 0) {
+			if (prev_state == LOC_QUIESCENT && last_wake.ms != 0) {
 				LOG_INF("GNSS: wake PVT %ds ago: sleep=%d "
 					"sched-dl=%d fix=%d acc=%d",
 					(int)((now - last_wake.ms) / 1000),
@@ -893,8 +937,7 @@ int main(void)
 		 * raw verdict) so shipping only slows once actually quiesced;
 		 * the QUIESCENT->REPORT_GNSS transition urgent-flushes above,
 		 * so motion still reaches the map in seconds. */
-		uplink_set_flush_interval(
-			(loc.state == LOC_QUIESCENT || loc.state == LOC_REST)
+		uplink_set_flush_interval(loc.state == LOC_QUIESCENT
 			? (uint32_t)CONFIG_TRACKER_QUIESCENT_FLUSH_S * 1000
 			: (uint32_t)CONFIG_TRACKER_FLUSH_INTERVAL_S * 1000);
 		uplink_set_allowed(loc.publish_allowed);

@@ -158,6 +158,34 @@ async def logs(device: str, from_ts: float = 0, to_ts: float = 0,
     return JSONResponse([dict(r) for r in reversed(rows)])
 
 
+@app.get("/api/events")
+async def events(device: str, from_ts: float = 0, to_ts: float = 0,
+                 limit: int = 500):
+    """Events (something happened, vs positions = where it was), newest
+    first. Each row carries the nearest position at that time (within 5 min)
+    so the UI can place it on a map without a second round trip."""
+    db = app.state.db
+    params = [device]
+    sql = "SELECT id, received_ts, kind, reason FROM events WHERE device_id = ?"
+    if from_ts and to_ts:
+        sql += " AND received_ts BETWEEN ? AND ?"
+        params += [from_ts, to_ts]
+    sql += " ORDER BY received_ts DESC LIMIT ?"
+    params.append(limit)
+    out = []
+    for r in db.execute(sql, params).fetchall():
+        e = dict(r)
+        pos = db.execute(
+            "SELECT lat, lon FROM positions WHERE device_id = ? "
+            "AND ABS(received_ts - ?) < 300 "
+            "ORDER BY ABS(received_ts - ?) LIMIT 1",
+            (device, e["received_ts"], e["received_ts"])).fetchone()
+        e["lat"] = pos["lat"] if pos else None
+        e["lon"] = pos["lon"] if pos else None
+        out.append(e)
+    return JSONResponse(out)
+
+
 # Per-datagram framing estimate for on-air bytes: 20 IP + 8 UDP + ~44 CoAP
 # header/token/options. Billed usage additionally rounds per RRC session
 # (field-calibrated ~2x on quiet days), which no per-datagram sum can see --

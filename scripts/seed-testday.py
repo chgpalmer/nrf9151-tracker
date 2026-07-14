@@ -119,7 +119,20 @@ for day_back in range(4):
 db.executemany(
     "INSERT INTO usage (device_id, received_ts, bytes, kind)"
     " VALUES (?,?,?,?)", usage_rows)
+# Events for the Events page: two motion wakes (reason 1).
+db.execute("""CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT NOT NULL,
+    received_ts REAL NOT NULL, kind TEXT NOT NULL, reason INTEGER)""")
+db.execute("DELETE FROM events")
+event_rows = [
+    (dev, now - 3600, 'motion', 1),
+    (dev, now - 7200, 'motion', 1),
+]
+db.executemany(
+    "INSERT INTO events (device_id, received_ts, kind, reason)"
+    " VALUES (?,?,?,?)", event_rows)
 db.commit()
 print(f"seeded {len(cell_rows)} cell events + "
       f"{len(rows)} positions + {len(log_rows)} logs + "
-      f"{len(usage_rows)} usage rows for {dev} into {sys.argv[1]}")
+      f"{len(usage_rows)} usage rows + {len(event_rows)} events "
+      f"for {dev} into {sys.argv[1]}")

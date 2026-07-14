@@ -100,7 +100,9 @@ void motion_note_gps(double lat_deg, double lon_deg, double acc_m,
 				anchor_since_ms = now_ms;
 				gps_stationary = true;
 				returning = false;
-				LOG_INF("motion: back at parked spot");
+				LOG_INF("motion: wake cancelled — GPS moved "
+					"< %d m for %d s", RADIUS_M,
+					(int)(RETURN_MS / 1000));
 				return;
 			}
 		} else {
@@ -158,6 +160,23 @@ void motion_note_cell(uint32_t cell_id, int64_t now_ms)
 		LOG_DBG("motion: novel cell %u", cell_id);
 	}
 	cell_seen = true;
+	cell_calm_since_ms = now_ms;
+}
+
+void motion_note_imu(int64_t now_ms)
+{
+	/* Only the wake matters (interrupts also fire while already moving;
+	 * those are noise the verdict already reflects). */
+	if (gps_stationary || (now_ms - cell_calm_since_ms) >= ENTRY_MS) {
+		LOG_INF("motion: IMU wake");
+	}
+	/* Break BOTH verdicts: the GPS one directly, the cell one via its
+	 * calm clock (parked overnight the GPS verdict has long ceded to
+	 * cells — GPS_HOLD_MS — and a wake must not be vetoed by a calm
+	 * cell set). The anchor dwell restarts; parked_lat survives, so the
+	 * return-to-parked shortcut re-parks a false wake in RETURN_MS. */
+	gps_stationary = false;
+	anchor_since_ms = now_ms;
 	cell_calm_since_ms = now_ms;
 }
 

@@ -115,6 +115,21 @@ def init_db(path: Path) -> sqlite3.Connection:
         CREATE INDEX IF NOT EXISTS idx_usage_dev_time
         ON usage(device_id, received_ts)
     """)
+    # Events: something HAPPENED (vs positions, which say where the asset WAS).
+    # Today the only kind is a motion wake — the seed of owner alerts.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS events (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_id   TEXT    NOT NULL,
+            received_ts REAL    NOT NULL,
+            kind        TEXT    NOT NULL,
+            reason      INTEGER
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_events_dev_time
+        ON events(device_id, received_ts)
+    """)
     # Migrate older DBs created before the source column existed.
     cols = {r[1] for r in conn.execute("PRAGMA table_info(positions)")}
     if "source" not in cols:
@@ -262,6 +277,9 @@ def store_track(conn, dev, base_ts, seg) -> int:
     return count
 
 
+MOTION_REASON = {1: "imu_wake"}
+
+
 def store_obs(conn, obs, cells, now: int) -> tuple[int, int, int]:
     """Store a decoded Obs. Returns (track_points, cell_fixes, log_lines)."""
     dev = obs.device_id
@@ -271,6 +289,15 @@ def store_obs(conn, obs, cells, now: int) -> tuple[int, int, int]:
         kind = e.WhichOneof("kind")
         if kind == "track":
             n_pts += store_track(conn, dev, base_ts, e.track)
+        elif kind == "motion":
+            reason = e.motion.reason
+            conn.execute(
+                "INSERT INTO events (device_id, received_ts, kind, reason) "
+                "VALUES (?, ?, 'motion', ?)",
+                (dev, now - e.motion.age_s, reason))
+            slog(conn, 2, "event",
+                 f"motion alert: {MOTION_REASON.get(reason, reason)}",
+                 device=dev)
         elif kind == "log":
             for line in e.log.lines:
                 conn.execute(
@@ -425,6 +452,10 @@ async def serve(args):
     # The one INF every start: a restart marker in every anomaly report.
     slog(conn, 3, "coap",
          f"listening on UDP {args.port} (POST /obs + /agnss, protobuf)")
+    # A staging deploy (scripts/vm-deploy.sh dev) sets this — the WRN makes a
+    # forgotten dev session discoverable on the Logs page (origin=server).
+    if os.environ.get("TRACKER_DEV_SESSION") == "dev":
+        slog(conn, 2, "coap", "⚠ DEV TREE ACTIVE — uncommitted working tree")
     await asyncio.get_running_loop().create_future()  # run forever
 
 

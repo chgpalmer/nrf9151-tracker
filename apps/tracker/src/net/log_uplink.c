@@ -271,5 +271,5 @@ static const struct uplink_source log_source = {
 
 void log_uplink_init(void)
 {
-	uplink_register(&log_source, 2);
+	uplink_register(&log_source, 3);
 }

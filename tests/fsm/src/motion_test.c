@@ -171,3 +171,39 @@ static void motion_before(void *fixture)
 }
 
 ZTEST_SUITE(motion, NULL, NULL, motion_before, NULL, NULL);
+
+/* ── IMU wake ──────────────────────────────────────────────────────── */
+
+ZTEST(motion, test_imu_wake_breaks_both_verdicts)
+{
+	/* Parked long enough that the GPS verdict has ceded to cells (the
+	 * overnight case: no fixes for hours, cell set calm). The IMU
+	 * interrupt must read as motion instantly through BOTH verdicts. */
+	for (int i = 0; i <= CONFIG_TRACKER_MOTION_ENTRY_S; i++) {
+		gps(0, 0);
+	}
+	zassert_true(motion_stationary(t), "parked");
+	cell(1);
+	t += 12 * 60 * 1000; /* GPS hold (10 min) expired; cell set calm */
+	zassert_true(motion_stationary(t), "cell verdict carries the park");
+	motion_note_imu(t);
+	zassert_false(motion_stationary(t), "IMU wake = moving");
+	zassert_false(motion_stationary(t + 30 * 1000), "no instant re-park");
+}
+
+ZTEST(motion, test_imu_false_wake_reparks_via_shortcut)
+{
+	/* A nudge with no departure: fixes return to the parked spot, so the
+	 * return-to-parked shortcut restores stationary in RETURN_MS — not a
+	 * full ENTRY_S dwell. */
+	for (int i = 0; i <= CONFIG_TRACKER_MOTION_ENTRY_S; i++) {
+		gps(0, 0);
+	}
+	zassert_true(motion_stationary(t), "parked");
+	motion_note_imu(t);
+	zassert_false(motion_stationary(t), "woke");
+	for (int i = 0; i <= 61; i++) {
+		gps(1, 1); /* back inside the parked radius */
+	}
+	zassert_true(motion_stationary(t), "re-parked via shortcut");
+}

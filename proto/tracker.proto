@@ -98,12 +98,21 @@ message LogBatch {
 
 // One item in a batch. age_s ages the anchor (track) or the fix (cell);
 // log lines carry their own ages (a batch spans time).
+// A thing worth telling a human about, right now. Today the only kind is an
+// accelerometer wake on a quiescent tracker: "your asset moved". It jumps the
+// uplink queue (prio 0) and rides the urgent flush the FSM transition fires.
+message MotionEvent {
+  uint32 age_s  = 1;
+  uint32 reason = 2;   // 1 = IMU wake
+}
+
 message Entry {
   uint32 age_s = 1;
   oneof kind {
     TrackSegment track = 2;
     CellFix      cell  = 3;
     LogBatch     log   = 4;
+    MotionEvent  motion = 5;
   }
 }
 

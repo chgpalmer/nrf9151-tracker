@@ -133,17 +133,17 @@ enum loc_state {
 	 * cadence whose gaps are long enough for GNSS to *sense* the sky, so the
 	 * exit is signal-driven rather than a blind timer. */
 	LOC_CELL_LOOP,
-	/* Parked with a held fix (stationary input from motion.c). GNSS drops
-	 * to periodic position checks -- the modem sleeps between them -- and
-	 * the check that lands outside the parked radius flips the stationary
-	 * verdict, which snaps us back to REPORT_GNSS at 1 Hz. */
+	/* Stationary (verdict from motion.c), fix held or not — the
+	 * difference is a flag, not a state. Two policies:
+	 *   IMU mode (loc_fsm_set_imu_wake(true)): GNSS is OFF outright. No
+	 *   periodic checks, no scheduled downloads, no parked fixes — which
+	 *   kills the parked-phantom fake-trip class structurally. Departure
+	 *   is the accelerometer's job (motion.c::motion_note_imu flips the
+	 *   stationary verdict); the only traffic is the heartbeat cell fix.
+	 *   Legacy mode (no IMU): the old QUIESCENT/REST behavior keyed on
+	 *   the had-fix flag — periodic position checks while a fix is held,
+	 *   exponential-backoff retries (and a cell heartbeat) when not. */
 	LOC_QUIESCENT,
-	/* Parked with no fix to hold (indoors, garage). The anti-churn state:
-	 * GNSS periodic checks with exponential backoff instead of the old
-	 * ATTACH->ACQUIRE->EXCLUSIVE->timeout loop, and a slow cell heartbeat
-	 * as the only traffic. Motion evidence here is cell-grade only (~km)
-	 * until an IMU exists -- the accepted limit. */
-	LOC_REST,
 
 	LOC_STATE_COUNT,
 };
@@ -222,6 +222,13 @@ void loc_fsm_note_cell_sent(void);
  * 2026-07-13 commute: 10-11 min blind each). Defaults false, so callers
  * that never report a supply keep the old escalation behavior. */
 void loc_fsm_set_agnss_supply(bool available);
+
+/* IMU wake mode (imu_init() succeeded), reported once at boot. In PARKED
+ * it turns GNSS off outright and hands departure detection to the
+ * accelerometer (via motion.c's verdict); GNSS-evidence rows (staleness,
+ * sightings, backoff) are legacy-only — with GNSS off they would be
+ * judging a frozen frame. Defaults false = legacy GPS-check behavior. */
+void loc_fsm_set_imu_wake(bool present);
 
 /* Feed one PVT frame (or a stale one, if GNSS produced no event) and get the
  * current policy back. Call at the PVT rate; it is cheap and has no side

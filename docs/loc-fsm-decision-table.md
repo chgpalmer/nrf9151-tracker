@@ -17,10 +17,12 @@ row by row. If code and table disagree, one of them is wrong — fix whichever.
 | `sky_empty` | ≥ 5 consecutive **observed** epochs with tracked == 0 (`SKY_EMPTY_EPOCHS`) | blanked epochs pause the count |
 | `lte_chops_gnss` | ≥ 10 consecutive epochs with NOT_ENOUGH_WINDOW_TIME (`CHOPPED_EPOCHS`) | modem's own testimony that idle-mode LTE is slicing GNSS |
 | `hotstart_dead` | > 10 s (`VISIBLE_LOST_MS`) since an observed epoch had ≥ 4 ephemeris-bearing satellites in view | visible ≠ held: held ephemerides may have set |
-| `stationary` | motion.c verdict (GPS centroid / cell-set LRU) | an input, like `lte_registered`; consumed by QUIESCENT/REST |
-| `acquire_failures` | consecutive ACQUIRE/EXCLUSIVE give-ups (timeout or sky-empty) since the last fix | SURVIVES state changes; reset by any fix, and by leaving REST on motion |
+| `stationary` | motion.c verdict (GPS centroid / cell-set LRU / IMU interrupt) | an input, like `lte_registered`; consumed by PARKED. `motion_note_imu()` (any-motion interrupt) flips it false instantly through both dwell verdicts |
+| `acquire_failures` | consecutive ACQUIRE/EXCLUSIVE give-ups (timeout or sky-empty) since the last fix | SURVIVES state changes; reset by any fix, and by leaving PARKED on motion |
 | `agnss_supply` | main.c reports `agnss_supply_ok()` each pass: assistance compiled in, enabled, and not fetch-locked-out | an input, like `stationary`; defaults false (no supply). Goes false after 5 consecutive fetch failures (agnss lockout) and true again on the next success — the C2 gate inherits that hysteresis for free |
 | `cold` | `ephemeris_held < 4` (`SATS_FOR_FIX`) | the inventory cannot support ANY fix; distinct from `hotstart_dead` (visibility) |
+| `imu_wake` | boot verdict: `imu_init()` succeeded (LIS3DH present and armed) | a MODE, not a per-tick signal (`loc_fsm_set_imu_wake`). Selects PARKED's policy; trusted absolutely — no runtime health checks (decided 2026-07-14) |
+| `parked_had_fix` | did PARKED get entered holding a fix? | internal flag selecting the legacy flavor (checks vs backoff); flips true if a check fixes. Meaningless in IMU mode |
 
 Streaks and `last_visible_ok` reset on every state change: each state judges
 the sky on its own evidence.
@@ -69,43 +71,51 @@ override typically bounces CELL_LOOP → LTE_ATTACH within seconds (see F-2).
 | E2 | `!gps_current` and `hotstart_dead` | GNSS_ACQUIRE | "fix stale, ephemeris not visible" |
 | E3 | `!gps_current` (hot start still viable) | stay | wait for re-fix |
 | E4 | *(removed — see finding F-1)* | | the old ephemeris-refresh exit |
-| E4' | `gps_current` and `stationary` | QUIESCENT | "stationary" |
+| E4' | `gps_current` and `stationary` | QUIESCENT (had_fix=true) | "stationary" |
 
-### QUIESCENT — parked with a held fix; periodic checks
-| # | Condition | Next | |
+### QUIESCENT — stationary; the old QUIESCENT+REST merged 2026-07-14 (IMU integration)
+
+**IMU mode** (`imu_wake`): GNSS is OFF outright — no periodic checks, no
+scheduled downloads, no parked fixes, which kills the parked-phantom
+fake-trip class structurally. The accelerometer owns departure (its
+interrupt flips `stationary` via motion.c). The only traffic is the
+heartbeat cell fix every REST_HEARTBEAT_S. GNSS-evidence rows below are
+skipped entirely: with the receiver stopped, PVT inputs are a frozen frame
+(main.c additionally feeds the FSM a blanked frame while GNSS is off).
+State named QUIESCENT (not PARKED): the tracker may ride a bike, a cat,
+or a suitcase — Charlie's call 2026-07-14.
+
+| # | Condition (IMU mode) | Next | |
 |---|---|---|---|
-| Q1 | `!stationary` | REPORT_GNSS | "motion" |
-| Q2 | fix older than 3 check intervals | GNSS_ACQUIRE | "checks not fixing" |
+| PI1 | `!stationary` | REPORT_CELL (resets failures, clears cell_sent) | "IMU wake" — LTE FIRST: the server must learn of the movement (alert event + free coarse cell fix) and the A-GNSS fetch must run before the radio-silent acquisition. The wake path IS the boot path (REPORT_CELL → ACQUIRE on cell_sent). main.c raises a MotionEvent on this edge (uplink prio 0, urgent flush) |
+| PI2 | otherwise | stay | armed and quiet |
+
+**Legacy mode** (no IMU): the old split behavior, flavored by
+`parked_had_fix`:
+
+| # | Condition (legacy) | Next | |
+|---|---|---|---|
+| P1 | `!stationary` and `gps_current` | REPORT_GNSS | "motion" |
+| P1' | `!stationary` | GNSS_ACQUIRE (resets failures) | "motion" |
+| P2 | `fix` | stay, `had_fix := true` | flavor upgrades IN PLACE (the old REST bounced through REPORT_GNSS and back — two transitions narrating nothing) |
+| P3 | `had_fix` and fix older than 3 check intervals | GNSS_ACQUIRE | "checks not fixing" |
+| P4 | `!had_fix` and `sats_in_view` | GNSS_ACQUIRE | "satellites sighted" |
+| P5 | `!had_fix` and empty observed check, backoff elapsed | stay | doubles the backoff (once per wake) |
 
 Sky-evidence streaks are 1 Hz bookkeeping and are NOT consulted here.
-Staleness is cadence-aware: `gps_current` in this state means "fix newer
-than 3 × QUIESCENT_CHECK_S", not 30 s.
+Staleness is cadence-aware in the had_fix flavor: `gps_current` means "fix
+newer than 3 × QUIESCENT_CHECK_S", not 30 s.
 
 ### CELL_LOOP — cell cadence; sight-triggered retry
 | # | Condition | Next | |
 |---|---|---|---|
 | G1 | `fix` | REPORT_GNSS | "fix returned" |
-| G2 | `stationary` and `acquire_failures ≥ 2` | REST | "parked, repeated failures" |
+| G2 | `stationary` and `acquire_failures ≥ 2` | QUIESCENT (had_fix=false, backoff reset) | "stationary, repeated failures" |
 | G3 | `sats_in_view` (one epoch, any strength) | GNSS_ACQUIRE | "satellites sighted" |
 
 G2 before G3 on purpose: once parked-and-failing, a teasing satellite must
-not restart the churn — REST's own sighting row still reacts, but at the
-backoff cadence.
-
-### REST — parked, no fix; the anti-churn state (resolves F-2)
-The periodic GNSS wake IS the retry: the modem's periodic interval is set to
-the current backoff (starts REST_BACKOFF_MIN_S, doubles per empty check,
-capped at REST_BACKOFF_MAX_S; reset on entry and on motion).
-
-| # | Condition | Next | |
-|---|---|---|---|
-| R1 | `fix` | REPORT_GNSS | "fix on check" |
-| R2 | `!stationary` (cell-set change; IMU later) | GNSS_ACQUIRE | "motion" (resets failures + backoff) |
-| R3 | `sats_in_view` | GNSS_ACQUIRE | "satellites sighted" |
-| R4 | empty observed check, backoff elapsed | stay | doubles the backoff (once per wake) |
-
-Sky-evidence streaks are not consulted. Only traffic: a heartbeat cell fix
-every REST_HEARTBEAT_S.
+not restart the churn — QUIESCENT's own sighting row still reacts, but at
+the backoff cadence.
 
 ## Outputs by state
 
@@ -117,8 +127,9 @@ every REST_HEARTBEAT_S.
 | GNSS_EXCLUSIVE | CONT | **no** | **no** | — | — |
 | REPORT_GNSS | CONT | yes | yes | only if fix stale | 1 s |
 | CELL_LOOP | CONT | yes | yes | yes | 30 s |
-| QUIESCENT | PERIODIC(check) | yes | yes | no (yes if stale) | check interval |
-| REST | PERIODIC(backoff) | yes | yes | yes | heartbeat interval |
+| QUIESCENT (IMU mode) | **OFF** | yes | yes | yes (after 30 s staleness) | heartbeat interval |
+| QUIESCENT (legacy, had_fix) | PERIODIC(check) | yes | yes | no (yes if stale) | check interval |
+| QUIESCENT (legacy, no fix) | PERIODIC(backoff) | yes | yes | yes | heartbeat interval |
 
 \* gnss_mode is OFF whenever `!lte_registered`, except in EXCLUSIVE where
 being unregistered is deliberate — so GNSS is off while attaching.
@@ -153,8 +164,8 @@ timeout → … a ~6–7 min churn cycle, forever, narrating ~1 KB of logs per l
 satellite with no rate limit, and the 30 s cell cadence ships ~7.4 MB/mo.
 Nothing here is individually wrong; what's missing is backoff/quiescence for
 "stationary and repeatedly failing". This is the adaptive-cadence work; it
-should build on this table. **Resolved:** QUIESCENT (parked with fix) +
-REST (parked without) — see those sections. The 30 s CELL_LOOP cadence now
+should build on this table. **Resolved:** the parked states (merged into
+one QUIESCENT state, 2026-07-14) — see that section. The 30 s CELL_LOOP cadence now
 only runs while genuinely between states, not as a parking orbit.
 
 **F-3 — `cell_sent` can be satisfied by a stale cell.** The uplink kinds-mask
@@ -179,8 +190,8 @@ modem? Discussion pending — do not implement without it.
 Bag carried inside a building: a jitter wake set stationary=false, indoor
 sky teased acquisition, and with !stationary the C2 EXCLUSIVE gate reopened
 — ~12 min of hunt (two EXCLUSIVE laps) before the dwell completed. Neither
-parked state can catch it: QUIESCENT needs fixes, REST needs a stationary
-verdict, and the GPS verdict blocks the cell verdict for GPS_HOLD (10 min)
+parked state can catch it: the fix flavor needs fixes, the no-fix entry
+needs a stationary verdict, and the GPS verdict blocks the cell verdict for GPS_HOLD (10 min)
 after the last fix. Candidate: let the cell-set verdict reclaim authority
 faster once GPS goes dark, or add dwell credit from the pre-wake parked
 spot. Discussion pending — self-resolves today at ~3 KB per episode.

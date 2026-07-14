@@ -68,7 +68,6 @@
         <a href="#events"   class="nav-item" data-page="events">
           <span class="nav-icon">◈</span>
           <span class="nav-label">Events</span>
-          <span class="nav-badge soon">soon</span>
         </a>
         <a href="#settings" class="nav-item" data-page="settings">
           <span class="nav-icon">◧</span>
@@ -243,11 +242,23 @@
 
       <!-- ── EVENTS PAGE ── -->
       <section class="page hidden" id="page-events" data-page="events">
-        <div class="coming-soon">
-          <div class="coming-soon-icon">◈</div>
-          <div class="coming-soon-title">Events</div>
-          <div class="coming-soon-body">Geofence trips, motion alerts, and low-battery notifications will appear here once the firmware supports them.</div>
-          <div class="coming-soon-tag">NOT YET IMPLEMENTED</div>
+        <div class="page-controls">
+          <div class="control-group">
+            <label class="control-label" for="events-date">DATE</label>
+            <button class="date-step" id="events-date-prev" type="button" aria-label="Previous day">‹</button>
+            <input type="date" id="events-date" class="date-input" />
+            <button class="date-step" id="events-date-next" type="button" aria-label="Next day">›</button>
+          </div>
+          <span class="hist-hint">motion alerts while parked, newest first</span>
+        </div>
+        <div class="log-scroll">
+          <table class="log-table" id="events-table">
+            <thead>
+              <tr><th>Time</th><th>Event</th><th>Where</th></tr>
+            </thead>
+            <tbody id="events-tbody"></tbody>
+          </table>
+          <div id="events-empty" class="hist-hint hidden" style="padding:1rem;">No events on this day.</div>
         </div>
       </section>
 

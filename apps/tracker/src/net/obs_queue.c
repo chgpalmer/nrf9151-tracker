@@ -363,8 +363,8 @@ void obs_queue_init(uint32_t dt_ms)
 	sample_dt_ms = dt_ms ? dt_ms : 1000;
 	gps_start = gps_count = gps_taken = 0;
 	cell_start = cell_count = cell_taken = 0;
-	uplink_register(&cell_source, 0);
-	uplink_register(&gps_source, 1);
+	uplink_register(&cell_source, 1);
+	uplink_register(&gps_source, 2);
 }
 
 size_t obs_queue_len(void)

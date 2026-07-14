@@ -34,6 +34,14 @@ void motion_note_gps(double lat_deg, double lon_deg, double acc_m,
 /* Feed the serving cell ID whenever one is read. */
 void motion_note_cell(uint32_t cell_id, int64_t now_ms);
 
+/* An IMU any-motion interrupt: physical evidence of movement, and the ONLY
+ * thing that wakes a quiescent tracker. It breaks both dwell verdicts
+ * instantly. The IMU is deliberately wake-only — GNSS still decides when to
+ * sleep (an accelerometer cannot see constant velocity; a smooth motorway
+ * cruise is inertially silent), so a stopped tracker re-parks on the usual
+ * GPS dwell, and a false wake re-parks in ~60 s via the return shortcut. */
+void motion_note_imu(int64_t now_ms);
+
 /* The verdict. False until evidence of ENTRY_S of stillness accumulates. */
 bool motion_stationary(int64_t now_ms);
 

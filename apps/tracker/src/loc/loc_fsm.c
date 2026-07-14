@@ -43,8 +43,7 @@ static const char *const loc_state_names[] = {
 	[LOC_GNSS_EXCLUSIVE] = "GNSS_EXCLUSIVE",
 	[LOC_REPORT_GNSS] = "REPORT_GNSS",
 	[LOC_CELL_LOOP]   = "CELL_LOOP",
-	[LOC_QUIESCENT]   = "QUIESCENT",
-	[LOC_REST]        = "REST",
+	[LOC_QUIESCENT]      = "QUIESCENT",
 };
 BUILD_ASSERT(ARRAY_SIZE(loc_state_names) == LOC_STATE_COUNT,
 	     "loc_state_names out of step with enum loc_state");
@@ -70,6 +69,13 @@ static bool cell_sent;
 /* A-GNSS supply verdict from main.c (default false = no supply). See the
  * setter's contract in loc_fsm.h; consumed by the C2 escalation gate. */
 static bool agnss_supply;
+
+/* IMU wake mode (boot verdict from main.c; default false = legacy). */
+static bool imu_wake;
+/* Did PARKED get entered holding a fix? Selects the legacy flavor (checks
+ * vs backoff-retries); flips true if a check lands a fix. Meaningless in
+ * IMU mode, where GNSS is off and there is nothing to flavor. */
+static bool parked_had_fix;
 
 /* Consecutive ACQUIRE/EXCLUSIVE attempts since the last fix that ended in
  * timeout or an empty sky. Unlike the sky streaks this survives state
@@ -124,6 +130,8 @@ void loc_fsm_init(int64_t now_ms)
 	ephe_valid = false;
 	acquire_failures = 0;
 	agnss_supply = false;
+	imu_wake = false;
+	parked_had_fix = false;
 	rest_backoff_s = CONFIG_TRACKER_REST_BACKOFF_MIN_S;
 	rest_backoff_bumped_ms = now_ms;
 }
@@ -136,6 +144,11 @@ void loc_fsm_note_cell_sent(void)
 void loc_fsm_set_agnss_supply(bool available)
 {
 	agnss_supply = available;
+}
+
+void loc_fsm_set_imu_wake(bool present)
+{
+	imu_wake = present;
 }
 
 static void poll_ephemeris(int64_t now_ms)
@@ -250,7 +263,7 @@ void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 	 * 30 s hole means trouble, but under periodic checks a fix is only
 	 * expected every check interval -- three missed checks is the
 	 * equivalent evidence. */
-	int64_t stale_ms = (state == LOC_QUIESCENT)
+	int64_t stale_ms = (state == LOC_QUIESCENT && parked_had_fix && !imu_wake)
 		? 3 * (int64_t)CONFIG_TRACKER_QUIESCENT_CHECK_S * 1000
 		: GPS_STALE_MS;
 	out->gps_current = (now_ms - last_fix_ms) < stale_ms;
@@ -404,20 +417,59 @@ void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 			}
 			/* else: hot-start conditions present; wait for re-fix */
 		} else if (stationary) {
-			/* Parked with a good fix: drop to periodic checks.
-			 * motion.c already applied the entry hysteresis. */
+			/* Parked with a good fix. motion.c already applied
+			 * the entry hysteresis. */
+			parked_had_fix = true;
 			next_state(LOC_QUIESCENT, now_ms, "stationary");
 		}
 		break;
 
 	case LOC_QUIESCENT:
 		/* Sky evidence (empty/chopped streaks) is 1 Hz bookkeeping and
-		 * is NOT consulted here: a periodic check either fixes or it
-		 * doesn't, and three missed checks is the give-up signal. */
+		 * is NOT consulted here. In IMU mode GNSS is OFF: every
+		 * GNSS-evidence row below is legacy-only, because with the
+		 * receiver stopped those inputs are a frozen frame, not
+		 * observations. Departure is the stationary verdict, which
+		 * the IMU interrupt flips via motion_note_imu(). */
 		if (!stationary) {
-			next_state(LOC_REPORT_GNSS, now_ms, "motion");
-		} else if (!out->gps_current) {
+			acquire_failures = 0;
+			if (imu_wake) {
+				/* LTE FIRST. The server must learn "your asset
+				 * moved" within seconds so it can alert — and
+				 * REPORT_CELL is exactly that: it publishes the
+				 * alert + a free coarse cell position, lets the
+				 * A-GNSS fetch run (ACQUIRE is radio-silent by
+				 * design and would gag both), and hands off to
+				 * ACQUIRE once the cell is out. The wake path
+				 * IS the boot path. */
+				cell_sent = false;
+				next_state(LOC_REPORT_CELL, now_ms, "IMU wake");
+			} else if (out->gps_current) {
+				next_state(LOC_REPORT_GNSS, now_ms, "motion");
+			} else {
+				next_state(LOC_GNSS_ACQUIRE, now_ms, "motion");
+			}
+		} else if (imu_wake) {
+			break; /* armed and quiet: nothing else can happen */
+		} else if (fix) {
+			/* A legacy check landed a fix: upgrade the flavor in
+			 * place (the old REST bounced through REPORT_GNSS and
+			 * back — two transitions narrating nothing). */
+			parked_had_fix = true;
+		} else if (parked_had_fix && !out->gps_current) {
 			next_state(LOC_GNSS_ACQUIRE, now_ms, "checks not fixing");
+		} else if (!parked_had_fix && sats_in_view) {
+			next_state(LOC_GNSS_ACQUIRE, now_ms, "satellites sighted");
+		} else if (!parked_had_fix && observed_window &&
+			   (now_ms - rest_backoff_bumped_ms) >=
+				(int64_t)rest_backoff_s * 1000) {
+			/* An empty check completed: back off. Guarded by the
+			 * elapsed interval so one wake's several PVT frames
+			 * bump only once. */
+			rest_backoff_bumped_ms = now_ms;
+			rest_backoff_s = MIN(rest_backoff_s * 2,
+				(uint32_t)CONFIG_TRACKER_REST_BACKOFF_MAX_S);
+			LOG_DBG("loc: QUIESCENT backoff -> %u s", rest_backoff_s);
 		}
 		break;
 
@@ -432,37 +484,14 @@ void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 			next_state(LOC_REPORT_GNSS, now_ms, "fix returned");
 		} else if (stationary && acquire_failures >= 2) {
 			/* Parked and failing: a teasing satellite must not
-			 * restart the churn -- REST's own sighting row still
-			 * reacts, but at the backoff cadence. */
+			 * restart the churn -- QUIESCENT's own sighting row
+			 * still reacts, but at the backoff cadence. */
 			rest_backoff_s = CONFIG_TRACKER_REST_BACKOFF_MIN_S;
 			rest_backoff_bumped_ms = now_ms;
-			next_state(LOC_REST, now_ms, "parked, repeated failures");
+			parked_had_fix = false;
+			next_state(LOC_QUIESCENT, now_ms, "stationary, repeated failures");
 		} else if (sats_in_view) {
 			next_state(LOC_GNSS_ACQUIRE, now_ms, "satellites sighted");
-		}
-		break;
-
-	case LOC_REST:
-		/* The periodic GNSS wake IS the retry: interval = backoff.
-		 * Sky streaks are 1 Hz bookkeeping and are not consulted. */
-		if (fix) {
-			next_state(LOC_REPORT_GNSS, now_ms, "fix on check");
-		} else if (!stationary) {
-			/* Cell-set change or (later) IMU: worth a real try. */
-			acquire_failures = 0;
-			next_state(LOC_GNSS_ACQUIRE, now_ms, "motion");
-		} else if (sats_in_view) {
-			next_state(LOC_GNSS_ACQUIRE, now_ms, "satellites sighted");
-		} else if (observed_window &&
-			   (now_ms - rest_backoff_bumped_ms) >=
-				(int64_t)rest_backoff_s * 1000) {
-			/* An empty check completed: back off. Guarded by the
-			 * elapsed interval so one wake's several PVT frames
-			 * bump only once. */
-			rest_backoff_bumped_ms = now_ms;
-			rest_backoff_s = MIN(rest_backoff_s * 2,
-				(uint32_t)CONFIG_TRACKER_REST_BACKOFF_MAX_S);
-			LOG_DBG("loc: REST backoff -> %u s", rest_backoff_s);
 		}
 		break;
 
@@ -473,29 +502,32 @@ void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 	out->state = state;
 	if (!lte_registered && state != LOC_GNSS_EXCLUSIVE) {
 		out->gnss_mode = LOC_GNSS_OFF;
-	} else if (state == LOC_QUIESCENT || state == LOC_REST) {
-		out->gnss_mode = LOC_GNSS_PERIODIC;
+	} else if (state == LOC_QUIESCENT) {
+		/* IMU mode: GNSS off outright — no checks, no scheduled
+		 * downloads, no parked fixes (the fake-trip class dies here).
+		 * The accelerometer owns departure. */
+		out->gnss_mode = imu_wake ? LOC_GNSS_OFF : LOC_GNSS_PERIODIC;
 	} else {
 		out->gnss_mode = LOC_GNSS_CONTINUOUS;
 	}
 	out->gnss_interval_s =
-		(state == LOC_QUIESCENT) ? CONFIG_TRACKER_QUIESCENT_CHECK_S :
-		(state == LOC_REST)      ? rest_backoff_s : 0;
+		(state != LOC_QUIESCENT || imu_wake) ? 0 :
+		parked_had_fix ? CONFIG_TRACKER_QUIESCENT_CHECK_S
+			       : rest_backoff_s;
 	out->lte_wanted = (state != LOC_GNSS_EXCLUSIVE);
 	out->publish_allowed = (state == LOC_REPORT_CELL ||
 				state == LOC_REPORT_GNSS ||
-				state == LOC_QUIESCENT ||
 				state == LOC_CELL_LOOP ||
-				state == LOC_REST);
+				state == LOC_QUIESCENT);
 	out->prefer_cell = (state != LOC_REPORT_GNSS &&
-			    state != LOC_QUIESCENT) || !out->gps_current;
+			    !(state == LOC_QUIESCENT && parked_had_fix &&
+			      !imu_wake)) || !out->gps_current;
 	out->publish_interval_ms =
 		(state == LOC_CELL_LOOP)  ? CELL_POST_MS :
-		(state == LOC_QUIESCENT)
-			? (uint32_t)CONFIG_TRACKER_QUIESCENT_CHECK_S * 1000 :
-		(state == LOC_REST)
-			? (uint32_t)CONFIG_TRACKER_REST_HEARTBEAT_S * 1000
-			: POST_MS;
+		(state != LOC_QUIESCENT)     ? POST_MS :
+		(parked_had_fix && !imu_wake)
+			? (uint32_t)CONFIG_TRACKER_QUIESCENT_CHECK_S * 1000
+			: (uint32_t)CONFIG_TRACKER_REST_HEARTBEAT_S * 1000;
 }
 
 void loc_fsm_log(const struct loc_status *st,

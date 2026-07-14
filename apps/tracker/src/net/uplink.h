@@ -32,6 +32,7 @@
 #define UPLINK_KIND_TRACK BIT(0)
 #define UPLINK_KIND_CELL  BIT(1)
 #define UPLINK_KIND_LOG   BIT(2)
+#define UPLINK_KIND_EVENT BIT(3)
 
 enum uplink_flush_why {
 	UPLINK_FLUSH_TIMER,   /* periodic */
@@ -52,11 +53,11 @@ struct uplink_source {
 	void (*rollback)(void);
 };
 
-#define UPLINK_MAX_SOURCES 4
+#define UPLINK_MAX_SOURCES 5
 
 void uplink_init(const char *device_id);
 
-/* prio 0 is drained first. Fixed order: cell(0), live gps(1), logs(2). */
+/* prio 0 is drained first. Fixed order: event(0), cell(1), gps(2), logs(3). */
 int uplink_register(const struct uplink_source *src, uint8_t prio);
 
 /* The FSM's radio verdict (and socket readiness), refreshed every loop. */

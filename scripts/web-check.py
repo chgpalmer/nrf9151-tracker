@@ -348,6 +348,15 @@ def main():
         if "KB" not in (page.locator("#usage-today").inner_text() or ""):
             problems.append("usage page has no today headline")
 
+        # Events page: seeded motion events render as rows with chips.
+        page.goto(args.url + "/#events", wait_until="networkidle")
+        page.wait_for_timeout(400)
+        n_events = page.locator("#events-tbody tr").count()
+        if n_events < 2:
+            problems.append(f"events page rendered {n_events} rows (want >=2)")
+        if page.locator("#events-tbody .event-chip").count() == 0:
+            problems.append("events page rendered no event chips")
+
         # Settings page: placeholder toggles render.
         page.goto(args.url + "/#settings", wait_until="networkidle")
         page.wait_for_timeout(400)

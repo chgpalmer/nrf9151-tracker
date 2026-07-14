@@ -75,7 +75,15 @@ typedef struct _LogBatch {
 } LogBatch;
 
 /* One item in a batch. age_s ages the anchor (track) or the fix (cell);
- log lines carry their own ages (a batch spans time). */
+ log lines carry their own ages (a batch spans time).
+ A thing worth telling a human about, right now. Today the only kind is an
+ accelerometer wake on a quiescent tracker: "your asset moved". It jumps the
+ uplink queue (prio 0) and rides the urgent flush the FSM transition fires. */
+typedef struct _MotionEvent {
+    uint32_t age_s;
+    uint32_t reason; /* 1 = IMU wake */
+} MotionEvent;
+
 typedef struct _Entry {
     uint32_t age_s;
     pb_size_t which_kind;
@@ -83,6 +91,7 @@ typedef struct _Entry {
         TrackSegment track;
         CellFix cell;
         LogBatch log;
+        MotionEvent motion;
     } kind;
 } Entry;
 
@@ -204,6 +213,7 @@ extern "C" {
 #define CellFix_init_default                     {0, 0, 0, 0, 0, 0}
 #define LogLine_init_default                     {0, 0, {{NULL}, NULL}, {{NULL}, NULL}}
 #define LogBatch_init_default                    {{{NULL}, NULL}}
+#define MotionEvent_init_default                 {0, 0}
 #define Entry_init_default                       {0, 0, {TrackSegment_init_default}}
 #define Obs_init_default                         {0, {{NULL}, NULL}, {{NULL}, NULL}}
 #define AgnssRequest_init_default                {"", 0, 0}
@@ -218,6 +228,7 @@ extern "C" {
 #define CellFix_init_zero                        {0, 0, 0, 0, 0, 0}
 #define LogLine_init_zero                        {0, 0, {{NULL}, NULL}, {{NULL}, NULL}}
 #define LogBatch_init_zero                       {{{NULL}, NULL}}
+#define MotionEvent_init_zero                    {0, 0}
 #define Entry_init_zero                          {0, 0, {TrackSegment_init_zero}}
 #define Obs_init_zero                            {0, {{NULL}, NULL}, {{NULL}, NULL}}
 #define AgnssRequest_init_zero                   {"", 0, 0}
@@ -252,10 +263,13 @@ extern "C" {
 #define LogLine_module_tag                       3
 #define LogLine_text_tag                         4
 #define LogBatch_lines_tag                       1
+#define MotionEvent_age_s_tag                    1
+#define MotionEvent_reason_tag                   2
 #define Entry_age_s_tag                          1
 #define Entry_track_tag                          2
 #define Entry_cell_tag                           3
 #define Entry_log_tag                            4
+#define Entry_motion_tag                         5
 #define Obs_version_tag                          1
 #define Obs_device_id_tag                        2
 #define Obs_entries_tag                          3
@@ -366,16 +380,24 @@ X(a, CALLBACK, REPEATED, MESSAGE,  lines,             1)
 #define LogBatch_DEFAULT NULL
 #define LogBatch_lines_MSGTYPE LogLine
 
+#define MotionEvent_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, UINT32,   age_s,             1) \
+X(a, STATIC,   SINGULAR, UINT32,   reason,            2)
+#define MotionEvent_CALLBACK NULL
+#define MotionEvent_DEFAULT NULL
+
 #define Entry_FIELDLIST(X, a) \
 X(a, STATIC,   SINGULAR, UINT32,   age_s,             1) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (kind,track,kind.track),   2) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (kind,cell,kind.cell),   3) \
-X(a, STATIC,   ONEOF,    MESSAGE,  (kind,log,kind.log),   4)
+X(a, STATIC,   ONEOF,    MESSAGE,  (kind,log,kind.log),   4) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (kind,motion,kind.motion),   5)
 #define Entry_CALLBACK NULL
 #define Entry_DEFAULT NULL
 #define Entry_kind_track_MSGTYPE TrackSegment
 #define Entry_kind_cell_MSGTYPE CellFix
 #define Entry_kind_log_MSGTYPE LogBatch
+#define Entry_kind_motion_MSGTYPE MotionEvent
 
 #define Obs_FIELDLIST(X, a) \
 X(a, STATIC,   SINGULAR, UINT32,   version,           1) \
@@ -483,6 +505,7 @@ extern const pb_msgdesc_t TrackSegment_msg;
 extern const pb_msgdesc_t CellFix_msg;
 extern const pb_msgdesc_t LogLine_msg;
 extern const pb_msgdesc_t LogBatch_msg;
+extern const pb_msgdesc_t MotionEvent_msg;
 extern const pb_msgdesc_t Entry_msg;
 extern const pb_msgdesc_t Obs_msg;
 extern const pb_msgdesc_t AgnssRequest_msg;
@@ -499,6 +522,7 @@ extern const pb_msgdesc_t AgnssData_msg;
 #define CellFix_fields &CellFix_msg
 #define LogLine_fields &LogLine_msg
 #define LogBatch_fields &LogBatch_msg
+#define MotionEvent_fields &MotionEvent_msg
 #define Entry_fields &Entry_msg
 #define Obs_fields &Obs_msg
 #define AgnssRequest_fields &AgnssRequest_msg
@@ -524,6 +548,7 @@ extern const pb_msgdesc_t AgnssData_msg;
 #define AgnssUtc_size                            48
 #define CellFix_size                             36
 #define GpsFix_size                              42
+#define MotionEvent_size                         12
 #define TRACKER_PB_H_MAX_SIZE                    AgnssEphemeris_size
 
 #ifdef __cplusplus

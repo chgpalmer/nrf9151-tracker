@@ -8,6 +8,7 @@ import { start as mapStart, stop as mapStop, onDeviceChange as mapDeviceChange }
 import { start as logsStart, stop as logsStop, onDeviceChange as logsDeviceChange } from '/js/logs.js';
 import { start as usageStart, stop as usageStop, onDeviceChange as usageDeviceChange } from '/js/usage.js';
 import { init as settingsInit } from '/js/settings.js';
+import { start as eventsStart, stop as eventsStop, onDeviceChange as eventsDeviceChange } from '/js/events.js';
 
 // ── Router ───────────────────────────────────────────────────
 const PAGES    = ['map', 'logs', 'usage', 'events', 'settings'];
@@ -25,6 +26,7 @@ function navigate(page) {
   if (currentPage === 'map') mapStop();
   if (currentPage === 'logs') logsStop();
   if (currentPage === 'usage') usageStop();
+  if (currentPage === 'events') eventsStop();
 
   PAGES.forEach(p => {
     const el = document.getElementById(`page-${p}`);
@@ -45,6 +47,8 @@ function navigate(page) {
     logsStart();
   } else if (page === 'usage') {
     usageStart();
+  } else if (page === 'events') {
+    eventsStart();
   }
 }
 
@@ -55,6 +59,7 @@ onDeviceChangeCb(() => {
   mapDeviceChange();
   logsDeviceChange();
   usageDeviceChange();
+  eventsDeviceChange();
 });
 
 // ── Bootstrap ────────────────────────────────────────────────

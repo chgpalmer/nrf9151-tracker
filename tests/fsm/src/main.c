@@ -143,7 +143,7 @@ static void to_report_gnss(void)
 	ASSERT_STATE(step(true, 4, OBSERVED), LOC_REPORT_GNSS); /* B1 */
 }
 
-static void to_quiescent(void)
+static void to_parked_fix(void)
 {
 	to_report_gnss();
 	g_stationary = true;
@@ -166,16 +166,16 @@ static void to_cell_loop(void)
 	ASSERT_STATE(step(false, 1, OBSERVED), LOC_CELL_LOOP); /* C3 */
 }
 
-/* Two failed acquisitions while cell-stationary: the REST entry evidence.
- * (to_cell_loop() is the first failure — acquire timeout.) */
-static void to_rest(void)
+/* Two failed acquisitions while cell-stationary: the no-fix PARKED entry
+ * evidence. (to_cell_loop() is the first failure — acquire timeout.) */
+static void to_parked_nofix(void)
 {
 	to_cell_loop();
 	ASSERT_STATE(step(false, 1, OBSERVED), LOC_GNSS_ACQUIRE); /* sighted */
 	t += ACQUIRE_CAP_MS;
 	ASSERT_STATE(step(false, 1, OBSERVED), LOC_CELL_LOOP); /* failure #2 */
 	g_stationary = true;
-	ASSERT_STATE(step(false, 0, OBSERVED), LOC_REST);
+	ASSERT_STATE(step(false, 0, OBSERVED), LOC_QUIESCENT);
 }
 
 /* ── LTE_ATTACH / REPORT_CELL ───────────────────────────────────────────── */
@@ -485,9 +485,9 @@ ZTEST(loc_fsm, test_f1_expiring_ephemeris_never_exits)
 		      st.min_ephe_expiry_min);
 }
 
-/* ── QUIESCENT ──────────────────────────────────────────────────────────── */
+/* ── PARKED, fix flavor (legacy: periodic checks) ───────────────────────── */
 
-ZTEST(loc_fsm, test_q_entry_requires_stationary_and_fix)
+ZTEST(loc_fsm, test_p_entry_requires_stationary_and_fix)
 {
 	to_report_gnss();
 	/* moving: stays put no matter how long */
@@ -498,9 +498,9 @@ ZTEST(loc_fsm, test_q_entry_requires_stationary_and_fix)
 	ASSERT_STATE(step(true, 4, OBSERVED), LOC_QUIESCENT);
 }
 
-ZTEST(loc_fsm, test_q1_motion_resumes_tracking)
+ZTEST(loc_fsm, test_p1_motion_resumes_tracking)
 {
-	to_quiescent();
+	to_parked_fix();
 	g_stationary = false;
 	ASSERT_STATE(step(true, 4, OBSERVED), LOC_REPORT_GNSS);
 }
@@ -508,9 +508,9 @@ ZTEST(loc_fsm, test_q1_motion_resumes_tracking)
 /* Staleness is cadence-aware: a fix is current until 3 check intervals
  * pass without one, not 30 s. And the sky-empty evidence is NOT evaluated
  * here — empty checks lead to ACQUIRE via staleness, never to CELL_LOOP. */
-ZTEST(loc_fsm, test_q2_checks_not_fixing)
+ZTEST(loc_fsm, test_p2_checks_not_fixing)
 {
-	to_quiescent();
+	to_parked_fix();
 	/* six observed-empty epochs: >SKY_EMPTY_EPOCHS, way past 30 s-stale —
 	 * both would have fired in REPORT_GNSS; QUIESCENT must hold. */
 	for (int i = 0; i < EMPTY_EPOCHS + 1; i++) {
@@ -521,11 +521,11 @@ ZTEST(loc_fsm, test_q2_checks_not_fixing)
 	ASSERT_STATE(step(false, 0, OBSERVED), LOC_GNSS_ACQUIRE);
 }
 
-ZTEST(loc_fsm, test_q_outputs)
+ZTEST(loc_fsm, test_p_fix_outputs)
 {
 	struct loc_status st;
 
-	to_quiescent();
+	to_parked_fix();
 	st = step(true, 4, OBSERVED);
 	ASSERT_STATE(st, LOC_QUIESCENT);
 	check_outputs(st, LOC_GNSS_PERIODIC, true, true,
@@ -535,9 +535,9 @@ ZTEST(loc_fsm, test_q_outputs)
 	zassert_false(st.prefer_cell, "parked with fix: GPS, not cell");
 }
 
-ZTEST(loc_fsm, test_q_override_registration_loss)
+ZTEST(loc_fsm, test_p_override_registration_loss)
 {
-	to_quiescent();
+	to_parked_fix();
 	ASSERT_STATE(step_full(true, 4, CN0_STRONG, OBSERVED, false),
 		     LOC_LTE_ATTACH);
 }
@@ -561,16 +561,16 @@ ZTEST(loc_fsm, test_g2_single_weak_sighting)
 		     LOC_GNSS_ACQUIRE);
 }
 
-/* ── REST ───────────────────────────────────────────────────────────────── */
+/* ── PARKED, no-fix flavor (legacy: backoff retries + heartbeat) ────────── */
 
-ZTEST(loc_fsm, test_rest_entry_needs_two_failures)
+ZTEST(loc_fsm, test_p_nofix_entry_needs_two_failures)
 {
 	to_cell_loop(); /* one failure only */
 	g_stationary = true;
 	ASSERT_STATE(step(false, 0, OBSERVED), LOC_CELL_LOOP);
 }
 
-ZTEST(loc_fsm, test_rest_entry_needs_stationary)
+ZTEST(loc_fsm, test_p_nofix_entry_needs_stationary)
 {
 	to_cell_loop();
 	ASSERT_STATE(step(false, 1, OBSERVED), LOC_GNSS_ACQUIRE);
@@ -580,27 +580,36 @@ ZTEST(loc_fsm, test_rest_entry_needs_stationary)
 	ASSERT_STATE(step(false, 0, OBSERVED), LOC_CELL_LOOP);
 }
 
-ZTEST(loc_fsm, test_rest_fix_on_check)
-{
-	to_rest();
-	ASSERT_STATE(step(true, 4, OBSERVED), LOC_REPORT_GNSS);
-}
-
-ZTEST(loc_fsm, test_rest_sighting_earns_acquire)
-{
-	to_rest();
-	ASSERT_STATE(step(false, 1, OBSERVED), LOC_GNSS_ACQUIRE);
-}
-
-ZTEST(loc_fsm, test_rest_motion_exits_and_resets_backoff)
+/* A check landing a fix upgrades the flavor IN PLACE: the old REST bounced
+ * REST -> REPORT_GNSS -> QUIESCENT, two transitions narrating nothing. */
+ZTEST(loc_fsm, test_p_nofix_fix_upgrades_in_place)
 {
 	struct loc_status st;
 
-	to_rest();
+	to_parked_nofix();
+	st = step(true, 4, OBSERVED);
+	ASSERT_STATE(st, LOC_QUIESCENT);
+	zassert_true(st.gps_current, "fix taken");
+	zassert_equal(st.gnss_interval_s, CONFIG_TRACKER_QUIESCENT_CHECK_S,
+		      "flavor upgraded to periodic checks");
+	zassert_false(st.prefer_cell, "parked with fix: GPS, not cell");
+}
+
+ZTEST(loc_fsm, test_p_nofix_sighting_earns_acquire)
+{
+	to_parked_nofix();
+	ASSERT_STATE(step(false, 1, OBSERVED), LOC_GNSS_ACQUIRE);
+}
+
+ZTEST(loc_fsm, test_p_nofix_motion_exits_and_resets_backoff)
+{
+	struct loc_status st;
+
+	to_parked_nofix();
 	/* grow the backoff first */
 	t += (int64_t)REST_MIN_S * 1000;
 	st = step(false, 0, OBSERVED);
-	ASSERT_STATE(st, LOC_REST);
+	ASSERT_STATE(st, LOC_QUIESCENT);
 	zassert_equal(st.gnss_interval_s, 2 * REST_MIN_S, "doubled");
 	g_stationary = false;
 	ASSERT_STATE(step(false, 0, OBSERVED), LOC_GNSS_ACQUIRE);
@@ -612,20 +621,20 @@ ZTEST(loc_fsm, test_rest_motion_exits_and_resets_backoff)
 	ASSERT_STATE(step(false, 1, OBSERVED), LOC_CELL_LOOP);
 	g_stationary = true;
 	st = step(false, 0, OBSERVED);
-	ASSERT_STATE(st, LOC_REST);
+	ASSERT_STATE(st, LOC_QUIESCENT);
 	zassert_equal(st.gnss_interval_s, (uint32_t)REST_MIN_S, "backoff reset");
 }
 
-ZTEST(loc_fsm, test_rest_backoff_doubles_to_cap)
+ZTEST(loc_fsm, test_p_nofix_backoff_doubles_to_cap)
 {
 	struct loc_status st;
 	uint32_t expect = REST_MIN_S;
 
-	to_rest();
+	to_parked_nofix();
 	while (expect < REST_MAX_S) {
 		t += (int64_t)expect * 1000;
 		st = step(false, 0, OBSERVED);
-		ASSERT_STATE(st, LOC_REST);
+		ASSERT_STATE(st, LOC_QUIESCENT);
 		expect = MIN(expect * 2, (uint32_t)REST_MAX_S);
 		zassert_equal(st.gnss_interval_s, expect, "backoff step");
 	}
@@ -637,11 +646,11 @@ ZTEST(loc_fsm, test_rest_backoff_doubles_to_cap)
 
 /* One wake delivers several PVT frames (the retry window); the backoff
  * must double once per wake, not once per frame. */
-ZTEST(loc_fsm, test_rest_backoff_once_per_wake)
+ZTEST(loc_fsm, test_p_nofix_backoff_once_per_wake)
 {
 	struct loc_status st;
 
-	to_rest();
+	to_parked_nofix();
 	t += (int64_t)REST_MIN_S * 1000;
 	st = step(false, 0, OBSERVED); /* first frame of the wake: doubles */
 	zassert_equal(st.gnss_interval_s, 2 * REST_MIN_S, "first frame");
@@ -649,36 +658,99 @@ ZTEST(loc_fsm, test_rest_backoff_once_per_wake)
 	zassert_equal(st.gnss_interval_s, 2 * REST_MIN_S, "second frame");
 }
 
-ZTEST(loc_fsm, test_rest_outputs)
+ZTEST(loc_fsm, test_p_nofix_outputs)
 {
 	struct loc_status st;
 
-	to_rest();
+	to_parked_nofix();
 	st = step(false, 0, OBSERVED);
-	ASSERT_STATE(st, LOC_REST);
+	ASSERT_STATE(st, LOC_QUIESCENT);
 	check_outputs(st, LOC_GNSS_PERIODIC, true, true,
 		      (uint32_t)CONFIG_TRACKER_REST_HEARTBEAT_S * 1000);
-	zassert_true(st.prefer_cell, "REST publishes heartbeat cells");
+	zassert_true(st.prefer_cell, "no-fix PARKED publishes heartbeat cells");
 }
 
-ZTEST(loc_fsm, test_rest_override_registration_loss)
+ZTEST(loc_fsm, test_p_nofix_override_registration_loss)
 {
-	to_rest();
+	to_parked_nofix();
 	ASSERT_STATE(step_full(false, 0, 0, OBSERVED, false), LOC_LTE_ATTACH);
 }
 
 ZTEST(loc_fsm, test_failures_reset_on_fix)
 {
-	/* A successful fix clears the failure count: after losing it again,
-	 * CELL_LOOP needs two FRESH failures before resting. */
-	to_rest();
-	ASSERT_STATE(step(true, 4, OBSERVED), LOC_REPORT_GNSS);
-	ASSERT_STATE(step(true, 4, OBSERVED), LOC_QUIESCENT); /* still stationary */
+	/* A successful check-fix clears the failure count (and upgrades the
+	 * flavor): after going stale again, CELL_LOOP needs two FRESH
+	 * failures before parking no-fix. */
+	to_parked_nofix();
+	ASSERT_STATE(step(true, 4, OBSERVED), LOC_QUIESCENT); /* upgraded */
 	t += 3 * (int64_t)CONFIG_TRACKER_QUIESCENT_CHECK_S * 1000;
 	ASSERT_STATE(step(false, 0, OBSERVED), LOC_GNSS_ACQUIRE);
 	t += ACQUIRE_CAP_MS;
 	ASSERT_STATE(step(false, 1, OBSERVED), LOC_CELL_LOOP); /* failure #1 */
-	ASSERT_STATE(step(false, 0, OBSERVED), LOC_CELL_LOOP); /* not REST */
+	ASSERT_STATE(step(false, 0, OBSERVED), LOC_CELL_LOOP); /* needs two */
+}
+
+/* ── PARKED, IMU mode (GNSS off; the accelerometer owns departure) ──────── */
+
+ZTEST(loc_fsm, test_pi_gnss_off_and_heartbeat)
+{
+	struct loc_status st;
+
+	loc_fsm_set_imu_wake(true);
+	to_parked_fix();
+	st = step(true, 4, OBSERVED); /* frozen-frame artifacts change nothing */
+	ASSERT_STATE(st, LOC_QUIESCENT);
+	check_outputs(st, LOC_GNSS_OFF, true, true,
+		      (uint32_t)CONFIG_TRACKER_REST_HEARTBEAT_S * 1000);
+	zassert_equal(st.gnss_interval_s, 0, "no periodic checks");
+}
+
+/* No GNSS evidence can move an IMU-parked tracker: not staleness, not
+ * sightings, not fixes. The ONLY exits are the stationary verdict (IMU,
+ * via motion.c) and the registration-loss override. */
+ZTEST(loc_fsm, test_pi_ignores_gnss_evidence)
+{
+	loc_fsm_set_imu_wake(true);
+	to_parked_fix();
+	t += 3 * (int64_t)CONFIG_TRACKER_QUIESCENT_CHECK_S * 1000; /* stale */
+	ASSERT_STATE(step(false, 0, OBSERVED), LOC_QUIESCENT);
+	ASSERT_STATE(step(false, 3, OBSERVED), LOC_QUIESCENT); /* sighting */
+	ASSERT_STATE(step(true, 4, OBSERVED), LOC_QUIESCENT);  /* stray fix */
+	t += 24 * 60 * 60 * 1000; /* a full parked day */
+	ASSERT_STATE(step(false, 0, OBSERVED), LOC_QUIESCENT);
+}
+
+/* IMU wake goes to REPORT_CELL, NOT ACQUIRE: the server must learn of the
+ * movement (alert + free cell fix) and the A-GNSS fetch must run before the
+ * radio-silent acquisition. The wake path is the boot path. */
+ZTEST(loc_fsm, test_pi_motion_wakes_to_report_cell)
+{
+	loc_fsm_set_imu_wake(true);
+	to_parked_fix();
+	g_stationary = false; /* motion_note_imu()'s verdict flip */
+	ASSERT_STATE(step(false, 0, OBSERVED), LOC_REPORT_CELL);
+	/* ...and REPORT_CELL then walks the normal boot path to ACQUIRE. */
+	loc_fsm_note_cell_sent();
+	ASSERT_STATE(step(false, 0, OBSERVED), LOC_GNSS_ACQUIRE);
+}
+
+ZTEST(loc_fsm, test_pi_nofix_entry_also_off)
+{
+	struct loc_status st;
+
+	loc_fsm_set_imu_wake(true);
+	to_parked_nofix();
+	st = step(false, 0, OBSERVED);
+	ASSERT_STATE(st, LOC_QUIESCENT);
+	zassert_equal(st.gnss_mode, LOC_GNSS_OFF, "GNSS off, no-fix flavor too");
+	zassert_true(st.prefer_cell, "heartbeat cells");
+}
+
+ZTEST(loc_fsm, test_pi_override_registration_loss)
+{
+	loc_fsm_set_imu_wake(true);
+	to_parked_fix();
+	ASSERT_STATE(step_full(false, 0, 0, OBSERVED, false), LOC_LTE_ATTACH);
 }
 
 /* ── outputs table ──────────────────────────────────────────────────────── */

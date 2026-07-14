@@ -21,6 +21,9 @@ PB_BIND(LogLine, LogLine, AUTO)
 PB_BIND(LogBatch, LogBatch, AUTO)
 
 
+PB_BIND(MotionEvent, MotionEvent, AUTO)
+
+
 PB_BIND(Entry, Entry, AUTO)
 
 

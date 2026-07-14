@@ -1,3 +1,26 @@
 /* No MCUboot — TF-M boots directly */
 #include <samples/cellular/nrf91_no_bootloader_partitions.dtsi>
 #include <samples/cellular/nrf91_sram_partitions.dtsi>
+
+/* Adafruit LIS3DH accelerometer (the parked wake source — see loc/imu.c):
+ *   SDA -> P0.30 (D14), SCL -> P0.31 (D15), VIN -> VDD, INT1 -> P0.19 (A5).
+ * SDO/CS untouched: breakout defaults = I2C mode, address 0x18. Absent
+ * chip is fine — imu_init() fails and the tracker runs legacy parked mode.
+ * anym-mode stays OR (default): imu.c routes the HP filter into the INT
+ * engine (CTRL_REG2 poke), so gravity never reaches the comparator; 6D
+ * modes were bench-rejected (blind to tumbling between orientation zones).
+ */
+/* INT1 shares Button 4 (P0.19); disable it so the sensor owns the line. */
+&button3 {
+	status = "disabled";
+};
+
+&arduino_i2c {
+	status = "okay";
+	lis3dh: lis3dh@18 {
+		compatible = "st,lis2dh";
+		reg = <0x18>;
+		irq-gpios = <&gpio0 19 GPIO_ACTIVE_HIGH>;
+		anym-on-int1;
+	};
+};
