@@ -15,6 +15,7 @@
 # The CoAP ingest is NOT proxied by Caddy (it proxies HTTP, this is UDP): the
 # ingest binds all interfaces itself and open-ports admits UDP 5683.
 
+TRACKER_VM  ?= vm      # ssh alias/host of the deploy VM (deploy-dev/prod)
 COAP_PORT  ?= 5683
 HTTP_PORT  ?= 8080
 CADDYFILE  := /etc/caddy/Caddyfile
@@ -33,7 +34,7 @@ WEB  := $(VENV)/bin/uvicorn app:app --host 127.0.0.1 --port $(HTTP_PORT) --app-d
 
 .PHONY: setup-host setup-caddy open-ports caddy \
         coap-server server serve stop cells update-cells \
-        setup-webtest webtest
+        setup-webtest webtest deploy-dev deploy-prod
 
 # One-time server setup: Python deps only (the MQTT-era mosquitto is gone —
 # the CoAP ingest is a plain Python process on UDP).
@@ -169,6 +170,18 @@ stop:
 > @pkill -f '[z]ephyr.exe' 2>/dev/null && echo "stopped sim(s)" || true
 > @pkill -f '[c]oap_server.py' 2>/dev/null && echo "stopped coap ingest" || true
 > @echo "cleanup done"
+
+# Staging deploy of the WORKING TREE to the VM for end-to-end hardware testing
+# without committing — the clean-history dev loop. deploy-dev rsyncs and serves
+# the uncommitted tree (snapshotting the live DB first); deploy-prod restores
+# the committed checkout (requires a clean, pushed tree). VM host = $TRACKER_VM
+# (default: the `vm` ssh alias). Design: docs/superpowers/specs/.
+.PHONY: deploy-dev deploy-prod
+deploy-dev:
+> TRACKER_VM=$(TRACKER_VM) scripts/vm-deploy.sh dev
+
+deploy-prod:
+> TRACKER_VM=$(TRACKER_VM) scripts/vm-deploy.sh prod
 
 # Server-side unit tests: A-GNSS RINEX parsing, ICD scaling, orbit math,
 # payload assembly — pure Python against a committed real BRDC fixture.
