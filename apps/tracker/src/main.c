@@ -235,7 +235,7 @@ static void lte_handler(const struct lte_lc_evt *const evt)
 			LOG_INF("modem: light search done (no cell found yet)");
 			break;
 		case LTE_LC_MODEM_EVT_SEARCH_DONE:
-			LOG_INF("modem: full search done");
+			LOG_DBG("modem: full search done");
 			break;
 		case LTE_LC_MODEM_EVT_RESET_LOOP:
 			LOG_WRN("modem: RESET LOOP restriction");
