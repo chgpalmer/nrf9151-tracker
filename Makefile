@@ -46,6 +46,12 @@ CADDY_DOMAIN        ?=
 # nrfutil lives in ~/.local/bin; add it to PATH for all targets
 export PATH := $(HOME)/.local/bin:$(PATH)
 
+# Motion-alert config (from .env) — export so the server subprocesses see it.
+TRACKER_NTFY_URL ?=
+TRACKER_WEB_URL  ?=
+export TRACKER_NTFY_URL
+export TRACKER_WEB_URL
+
 # Trust the system CA bundle for TLS-inspecting proxies
 CA := /etc/ssl/certs/ca-certificates.crt
 export REQUESTS_CA_BUNDLE := $(CA)

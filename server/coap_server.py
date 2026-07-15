@@ -36,7 +36,12 @@ import aiocoap
 import aiocoap.resource as resource
 
 import tracker_pb2 as pb
+import alerts
 from agnss import AgnssCache, assemble
+
+# Owner-alert delivery (armed devices only). Unset NTFY_URL = alerting off.
+NTFY_URL = os.environ.get("TRACKER_NTFY_URL", "")
+WEB_URL = os.environ.get("TRACKER_WEB_URL", "")
 
 DB_DEFAULT = Path(__file__).parent / "tracker.db"
 
@@ -130,6 +135,8 @@ def init_db(path: Path) -> sqlite3.Connection:
         CREATE INDEX IF NOT EXISTS idx_events_dev_time
         ON events(device_id, received_ts)
     """)
+    # Armed-state table for owner alerts (shared DDL with the web app).
+    alerts.ensure_schema(conn)
     # Migrate older DBs created before the source column existed.
     cols = {r[1] for r in conn.execute("PRAGMA table_info(positions)")}
     if "source" not in cols:
@@ -280,10 +287,13 @@ def store_track(conn, dev, base_ts, seg) -> int:
 MOTION_REASON = {1: "imu_wake"}
 
 
-def store_obs(conn, obs, cells, now: int) -> tuple[int, int, int]:
-    """Store a decoded Obs. Returns (track_points, cell_fixes, log_lines)."""
+def store_obs(conn, obs, cells, now: int):
+    """Store a decoded Obs. Returns (track_points, cell_fixes, log_lines,
+    motions) where motions is a list of (device_id, event_ts) — the caller
+    fires alerts off the event loop after the rows are committed."""
     dev = obs.device_id
     n_pts = n_cell = n_log = 0
+    motions = []
     for e in obs.entries:
         base_ts = now - e.age_s
         kind = e.WhichOneof("kind")
@@ -291,13 +301,15 @@ def store_obs(conn, obs, cells, now: int) -> tuple[int, int, int]:
             n_pts += store_track(conn, dev, base_ts, e.track)
         elif kind == "motion":
             reason = e.motion.reason
+            ev_ts = now - e.motion.age_s
             conn.execute(
                 "INSERT INTO events (device_id, received_ts, kind, reason) "
                 "VALUES (?, ?, 'motion', ?)",
-                (dev, now - e.motion.age_s, reason))
+                (dev, ev_ts, reason))
             slog(conn, 2, "event",
-                 f"motion alert: {MOTION_REASON.get(reason, reason)}",
+                 f"motion event: {MOTION_REASON.get(reason, reason)}",
                  device=dev)
+            motions.append((dev, ev_ts))
         elif kind == "log":
             for line in e.log.lines:
                 conn.execute(
@@ -333,7 +345,7 @@ def store_obs(conn, obs, cells, now: int) -> tuple[int, int, int]:
     conn.commit()
     print(f"[coap] {dev} v{obs.version}: {n_pts} track pts + {n_cell} cell "
           f"+ {n_log} log")
-    return n_pts, n_cell, n_log
+    return n_pts, n_cell, n_log, motions
 
 
 class ObsResource(resource.Resource):
@@ -350,12 +362,29 @@ class ObsResource(resource.Resource):
                  f"rejected payload ({len(request.payload)} B): {e}")
             return aiocoap.Message(code=aiocoap.Code.BAD_REQUEST)
 
-        store_obs(self.conn, obs, self.cells, int(time.time()))
+        _, _, _, motions = store_obs(
+            self.conn, obs, self.cells, int(time.time()))
         self.conn.execute(
             "INSERT INTO usage (device_id, received_ts, bytes, kind) "
             "VALUES (?, ?, ?, 'obs')",
             (obs.device_id, time.time(), len(request.payload)))
         self.conn.commit()
+
+        # Owner alerts: gate on armed-state (main thread, fast), then POST
+        # off the event loop so the blocking HTTP can't stall ingest.
+        for dev, ev_ts in motions:
+            outcome, payload = alerts.maybe_alert(
+                self.conn, dev, ev_ts, NTFY_URL, WEB_URL)
+            if outcome == "send":
+                try:
+                    await asyncio.to_thread(alerts.post_ntfy, NTFY_URL, payload)
+                    slog(self.conn, 3, "event", "alert pushed (ntfy)", device=dev)
+                except Exception as exc:
+                    slog(self.conn, 2, "event",
+                         f"alert push failed: {exc}", device=dev)
+            else:
+                slog(self.conn, 3, "event",
+                     f"motion not alerted ({outcome})", device=dev)
 
         # Devices set No-Response, so aiocoap drops this on the floor for
         # them; it still answers curious human clients (coap-client etc).

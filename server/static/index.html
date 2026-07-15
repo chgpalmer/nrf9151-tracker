@@ -40,6 +40,7 @@
     </div>
 
     <div class="status-cluster">
+      <span class="armed-badge hidden" id="armed-badge" title="Motion alerts armed">◈ ARMED</span>
       <div class="status-indicator" id="status-indicator" data-status="offline">
         <div class="status-ring"></div>
         <span class="status-label" id="status-label">OFFLINE</span>
@@ -249,7 +250,11 @@
             <input type="date" id="events-date" class="date-input" />
             <button class="date-step" id="events-date-next" type="button" aria-label="Next day">›</button>
           </div>
-          <span class="hist-hint">motion alerts while parked, newest first</span>
+          <div class="control-group">
+            <span class="control-label">ALERTS</span>
+            <button class="arm-btn" id="arm-toggle" type="button" aria-pressed="false">DISARMED</button>
+            <span class="hist-hint" id="arm-hint">arm to get a phone push when it moves</span>
+          </div>
         </div>
         <div class="log-scroll">
           <table class="log-table" id="events-table">

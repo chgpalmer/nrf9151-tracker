@@ -37,10 +37,13 @@ pkill -f '[m]ake --no-print-directory stop' >/dev/null 2>&1 || true
 pkill -f '[c]oap_server.py' >/dev/null 2>&1 || true
 sleep 1
 cd "$1"
+# Config (ntfy URL, web URL, …) lives in the prod tree's .env (dev tree
+# excludes it from rsync); export it so the services inherit it.
+set -a; [ -f "$VM_PROD/.env" ] && . "$VM_PROD/.env"; set +a
 TRACKER_DEV_SESSION="$2" TRACKER_DB="$VM_DB" setsid nohup \
   "$VENV/bin/uvicorn" app:app --host 127.0.0.1 --port 8080 --app-dir server \
   >~/web.log 2>&1 </dev/null &
-TRACKER_DEV_SESSION="$2" setsid nohup \
+TRACKER_DEV_SESSION="$2" TRACKER_DB="$VM_DB" setsid nohup \
   "$VENV/bin/python3" -u server/coap_server.py --port 5683 --db "$VM_DB" \
   --cells-db "$VM_CELLS" >~/coap.log 2>&1 </dev/null &
 sleep 4

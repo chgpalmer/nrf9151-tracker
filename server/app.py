@@ -17,9 +17,11 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+
+import alerts
 
 # TRACKER_DB overrides the DB path so tests can run against a seeded copy
 # without ever touching the real one.
@@ -37,6 +39,9 @@ def get_db(path: Path = DB_DEFAULT) -> sqlite3.Connection:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.db = get_db()
+    # Ensure the armed-state table exists even if the web app starts before
+    # the ingest (both create it; idempotent).
+    alerts.ensure_schema(app.state.db)
     yield
     app.state.db.close()
 
@@ -71,7 +76,7 @@ async def devices():
     rows = db.execute(
         "SELECT p.device_id, "
         "       MAX(p.ls, COALESCE(l.ls, 0), COALESCE(u.ls, 0)) AS last_seen, "
-        "       p.n "
+        "       p.n, COALESCE(a.armed, 0) AS armed "
         "FROM (SELECT device_id, MAX(received_ts) AS ls, COUNT(*) AS n "
         "      FROM positions GROUP BY device_id) p "
         "LEFT JOIN (SELECT device_id, MAX(received_ts) AS ls "
@@ -80,9 +85,28 @@ async def devices():
         "LEFT JOIN (SELECT device_id, MAX(received_ts) AS ls "
         "           FROM usage GROUP BY device_id) u "
         "  ON u.device_id = p.device_id "
+        "LEFT JOIN device_alerts a ON a.device_id = p.device_id "
         "ORDER BY last_seen DESC"
     ).fetchall()
     return JSONResponse([dict(r) for r in rows])
+
+
+@app.post("/api/arm")
+async def arm(request: Request):
+    """Arm/disarm a device's motion alerts. Body: {device, armed}. The ingest
+    reads this flag when a MotionEvent lands and pushes only when armed."""
+    body = await request.json()
+    device = body.get("device")
+    armed = 1 if body.get("armed") else 0
+    if not device:
+        return JSONResponse({"error": "device required"}, status_code=400)
+    db = app.state.db
+    db.execute(
+        "INSERT INTO device_alerts (device_id, armed) VALUES (?, ?) "
+        "ON CONFLICT(device_id) DO UPDATE SET armed = excluded.armed",
+        (device, armed))
+    db.commit()
+    return JSONResponse({"device": device, "armed": armed})
 
 
 @app.get("/api/positions")

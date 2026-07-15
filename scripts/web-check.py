@@ -357,6 +357,18 @@ def main():
         if page.locator("#events-tbody .event-chip").count() == 0:
             problems.append("events page rendered no event chips")
 
+        # Arm toggle: seeded DISARMED, clicking arms it (POST /api/arm
+        # round-trips) and the top-rail ARMED badge appears.
+        arm = page.locator("#arm-toggle")
+        if (arm.inner_text() or "").strip() != "DISARMED":
+            problems.append(f"arm button not DISARMED at start ({arm.inner_text()!r})")
+        arm.click()
+        page.wait_for_timeout(300)
+        if (arm.inner_text() or "").strip() != "ARMED":
+            problems.append(f"arm button did not arm on click ({arm.inner_text()!r})")
+        if page.locator("#armed-badge.hidden").count() != 0:
+            problems.append("ARMED badge stayed hidden after arming")
+
         # Settings page: placeholder toggles render.
         page.goto(args.url + "/#settings", wait_until="networkidle")
         page.wait_for_timeout(400)

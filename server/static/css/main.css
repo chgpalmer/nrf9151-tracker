@@ -1639,3 +1639,34 @@ tr.lvl-4 .log-text, tr.lvl-4 .log-mod { color: var(--text-dim); }
   .timeline-axis, .tl-handle { display: none; }
   .timeline-track { height: 10px; margin-top: 0; }
 }
+
+/* Motion-alert arming: the Events-page toggle + the top-rail ARMED badge.
+ * Disarmed = quiet/dim, armed = danger red (this is a live theft alarm). */
+.arm-btn {
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  padding: 0.25rem 0.7rem;
+  border-radius: 4px;
+  border: 1px solid var(--text-sec);
+  background: transparent;
+  color: var(--text-sec);
+  cursor: pointer;
+}
+.arm-btn.armed {
+  border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 18%, transparent);
+  color: var(--danger);
+}
+.armed-badge {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--danger);
+  border: 1px solid var(--danger);
+  border-radius: 4px;
+  padding: 0.1rem 0.45rem;
+  margin-right: 0.6rem;
+  align-self: center;
+}

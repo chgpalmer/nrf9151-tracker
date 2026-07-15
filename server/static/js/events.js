@@ -8,8 +8,8 @@
  * Logs page: pick a date, load that day's events.
  */
 
-import { fetchEvents } from '/js/api.js';
-import { currentDevice } from '/js/devices.js';
+import { fetchEvents, setArm } from '/js/api.js';
+import { currentDevice, currentDeviceObj, setArmedLocal } from '/js/devices.js';
 import { fmtTime } from '/js/format.js';
 
 const DAY = 86400;
@@ -79,6 +79,30 @@ export async function load() {
   }
 }
 
+/* Arm/disarm toggle — reflects the current device's armed flag and flips it. */
+const armBtn = () => document.getElementById('arm-toggle');
+
+function renderArm(armed) {
+  const b = armBtn();
+  if (!b) return;
+  b.textContent = armed ? 'ARMED' : 'DISARMED';
+  b.setAttribute('aria-pressed', armed ? 'true' : 'false');
+  b.classList.toggle('armed', !!armed);
+}
+
+async function toggleArm() {
+  const dev = currentDevice();
+  if (!dev) return;
+  const next = !(currentDeviceObj()?.armed);
+  try {
+    const res = await setArm(dev, next);
+    setArmedLocal(dev, res.armed);
+    renderArm(res.armed);
+  } catch (err) {
+    console.error('arm toggle failed', err);
+  }
+}
+
 export function start() {
   started = true;
   const di = dateInput();
@@ -91,11 +115,20 @@ export function start() {
   } else if (di && !di.value) {
     di.value = todayStr();
   }
+  const b = armBtn();
+  if (b && !b.dataset.wired) {
+    b.dataset.wired = '1';
+    b.addEventListener('click', toggleArm);
+  }
+  renderArm(currentDeviceObj()?.armed);
   load();
 }
 
 export function stop() { started = false; }
 
 export function onDeviceChange() {
-  if (started) load();
+  if (started) {
+    renderArm(currentDeviceObj()?.armed);
+    load();
+  }
 }

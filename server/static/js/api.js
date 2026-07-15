@@ -91,3 +91,16 @@ export async function fetchEvents(deviceId, opts = {}) {
   if (!r.ok) throw new Error(`/api/events: ${r.status}`);
   return r.json();
 }
+
+/**
+ * POST /api/arm — arm/disarm a device's motion alerts. Returns {device, armed}.
+ */
+export async function setArm(deviceId, armed) {
+  const r = await fetch('/api/arm', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ device: deviceId, armed: !!armed }),
+  });
+  if (!r.ok) throw new Error(`/api/arm: ${r.status}`);
+  return r.json();
+}

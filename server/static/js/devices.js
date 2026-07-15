@@ -10,6 +10,7 @@ const countEl       = document.getElementById('device-count');
 const infoEl        = document.getElementById('sidebar-device-info');
 const statusInd     = document.getElementById('status-indicator');
 const statusLabelEl = document.getElementById('status-label');
+const armedBadge    = document.getElementById('armed-badge');
 
 let devices  = [];
 let onChangeCb = null;
@@ -20,6 +21,16 @@ export function currentDevice() { return selectEl.value || null; }
 
 export function currentDeviceObj() {
   return devices.find(d => d.device_id === selectEl.value) || null;
+}
+
+/* Reflect an arm/disarm done elsewhere (events.js) into the local device list
+ * and the top-rail badge, without a full refetch. */
+export function setArmedLocal(deviceId, armed) {
+  const dev = devices.find(d => d.device_id === deviceId);
+  if (dev) dev.armed = armed ? 1 : 0;
+  if (armedBadge && selectEl.value === deviceId) {
+    armedBadge.classList.toggle('hidden', !armed);
+  }
 }
 
 selectEl.addEventListener('change', () => {
@@ -62,11 +73,13 @@ function updateSidebarInfo() {
   if (!dev) {
     infoEl.innerHTML = '';
     setStatus('offline');
+    if (armedBadge) armedBadge.classList.add('hidden');
     return;
   }
 
   const status = deviceStatus(dev.last_seen);
   setStatus(status);
+  if (armedBadge) armedBadge.classList.toggle('hidden', !dev.armed);
 
   infoEl.innerHTML = `
     <div class="info-row">

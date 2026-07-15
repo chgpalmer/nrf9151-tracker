@@ -131,6 +131,12 @@ event_rows = [
 db.executemany(
     "INSERT INTO events (device_id, received_ts, kind, reason)"
     " VALUES (?,?,?,?)", event_rows)
+# Armed-state: seed the device DISARMED so the webtest can arm it.
+db.execute("""CREATE TABLE IF NOT EXISTS device_alerts (
+    device_id TEXT PRIMARY KEY, armed INTEGER NOT NULL DEFAULT 0,
+    last_alert_ts REAL NOT NULL DEFAULT 0)""")
+db.execute("INSERT OR REPLACE INTO device_alerts (device_id, armed) VALUES (?, 0)",
+           (dev,))
 db.commit()
 print(f"seeded {len(cell_rows)} cell events + "
       f"{len(rows)} positions + {len(log_rows)} logs + "
