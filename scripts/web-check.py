@@ -362,12 +362,16 @@ def main():
         arm = page.locator("#arm-toggle")
         if (arm.inner_text() or "").strip() != "DISARMED":
             problems.append(f"arm button not DISARMED at start ({arm.inner_text()!r})")
+        # Badge must actually be INVISIBLE while disarmed (not merely carry a
+        # class) — a missing .hidden CSS rule left it always showing.
+        if page.locator("#armed-badge").is_visible():
+            problems.append("ARMED badge visible while disarmed")
         arm.click()
         page.wait_for_timeout(300)
         if (arm.inner_text() or "").strip() != "ARMED":
             problems.append(f"arm button did not arm on click ({arm.inner_text()!r})")
-        if page.locator("#armed-badge.hidden").count() != 0:
-            problems.append("ARMED badge stayed hidden after arming")
+        if not page.locator("#armed-badge").is_visible():
+            problems.append("ARMED badge not visible after arming")
 
         # Settings page: placeholder toggles render.
         page.goto(args.url + "/#settings", wait_until="networkidle")

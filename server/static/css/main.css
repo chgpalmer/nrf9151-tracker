@@ -369,6 +369,9 @@ button { cursor: pointer; }
 }
 
 .page.hidden { display: none; }
+/* General hide utility — `.page.hidden` above only covers page sections, so
+ * other toggled elements (armed badge, empty-state notes) need this too. */
+.hidden { display: none !important; }
 
 /* ── Map page: map-zone + side-panel ──
  * Mobile/portrait: vertical stack, side panel capped so the map keeps
