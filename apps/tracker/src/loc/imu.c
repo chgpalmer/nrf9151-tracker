@@ -14,6 +14,7 @@ LOG_MODULE_REGISTER(imu, CONFIG_TRACKER_LOG_LEVEL);
 #include <zephyr/shell/shell.h>
 #include <stdlib.h>
 #include <string.h>
+#include "leds.h"
 
 /* Wake threshold on HP-FILTERED acceleration (gravity already removed):
  * dynamic movement in any direction, at any orientation. ~0.8 m/s² fires
@@ -36,6 +37,7 @@ static void motion_trigger(const struct device *dev,
 	ARG_UNUSED(trig);
 	atomic_set(&kick, 1);
 	atomic_inc(&event_count);
+	leds_imu_pulse(); /* instant bench feedback, straight from the trigger */
 }
 
 static int set_threshold(int32_t val1, int32_t val2)

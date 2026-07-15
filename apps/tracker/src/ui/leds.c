@@ -26,6 +26,10 @@ static const struct gpio_dt_spec leds[LED_COUNT] = {
 static bool ready;
 static bool blink_phase;
 static int64_t tx_until_ms;
+/* LED4 = accelerometer activity: a pulse per any-motion interrupt. Written
+ * from the sensor trigger (a cooperative thread), read in leds_update; a torn
+ * read of this timestamp only mis-renders one LED frame, so no lock. */
+static int64_t imu_until_ms;
 
 static void set(int led, bool on)
 {
@@ -108,10 +112,21 @@ void leds_update(const struct loc_status *loc, bool lte_up)
 	/* TX: pulse armed by leds_tx_pulse(), cleared here once it expires. */
 	set(LED_TX, k_uptime_get() < tx_until_ms);
 
-	/* HELP: GPS is struggling — solid in the radio-dark deep hunt, blink in
-	 * the cell fallback loop. */
-	set(LED_HELP, loc->state == LOC_GNSS_EXCLUSIVE ||
-		      (loc->state == LOC_CELL_LOOP && blink_phase));
+	/* LED4: accelerometer activity — a pulse per any-motion interrupt, for
+	 * bench-tuning the wake threshold (poke it, LED4 blips; while moving it
+	 * pulses continuously). The old "GPS struggling" meaning is gone:
+	 * GNSS_EXCLUSIVE is already legible as LTE-dark + GPS-acquiring
+	 * (LED1 off, LED2 blinking). */
+	set(LED_HELP, k_uptime_get() < imu_until_ms);
+}
+
+void leds_imu_pulse(void)
+{
+	if (!ready) {
+		return;
+	}
+	imu_until_ms = k_uptime_get() + 200;
+	set(LED_HELP, true);
 }
 
 void leds_tx_pulse(void)
@@ -137,6 +152,10 @@ void leds_update(const struct loc_status *loc, bool lte_up)
 }
 
 void leds_tx_pulse(void)
+{
+}
+
+void leds_imu_pulse(void)
 {
 }
 

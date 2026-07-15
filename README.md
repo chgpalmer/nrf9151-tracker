@@ -158,12 +158,13 @@ a LIS3DH bring-up probe that pulses LED1 on its motion interrupt),
 | 1 | LTE | radio off on purpose | attaching | registered |
 | 2 | GPS | GNSS not running | acquiring — see below | fix current |
 | 3 | TX | — | — | pulse per successful send |
-| 4 | help | normal | CELL_LOOP (retry on sight) | GNSS_EXCLUSIVE (radio dark) |
+| 4 | IMU | — | pulse per accelerometer motion interrupt | steady while moving |
 
 LED2's acquiring blink is a progress meter (2 s cycle): one long slow pulse =
 searching with nothing usable; 1–4 crisp blips = that many tracked satellites
 with ephemeris — 4 blips means the fix is imminent. LED2 solid = safe to
-start moving; LED4 lit explains a dark LED1.
+start moving. LED4 blips when the accelerometer feels movement (the parked
+wake source); GNSS_EXCLUSIVE reads as LED1 off with LED2 acquiring.
 
 **Layout:**
 
