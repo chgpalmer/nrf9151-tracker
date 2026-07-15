@@ -26,10 +26,6 @@ static const struct gpio_dt_spec leds[LED_COUNT] = {
 static bool ready;
 static bool blink_phase;
 static int64_t tx_until_ms;
-/* LED4 = accelerometer activity: a pulse per any-motion interrupt. Written
- * from the sensor trigger (a cooperative thread), read in leds_update; a torn
- * read of this timestamp only mis-renders one LED frame, so no lock. */
-static int64_t imu_until_ms;
 
 static void set(int led, bool on)
 {
@@ -47,6 +43,17 @@ static void set(int led, bool on)
 static struct k_timer gps_timer;
 static atomic_t gps_blips; /* 0 = long pulse; 1..4 = counted blips */
 static bool gps_pattern_on;
+
+/* LED4 = accelerometer activity. Rendered by a one-shot k_timer, NOT by
+ * leds_update: the main loop blocks for seconds on network I/O (the A-GNSS
+ * CON exchange), which would otherwise strand the pulse lit. The IMU trigger
+ * lights it and (re)arms the timer; the timer clears it independently. */
+static struct k_timer imu_timer;
+static void imu_pulse_off(struct k_timer *timer)
+{
+	ARG_UNUSED(timer);
+	set(LED_HELP, false);
+}
 
 static void gps_pattern_tick(struct k_timer *timer)
 {
@@ -75,6 +82,7 @@ void leds_init(void)
 		}
 	}
 	k_timer_init(&gps_timer, gps_pattern_tick, NULL);
+	k_timer_init(&imu_timer, imu_pulse_off, NULL);
 	ready = true;
 }
 
@@ -112,12 +120,8 @@ void leds_update(const struct loc_status *loc, bool lte_up)
 	/* TX: pulse armed by leds_tx_pulse(), cleared here once it expires. */
 	set(LED_TX, k_uptime_get() < tx_until_ms);
 
-	/* LED4: accelerometer activity — a pulse per any-motion interrupt, for
-	 * bench-tuning the wake threshold (poke it, LED4 blips; while moving it
-	 * pulses continuously). The old "GPS struggling" meaning is gone:
-	 * GNSS_EXCLUSIVE is already legible as LTE-dark + GPS-acquiring
-	 * (LED1 off, LED2 blinking). */
-	set(LED_HELP, k_uptime_get() < imu_until_ms);
+	/* LED4 (accelerometer activity) is NOT touched here — it is owned by
+	 * imu_timer so a blocked loop can't strand it lit; see leds_imu_pulse. */
 }
 
 void leds_imu_pulse(void)
@@ -125,8 +129,11 @@ void leds_imu_pulse(void)
 	if (!ready) {
 		return;
 	}
-	imu_until_ms = k_uptime_get() + 200;
+	/* Light it and (re-)arm the one-shot: continuous movement keeps
+	 * re-triggering so it reads solid, and it clears ~200 ms after the
+	 * last interrupt regardless of what the main loop is doing. */
 	set(LED_HELP, true);
+	k_timer_start(&imu_timer, K_MSEC(200), K_NO_WAIT);
 }
 
 void leds_tx_pulse(void)
