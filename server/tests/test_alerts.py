@@ -62,6 +62,38 @@ def test_cooldown_elapsed_sends_again():
     assert outcome == "send"
 
 
+def test_boot_armed_sends_with_reboot_body():
+    """A reboot while armed = power was cut on a parked asset. The device
+    cannot raise a motion event across a reboot (RAM state), so the server
+    alerts on the boot identity instead (2026-07-16)."""
+    now = 1_000_000.0
+    conn = _db(armed=1)
+    outcome, payload = alerts.maybe_alert(
+        conn, DEV, now, "https://ntfy.sh/x", now=now, kind="boot")
+    assert outcome == "send"
+    assert "REBOOTED while armed" in payload["body"]
+    assert payload["title"] == "Reboot while armed"
+
+
+def test_boot_disarmed_does_not_send():
+    outcome, payload = alerts.maybe_alert(
+        _db(armed=0), DEV, time.time(), "https://ntfy.sh/x", kind="boot")
+    assert outcome == "disarmed"
+    assert payload is None
+
+
+def test_boot_shares_motion_cooldown():
+    """One ping per window, whatever the kind: legitimate handling fires
+    wake + boot within seconds and must not double-buzz the phone."""
+    now = 1_000_000.0
+    conn = _db(armed=1)
+    assert alerts.maybe_alert(
+        conn, DEV, now, "https://ntfy.sh/x", now=now)[0] == "send"
+    outcome, _ = alerts.maybe_alert(
+        conn, DEV, now + 10, "https://ntfy.sh/x", now=now + 10, kind="boot")
+    assert outcome == "cooldown"
+
+
 def test_no_url_does_not_send():
     outcome, payload = alerts.maybe_alert(_db(armed=1), DEV, time.time(), "")
     assert outcome == "no-url"

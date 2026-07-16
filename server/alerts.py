@@ -30,11 +30,19 @@ def ensure_schema(conn):
     conn.commit()
 
 
-def maybe_alert(conn, device_id, event_ts, ntfy_url, web_url=None, now=None):
-    """Decide whether this motion warrants a push. Main-thread DB only, no
+def maybe_alert(conn, device_id, event_ts, ntfy_url, web_url=None, now=None,
+                kind="motion"):
+    """Decide whether this event warrants a push. Main-thread DB only, no
     network. Returns (outcome, payload): payload is a dict for post_ntfy()
     when outcome == 'send', else None. Outcomes: send | disarmed | no-url |
-    cooldown."""
+    cooldown.
+
+    kind 'motion' = the device reported an IMU wake; 'boot' = the device's
+    boot identity arrived while armed — a power cut on an armed asset (the
+    device forgets it was parked across a reboot, so it will NOT raise a
+    motion event; this server-side alert closes that hole — battery pulled,
+    2026-07-16). Both kinds share ONE cooldown: legitimate handling fires
+    wake + boot within seconds, and one ping per 5 min is the contract."""
     if now is None:
         now = time.time()
 
@@ -52,7 +60,13 @@ def maybe_alert(conn, device_id, event_ts, ntfy_url, web_url=None, now=None):
         return ("cooldown", None)
 
     hhmm = time.strftime("%H:%M", time.localtime(event_ts))
-    body = f"{device_id} moved while armed at {hhmm} — tap to see where"
+    if kind == "boot":
+        body = (f"{device_id} REBOOTED while armed at {hhmm} — "
+                f"power was cut; tap to see where")
+        title, tags = "Reboot while armed", "electric_plug"
+    else:
+        body = f"{device_id} moved while armed at {hhmm} — tap to see where"
+        title, tags = "Motion alert", "rotating_light"
     # Click through to the auth-gated webapp (Events page), never a bare
     # location: keeps the position behind the Caddy password.
     click = f"{web_url.rstrip('/')}/#events" if web_url else None
@@ -64,7 +78,8 @@ def maybe_alert(conn, device_id, event_ts, ntfy_url, web_url=None, now=None):
         (now, device_id))
     conn.commit()
 
-    return ("send", {"body": body, "click": click})
+    return ("send", {"body": body, "click": click,
+                     "title": title, "tags": tags})
 
 
 def post_ntfy(ntfy_url, payload, timeout=5):
@@ -72,9 +87,9 @@ def post_ntfy(ntfy_url, payload, timeout=5):
     ride HTTP headers (kept ASCII; the emoji comes from the Tags header, so
     header encoding stays clean)."""
     headers = {
-        "Title": "Motion alert",
+        "Title": payload.get("title", "Motion alert"),
         "Priority": "high",
-        "Tags": "rotating_light",
+        "Tags": payload.get("tags", "rotating_light"),
     }
     if payload.get("click"):
         headers["Click"] = payload["click"]

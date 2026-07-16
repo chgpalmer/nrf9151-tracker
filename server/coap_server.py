@@ -289,11 +289,13 @@ MOTION_REASON = {1: "imu_wake"}
 
 def store_obs(conn, obs, cells, now: int):
     """Store a decoded Obs. Returns (track_points, cell_fixes, log_lines,
-    motions) where motions is a list of (device_id, event_ts) — the caller
-    fires alerts off the event loop after the rows are committed."""
+    motions, boots) where motions/boots are lists of (device_id, event_ts) —
+    the caller fires alerts off the event loop after the rows are
+    committed."""
     dev = obs.device_id
     n_pts = n_cell = n_log = 0
     motions = []
+    boots = []
     for e in obs.entries:
         base_ts = now - e.age_s
         kind = e.WhichOneof("kind")
@@ -317,6 +319,16 @@ def store_obs(conn, obs, cells, now: int):
                        VALUES (?, ?, ?, ?, ?)""",
                     (dev, now - line.age_s, line.level, line.module, line.text))
                 n_log += 1
+                # The boot-identity line doubles as a boot EVENT: the device
+                # forgets it was parked across a reboot (RAM state), so a
+                # power cut on an armed asset raises no motion event — this
+                # is where the server notices instead (2026-07-16).
+                if line.module == "tracker" and line.text == "tracker starting":
+                    ev_ts = now - line.age_s
+                    conn.execute(
+                        "INSERT INTO events (device_id, received_ts, kind, "
+                        "reason) VALUES (?, ?, 'boot', NULL)", (dev, ev_ts))
+                    boots.append((dev, ev_ts))
         elif kind == "cell":
             c = e.cell
             fix = resolve_cell(c.mcc, c.mnc, c.tac, c.cell_id, cells)
@@ -345,7 +357,7 @@ def store_obs(conn, obs, cells, now: int):
     conn.commit()
     print(f"[coap] {dev} v{obs.version}: {n_pts} track pts + {n_cell} cell "
           f"+ {n_log} log")
-    return n_pts, n_cell, n_log, motions
+    return n_pts, n_cell, n_log, motions, boots
 
 
 class ObsResource(resource.Resource):
@@ -362,7 +374,7 @@ class ObsResource(resource.Resource):
                  f"rejected payload ({len(request.payload)} B): {e}")
             return aiocoap.Message(code=aiocoap.Code.BAD_REQUEST)
 
-        _, _, _, motions = store_obs(
+        _, _, _, motions, boots = store_obs(
             self.conn, obs, self.cells, int(time.time()))
         self.conn.execute(
             "INSERT INTO usage (device_id, received_ts, bytes, kind) "
@@ -385,6 +397,23 @@ class ObsResource(resource.Resource):
             else:
                 slog(self.conn, 3, "event",
                      f"motion not alerted ({outcome})", device=dev)
+
+        # Boot while armed = power was cut on an asset that should be
+        # sitting still. Shares the motion cooldown (see alerts.py).
+        for dev, ev_ts in boots:
+            outcome, payload = alerts.maybe_alert(
+                self.conn, dev, ev_ts, NTFY_URL, WEB_URL, kind="boot")
+            if outcome == "send":
+                try:
+                    await asyncio.to_thread(alerts.post_ntfy, NTFY_URL, payload)
+                    slog(self.conn, 2, "event",
+                         "reboot-while-armed alert pushed (ntfy)", device=dev)
+                except Exception as exc:
+                    slog(self.conn, 2, "event",
+                         f"reboot alert push failed: {exc}", device=dev)
+            else:
+                slog(self.conn, 3, "event",
+                     f"boot not alerted ({outcome})", device=dev)
 
         # Devices set No-Response, so aiocoap drops this on the floor for
         # them; it still answers curious human clients (coap-client etc).
