@@ -12,6 +12,13 @@
  * twice — uplink logs at DBG (below the default threshold), and
  * uplink_request_flush() only sets a flag; nothing here ever calls into the
  * send path.
+ *
+ * Concurrency: LOG_MODE_IMMEDIATE means process() runs in WHATEVER thread
+ * logs (the lte_lc callback thread logs INF lines), while the source side
+ * runs in the main loop — so the ring indices and the line-assembly buffer
+ * are guarded by a spinlock. It is held across the batch encode too (bounded:
+ * <= 16 lines into a RAM buffer) so a concurrent drop-oldest cannot shift the
+ * batch under the encoder. Nothing inside the locked regions logs.
  */
 #include "uplink.h"
 #include "tracker.pb.h"
@@ -40,6 +47,10 @@ struct line {
 static struct line ring[RING_CAP];
 static size_t r_start, r_count, r_taken;
 static uint32_t r_dropped; /* lines lost to overflow; reported in-band */
+
+/* Guards the ring indices, ring contents and the assembly buffer (see the
+ * concurrency note above). Never held while logging or sending. */
+static struct k_spinlock ring_lock;
 
 /* ---- backend side: log core -> ring -------------------------------------- */
 
@@ -118,9 +129,10 @@ static void process(const struct log_backend *const backend,
 		return;
 	}
 
-	cur_level = level ? level : LOG_LEVEL_INF;
 	int16_t sid = log_msg_get_source_id(&msg->log);
+	k_spinlock_key_t key = k_spin_lock(&ring_lock);
 
+	cur_level = level ? level : LOG_LEVEL_INF;
 	cur_mod = (sid >= 0) ? log_source_name_get(0, sid) : NULL;
 
 	/* Body only: no colors, no timestamp (ages travel per line), no
@@ -128,8 +140,9 @@ static void process(const struct log_backend *const backend,
 	log_output_msg_process(&uplink_log_output, &msg->log,
 			       LOG_OUTPUT_FLAG_CRLF_NONE);
 	push_line(); /* in case the message didn't end in a newline */
+	k_spin_unlock(&ring_lock, key);
 
-	if (cur_level <= LOG_LEVEL_WRN) {
+	if (level != 0 && level <= LOG_LEVEL_WRN) {
 		uplink_request_flush(UPLINK_FLUSH_LOG);
 	}
 }
@@ -142,7 +155,10 @@ static void panic(const struct log_backend *const backend)
 static void dropped(const struct log_backend *const backend, uint32_t cnt)
 {
 	ARG_UNUSED(backend);
+	k_spinlock_key_t key = k_spin_lock(&ring_lock);
+
 	r_dropped += cnt;
+	k_spin_unlock(&ring_lock, key);
 }
 
 static const struct log_backend_api log_uplink_api = {
@@ -194,10 +210,13 @@ static bool encode_lines(pb_ostream_t *stream, const pb_field_t *field,
 
 static bool log_has_pending(void)
 {
+	/* Unlocked single-word reads: a stale answer only defers work to the
+	 * next poll, and the encode below re-checks under the lock. */
 	return r_count > r_taken || r_dropped > 0;
 }
 
-static int log_encode_next(pb_ostream_t *stream, size_t budget, uint32_t *kind)
+static int encode_next_locked(pb_ostream_t *stream, size_t budget,
+			      uint32_t *kind)
 {
 	/* Report overflow in-band before anything else: it is itself a log
 	 * line, synthesized here so it can never be dropped. */
@@ -249,16 +268,31 @@ static int log_encode_next(pb_ostream_t *stream, size_t budget, uint32_t *kind)
 	return (int)(stream->bytes_written - before);
 }
 
+static int log_encode_next(pb_ostream_t *stream, size_t budget, uint32_t *kind)
+{
+	k_spinlock_key_t key = k_spin_lock(&ring_lock);
+	int ret = encode_next_locked(stream, budget, kind);
+
+	k_spin_unlock(&ring_lock, key);
+	return ret;
+}
+
 static void log_commit(void)
 {
+	k_spinlock_key_t key = k_spin_lock(&ring_lock);
+
 	r_start = (r_start + r_taken) % RING_CAP;
 	r_count -= r_taken;
 	r_taken = 0;
+	k_spin_unlock(&ring_lock, key);
 }
 
 static void log_rollback(void)
 {
+	k_spinlock_key_t key = k_spin_lock(&ring_lock);
+
 	r_taken = 0;
+	k_spin_unlock(&ring_lock, key);
 }
 
 static const struct uplink_source log_source = {
