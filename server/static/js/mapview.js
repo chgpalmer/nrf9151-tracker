@@ -288,13 +288,11 @@ export function createMapView(containerId, onFixClick) {
       // ordinary self (cell circle / track point) below.
       const isGps = fix.source === 'gps';
       if (isGps && !showPoints) return; // the polyline represents it
-      // Cell dots follow the same journeys-only rule as the track: a
-      // parked day piles hundreds of amber dots on one spot. POINTS
-      // reveals them like everything else.
-      if (!isGps && !showPoints && tripWindows &&
-          !tripWindows.some(w => fix.received_ts >= w[0] && fix.received_ts <= w[1])) {
-        return;
-      }
+      // Cell dots ALWAYS draw — even outside journeys. Unlike parked GPS
+      // scatter (the 86%-noise problem journeys-only DAY exists for),
+      // cells are sparse by construction (heartbeats, a few dozen a day)
+      // and each one is information: tower blips during a park are real
+      // connectivity history Charlie reads (2026-07-16).
       // interactive:false — canvas hit-testing is O(layers) per mousemove;
       // the map-level nearest-fix handler below covers hover AND click for
       // every fix, drawn or not.
