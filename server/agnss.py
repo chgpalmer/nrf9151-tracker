@@ -34,7 +34,7 @@ from pathlib import Path
 import tracker_pb2 as pb
 
 BKG_URL = ("https://igs.bkg.bund.de/root_ftp/IGS/BRDC/"
-           "{y}/{doy:03d}/BRDC00WRD_S_{y}{doy:03d}0000_01D_MN.rnx.gz")
+           "{y}/{doy:03d}/BRDC00WRD_{src}_{y}{doy:03d}0000_01D_MN.rnx.gz")
 
 GPS_EPOCH_UNIX = 315964800          # 1980-01-06 00:00:00 UTC
 GPS_UTC_LEAP_S = 18                 # constant until the next leap second
@@ -316,6 +316,21 @@ def assemble(cache: "AgnssCache", pos: tuple[float, float, float] | None,
 
 # ── cache + fetch ───────────────────────────────────────────────────────────
 
+def bkg_urls(unix_now: float) -> list[str]:
+    """Candidate day-file URLs, most-current first: today then yesterday
+    (the cumulative file always holds the current set; near midnight only
+    yesterday's exists yet), each under both RINEX source codes. BKG stopped
+    publishing the _S_ (streamed) variant at DOY 2026/197 leaving only _R_ —
+    a silent 404 for ~20 h until a field acquisition failure exposed it
+    (2026-07-16). 404s are cheap; try the lot."""
+    urls = []
+    for back in (0, 1):
+        t = time.gmtime(unix_now - back * 86400)
+        for src in ("S", "R"):
+            urls.append(BKG_URL.format(y=t.tm_year, doy=t.tm_yday, src=src))
+    return urls
+
+
 class AgnssCache:
     """Latest ephemeris per PRN + persistence, so a server restart serves
     immediately and tests/smoke can run from a local file with no network."""
@@ -370,9 +385,7 @@ class AgnssCache:
             print(f"[agnss] loaded {n} SVs from {override}")
             return n
         last_err = None
-        for back in (0, 1):
-            t = time.gmtime(time.time() - back * 86400)
-            url = BKG_URL.format(y=t.tm_year, doy=t.tm_yday)
+        for url in bkg_urls(time.time()):
             try:
                 req = urllib.request.Request(
                     url, headers={"User-Agent": "nrf9151-tracker-agnss/1.0"})

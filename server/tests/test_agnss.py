@@ -150,6 +150,24 @@ def test_request_round_trip():
     assert back.data_flags == 0x69
 
 
+def test_bkg_url_candidates_cover_both_source_codes():
+    """Field incident 2026-07-16: BKG stopped publishing the _S_ (streamed)
+    variant of BRDC00WRD at the DOY 196->197 boundary, leaving only _R_ —
+    every fetch 404'd for ~20 h and the device cold-started a moving
+    acquisition unassisted. The fetcher must try both source codes for
+    today AND yesterday, in that order (same-day first)."""
+    from agnss import bkg_urls
+
+    # 2026-07-16 12:00:00 UTC = DOY 197.
+    urls = bkg_urls(unix_now=1784203200)
+    assert [u.split("/BRDC/")[1] for u in urls] == [
+        "2026/197/BRDC00WRD_S_20261970000_01D_MN.rnx.gz",
+        "2026/197/BRDC00WRD_R_20261970000_01D_MN.rnx.gz",
+        "2026/196/BRDC00WRD_S_20261960000_01D_MN.rnx.gz",
+        "2026/196/BRDC00WRD_R_20261960000_01D_MN.rnx.gz",
+    ]
+
+
 def test_unc_and_ura_coding():
     assert unc_k(0) == 0
     assert unc_k(10) >= 1

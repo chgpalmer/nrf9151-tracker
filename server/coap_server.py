@@ -447,12 +447,26 @@ class AgnssResource(resource.Resource):
 
 async def agnss_refresh(cache, conn):
     """Keep the ephemeris cache ~15-30 min fresh, forever. Failures keep the
-    last good data (assistance is an accelerator, never a dependency)."""
+    last good data (assistance is an accelerator, never a dependency) — but
+    an EMPTY serving set is edge-logged into the ledger: fetch errors only
+    printed to stderr once, and a BKG file rename starved devices of orbits
+    for ~20 h with nothing on the Logs page (2026-07-16). Onset WRN, recovery
+    INF — the device-side logging rule, applied here."""
+    stale_warned = False
     while True:
         try:
             await asyncio.get_running_loop().run_in_executor(None, cache.fetch)
         except Exception as exc:
             slog(conn, 2, "agnss", f"refresh error: {exc}")
+        fresh = len(cache.fresh(time.time()))
+        if fresh == 0 and not stale_warned:
+            stale_warned = True
+            slog(conn, 2, "agnss",
+                 "no fresh ephemerides — fetches failing; serving "
+                 "time+location only")
+        elif fresh > 0 and stale_warned:
+            stale_warned = False
+            slog(conn, 3, "agnss", f"ephemeris supply recovered ({fresh} SVs)")
         await asyncio.sleep(1800)
 
 
