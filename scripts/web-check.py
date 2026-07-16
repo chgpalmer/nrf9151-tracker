@@ -71,6 +71,13 @@ def main():
         # Day view at 1 Hz density must stay responsive: click DAY (10k+
         # fixes) and require the main thread back within budget, with no
         # per-fix DOM markers (canvas renders the points).
+        # Chips render at the end of loadDay(), which awaits several API
+        # calls — wait for them rather than sampling the instant the page
+        # settles (raced once when /api/current joined the sequence).
+        try:
+            page.wait_for_selector("#trip-chips button", timeout=5000)
+        except Exception:
+            pass  # the count() check below reports it as a problem
         day_chip = page.locator("#trip-chips button", has_text="DAY")
         if day_chip.count():
             t0 = time.time()

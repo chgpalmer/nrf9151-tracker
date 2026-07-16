@@ -65,6 +65,18 @@ export async function fetchUsage(deviceId, days = 14) {
   return r.json();
 }
 
+/**
+ * GET /api/current — the device's best CURRENT position (not merely the
+ * newest row: while parked, the last GPS fix outranks heartbeat cell fixes
+ * that corroborate it). null when the device has no positions.
+ */
+export async function fetchCurrent(deviceId) {
+  const params = new URLSearchParams({ device: deviceId });
+  const r = await fetch(`/api/current?${params}`);
+  if (!r.ok) throw new Error(`/api/current: ${r.status}`);
+  return r.json();
+}
+
 export async function fetchLogs(deviceId, opts = {}) {
   const params = new URLSearchParams({ device: deviceId });
   if (opts.from_ts   != null) params.set('from_ts',   opts.from_ts);

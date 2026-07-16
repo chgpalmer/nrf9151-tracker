@@ -83,6 +83,7 @@ export function createMapView(containerId, onFixClick) {
   let currentFixes    = [];
   let showPoints      = false;
   let liveDot         = false;
+  let liveFix         = null; // server-chosen best current fix (may be older than the window)
   let selectedFixId   = null;
   let tripWindows     = null; // [[from,to],...] = draw track per journey only
 
@@ -212,6 +213,7 @@ export function createMapView(containerId, onFixClick) {
   function render(fixes, opts = {}) {
     if (opts.showPoints != null) showPoints = opts.showPoints;
     if (opts.liveDot    != null) liveDot    = opts.liveDot;
+    if ('liveFix' in opts)       liveFix    = opts.liveFix;
     if ('tripWindows' in opts)   tripWindows = opts.tripWindows;
 
     currentFixes = fixes;
@@ -263,19 +265,27 @@ export function createMapView(containerId, onFixClick) {
 
     const latest = fixes[fixes.length - 1];
 
-    // Latest fix: the one DOM marker (live dot in live mode). Everything
-    // else is canvas: GPS fixes are represented by the line (plus optional
-    // POINTS circles), cell fixes always get a circle — they are few and
-    // are ambient context rather than track.
+    // The one DOM marker (live dot in live mode). In live mode the server
+    // may override WHICH fix it marks (/api/current): while parked the
+    // newest row is a heartbeat cell — a ~2 km tower centroid — while the
+    // device sits exactly where its last GPS fix said; that fix may even
+    // predate the day window. Everything else is canvas: GPS fixes are
+    // represented by the line (plus optional POINTS circles), cell fixes
+    // always get a circle — they are few and are ambient context rather
+    // than track.
+    const dotFix = (liveDot && liveFix) ? liveFix : latest;
+
+    if (dotFix) {
+      const icon = liveDot ? liveIcon() : markerIcon(dotFix, true);
+      L.marker([dotFix.lat, dotFix.lon], { icon, zIndexOffset: 1000 })
+        .on('click', () => pickFix(dotFix))
+        .addTo(markerLayer);
+    }
+
     fixes.forEach(fix => {
-      const isLatest = fix === latest;
-      if (isLatest) {
-        const icon = liveDot ? liveIcon() : markerIcon(fix, true);
-        L.marker([fix.lat, fix.lon], { icon, zIndexOffset: 1000 })
-          .on('click', () => pickFix(fix))
-          .addTo(markerLayer);
-        return;
-      }
+      if (fix === dotFix) return; // has its DOM marker above
+      // A latest row demoted by the live-fix override renders as its
+      // ordinary self (cell circle / track point) below.
       const isGps = fix.source === 'gps';
       if (isGps && !showPoints) return; // the polyline represents it
       // Cell dots follow the same journeys-only rule as the track: a

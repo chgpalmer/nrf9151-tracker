@@ -11,6 +11,7 @@ Usage:
   uvicorn app:app --reload --host 0.0.0.0 --port 8080 --app-dir server
 """
 
+import math
 import os
 import sqlite3
 import time
@@ -89,6 +90,74 @@ async def devices():
         "ORDER BY last_seen DESC"
     ).fetchall()
     return JSONResponse([dict(r) for r in rows])
+
+
+def _dist_m(lat1, lon1, lat2, lon2):
+    """Metres between two coordinates; equirectangular is exact enough at
+    cell-radius scale (same approximation as the firmware's motion.c)."""
+    kx = 111320.0 * math.cos(math.radians(lat1))
+    return math.hypot((lon2 - lon1) * kx, (lat2 - lat1) * 110540.0)
+
+
+def best_current(db, device):
+    """Best CURRENT position estimate — not merely the newest row.
+
+    While parked, heartbeat cell fixes are a LIVENESS signal, not a better
+    position: the newest row is a ~2 km tower centroid while the device sits
+    exactly where its last GPS fix said, with the armed accelerometer
+    standing guard. Prefer that GPS fix when the evidence agrees it never
+    moved:
+      (a) no motion/boot event arrived after it — the device itself reports
+          movement (IMU wake) and the server flags reboots; and
+      (b) EVERY cell fix since then corroborates it — its accuracy circle
+          contains the GPS point (one cell outside = travel the track never
+          saw; newest row wins).
+    Returns the chosen positions row as a dict with a `basis` field
+    ('latest' | 'parked-gps', plus corroboration metadata), or None when the
+    device has no positions at all."""
+    latest = db.execute(
+        "SELECT received_ts, source, lat, lon, alt, acc, spd, hdg, sats "
+        "FROM positions WHERE device_id = ? AND lat IS NOT NULL "
+        "ORDER BY received_ts DESC LIMIT 1", (device,)).fetchone()
+    if latest is None:
+        return None
+    latest = dict(latest) | {"basis": "latest"}
+    if latest["source"] == "gps":
+        return latest
+
+    gps = db.execute(
+        "SELECT received_ts, source, lat, lon, alt, acc, spd, hdg, sats "
+        "FROM positions WHERE device_id = ? AND source = 'gps' "
+        "ORDER BY received_ts DESC LIMIT 1", (device,)).fetchone()
+    if gps is None:
+        return latest
+    gps = dict(gps)
+
+    moved = db.execute(
+        "SELECT COUNT(*) FROM events WHERE device_id = ? AND received_ts > ?",
+        (device, gps["received_ts"] + 2)).fetchone()[0]
+    if moved:
+        return latest
+
+    cells = db.execute(
+        "SELECT lat, lon, acc FROM positions WHERE device_id = ? "
+        "AND source = 'cell' AND received_ts > ?",
+        (device, gps["received_ts"])).fetchall()
+    for c in cells:
+        if _dist_m(gps["lat"], gps["lon"], c["lat"], c["lon"]) > \
+           (c["acc"] or 2000.0):
+            return latest
+
+    return gps | {"basis": "parked-gps",
+                  "corroborated_ts": latest["received_ts"],
+                  "cells_since": len(cells)}
+
+
+@app.get("/api/current")
+async def current(device: str):
+    """The device's best current position (see best_current) — what the
+    map's live dot should show. null when the device has no positions."""
+    return JSONResponse(best_current(app.state.db, device))
 
 
 @app.post("/api/arm")

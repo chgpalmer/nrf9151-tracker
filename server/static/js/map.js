@@ -17,7 +17,7 @@
  * table rings the same point on the map.
  */
 
-import { fetchPositions, fetchCells } from '/js/api.js';
+import { fetchPositions, fetchCells, fetchCurrent } from '/js/api.js';
 import { createMapView }   from '/js/mapview.js';
 import { createFixTable }  from '/js/fixtable.js';
 import { createJourneysTable } from '/js/journeys.js';
@@ -44,6 +44,10 @@ let dayStart = 0;      // epoch of 00:00 local for the selected day
 let isToday  = false;
 let dayFixes = [];     // chronological
 let dayCells = [];     // serving-cell history for the day (/api/cells)
+/* Server-chosen best current position (/api/current): while parked this is
+ * the last GPS fix, not the newest heartbeat cell — the live dot shows
+ * where the device IS, not which tower last vouched for it. */
+let liveFix  = null;
 let trips    = [];
 let sel      = { mode: 'day' };   // 'live' | 'day' | {mode:'trip', i} | 'range'
 let selFrac  = [0, 1]; // current window as day fractions (source of truth for 'range')
@@ -401,6 +405,17 @@ async function loadDay() {
   renderChips();
   applyView(true);
   scheduleTimer();
+
+  // Best current position (parked = last GPS fix, not the newest heartbeat
+  // cell). Fetched AFTER the first paint so it never delays the page; the
+  // dot corrects itself one render later.
+  liveFix = null;
+  if (isToday) {
+    try {
+      liveFix = await fetchCurrent(deviceId);
+      if (liveFix) applyView(false);
+    } catch (e) { /* dot falls back to newest row */ }
+  }
 }
 
 // Incremental refresh (today only): append what's new, keep the view still.
@@ -419,6 +434,7 @@ async function refresh() {
   }
   if (fresh.length > 0) {
     dayFixes = dayFixes.concat(fresh);
+    try { liveFix = await fetchCurrent(deviceId); } catch (e) { /* keep previous */ }
     trips = segmentTrips(dayFixes);
     renderDensity();
     renderTripBands();
@@ -483,6 +499,7 @@ function applyView(fit) {
     // explicit windows the user asked for — show everything.
     tripWindows: sel.mode === 'day' ? tripWindows(trips) : null,
     liveDot: sel.mode === 'live',
+    liveFix: sel.mode === 'live' ? liveFix : null,
     emptyMsg: filtered ? 'All fixes hidden by source filter' : undefined,
     emptySub: filtered ? 'Re-enable GPS or CELL above.' : undefined,
   });
