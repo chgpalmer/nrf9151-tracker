@@ -18,7 +18,6 @@
 #define SKY_GRACE_MS    30000
 #define VISIBLE_LOST_MS 10000
 #define CHOPPED_EPOCHS  10
-#define EPHE_POLL_MS    5000
 
 #define ACQUIRE_CAP_MS (CONFIG_TRACKER_LOC_ACQUIRE_TIMEOUT_S * 1000)
 #define STALE_MS       (CONFIG_TRACKER_GPS_STALE_S * 1000)
@@ -32,40 +31,36 @@
 #define REST_MIN_S CONFIG_TRACKER_REST_BACKOFF_MIN_S
 #define REST_MAX_S CONFIG_TRACKER_REST_BACKOFF_MAX_S
 
-/* Mirrors loc_fsm.c's private constant: the inventory floor below which no
- * fix is computable (the C2 cold-with-supply gate keys on it). */
-#define SATS_FOR_FIX 4
+/* healthy's validity floor (mirrors gnss_ctrl.c's fallback: the symbol
+ * depends on TRACKER_AGNSS). */
+#ifndef CONFIG_TRACKER_AGNSS_MIN_LEFT_MIN
+#define CONFIG_TRACKER_AGNSS_MIN_LEFT_MIN 0
+#endif
 
 /* ── fake clock ─────────────────────────────────────────────────────────── */
 
 static int64_t t;
 static bool g_stationary;
 
-/* ── fake modem: the one call loc_fsm.c makes ───────────────────────────── */
+/* ── the ephemeris inventory: a plain input since 2026-07-16 ─────────────── */
 
-static struct nrf_modem_gnss_agnss_expiry fake_ephe;
-static int32_t fake_ephe_ret;
-
-int32_t nrf_modem_gnss_agnss_expiry_get(struct nrf_modem_gnss_agnss_expiry *out)
-{
-	if (fake_ephe_ret != 0) {
-		return fake_ephe_ret;
-	}
-	*out = fake_ephe;
-	return 0;
-}
+static struct ephe_inventory g_inv;
 
 /* Inventory of n satellites (IDs 1..n) each holding an ephemeris that expires
- * in expiry_min minutes. The FSM polls this at most every EPHE_POLL_MS;
- * set it BEFORE driving (init backdates the poll clock, so the first update
- * always reads it). */
+ * in expiry_min minutes — digested the way gnss_ctrl would. Effective from
+ * the next step(): the FSM reads it per update, no poll cadence involved. */
 static void set_ephe(int n, uint16_t expiry_min)
 {
-	memset(&fake_ephe, 0, sizeof(fake_ephe));
-	fake_ephe.sv_count = n;
-	for (int i = 0; i < n; i++) {
-		fake_ephe.sv[i].sv_id = i + 1;
-		fake_ephe.sv[i].ephe_expiry = expiry_min;
+	memset(&g_inv, 0, sizeof(g_inv));
+	g_inv.valid = true;
+	for (int i = 0; i < n && expiry_min > 0; i++) {
+		g_inv.held_mask |= 1ULL << i;
+		g_inv.held++;
+		g_inv.min_expiry_min = expiry_min;
+		if (expiry_min >= CONFIG_TRACKER_AGNSS_MIN_LEFT_MIN) {
+			g_inv.healthy_mask |= 1ULL << i;
+			g_inv.healthy++;
+		}
 	}
 }
 
@@ -90,7 +85,7 @@ static struct loc_status step_full(bool fix, int tracked, uint16_t cn0,
 	}
 
 	t += 1000;
-	loc_fsm_update(&pvt, t, lte, g_stationary, &st);
+	loc_fsm_update(&pvt, &g_inv, t, lte, g_stationary, &st);
 	return st;
 }
 
@@ -117,7 +112,6 @@ static void reset_fsm(void)
 {
 	t = 1000000;
 	g_stationary = false;
-	fake_ephe_ret = 0;
 	set_ephe(0, 0);
 	loc_fsm_init(t);
 	/* read_sky()'s ephemeris_visible carries the last OBSERVED value in a
@@ -311,6 +305,67 @@ ZTEST(loc_fsm, test_c2_supply_lost_restores_escalation)
 	ASSERT_STATE(step(false, 0, CHOPPED), LOC_GNSS_EXCLUSIVE);
 }
 
+/* The definitions row: an AGING inventory — plenty held, nothing healthy
+ * (all under the 30 min floor). The C2 gate keys on `held`, so with the
+ * supply alive it still escalates; `healthy` says the fetch was warranted.
+ * This is the held/healthy divergence band made explicit — the gate flip
+ * (commit 2 of the inventory refactor) changes this row to hold in ACQUIRE. */
+ZTEST(loc_fsm, test_c2_aging_inventory)
+{
+	loc_fsm_set_agnss_supply(true);
+	set_ephe(6, 10); /* held=6, healthy=0 */
+	to_acquire();
+	for (int i = 0; i < CHOPPED_EPOCHS - 1; i++) {
+		ASSERT_STATE(step(false, 0, CHOPPED), LOC_GNSS_ACQUIRE);
+	}
+	ASSERT_STATE(step(false, 0, CHOPPED), LOC_GNSS_EXCLUSIVE);
+}
+
+/* agnss_fetch_allowed: the radio-policy half of the fetch decision, per
+ * state. Publishing states allow it; ACQUIRE only while the inventory
+ * cannot support a fix (healthy < SATS_FOR_FIX); EXCLUSIVE (silence) and
+ * QUIESCENT (sleep) never. */
+ZTEST(loc_fsm, test_agnss_fetch_allowed_by_state)
+{
+	struct loc_status st;
+
+	st = step_full(false, 0, 0, OBSERVED, false); /* LTE_ATTACH */
+	zassert_false(st.agnss_fetch_allowed, "LTE_ATTACH");
+
+	st = step(false, 0, OBSERVED); /* -> REPORT_CELL */
+	zassert_true(st.agnss_fetch_allowed, "REPORT_CELL");
+
+	loc_fsm_note_cell_sent();
+	st = step(false, 0, OBSERVED); /* -> GNSS_ACQUIRE, cold inventory */
+	zassert_true(st.agnss_fetch_allowed, "ACQUIRE cold: fetch is the fast path");
+
+	set_ephe(SATS_FOR_FIX, 60); /* healthy inventory: radio quiet matters */
+	st = step(false, 0, OBSERVED);
+	ASSERT_STATE(st, LOC_GNSS_ACQUIRE);
+	zassert_false(st.agnss_fetch_allowed, "ACQUIRE warm");
+
+	set_ephe(0, 0);
+	for (int i = 0; i < CHOPPED_EPOCHS; i++) {
+		st = step(false, 0, CHOPPED); /* -> EXCLUSIVE (no supply) */
+	}
+	ASSERT_STATE(st, LOC_GNSS_EXCLUSIVE);
+	zassert_false(st.agnss_fetch_allowed, "EXCLUSIVE: silence is the point");
+
+	st = step_full(true, 4, CN0_STRONG, OBSERVED, false); /* -> REPORT_GNSS */
+	ASSERT_STATE(st, LOC_REPORT_GNSS);
+	zassert_true(st.agnss_fetch_allowed, "REPORT_GNSS");
+
+	reset_fsm();
+	to_cell_loop();
+	st = step(false, 0, OBSERVED);
+	zassert_true(st.agnss_fetch_allowed, "CELL_LOOP");
+
+	reset_fsm();
+	to_parked_fix();
+	st = step(true, 4, OBSERVED);
+	zassert_false(st.agnss_fetch_allowed, "QUIESCENT: sleep is the point");
+}
+
 ZTEST(loc_fsm, test_c3_acquire_timeout)
 {
 	/* tracked=1 the whole way: a teasing sky must ride out the FULL cap
@@ -474,7 +529,7 @@ ZTEST(loc_fsm, test_f1_expiring_ephemeris_never_exits)
 
 	set_ephe(4, 5); /* well under the old 15 min refresh threshold */
 	to_report_gnss();
-	for (int i = 0; i < 3 * EPHE_POLL_MS / 1000; i++) {
+	for (int i = 0; i < 15; i++) {
 		st = step(true, 4, OBSERVED);
 		ASSERT_STATE(st, LOC_REPORT_GNSS);
 	}

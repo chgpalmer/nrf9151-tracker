@@ -11,10 +11,6 @@ LOG_MODULE_REGISTER(loc_fsm, CONFIG_TRACKER_LOG_LEVEL);
  * is the difference between "tracked" and "ephemeris". */
 #define CN0_STRONG_01DBHZ (CONFIG_TRACKER_LOC_CN0_MIN_DBHZ * 10)
 
-/* Four unknowns -- x, y, z and the receiver clock bias -- so four satellites,
- * each with a valid ephemeris to say where it was when it transmitted. */
-#define SATS_FOR_FIX 4
-
 #define ACQUIRE_CAP_MS   (CONFIG_TRACKER_LOC_ACQUIRE_TIMEOUT_S * 1000)
 #define GPS_STALE_MS     (CONFIG_TRACKER_GPS_STALE_S * 1000)
 #define POST_MS          (CONFIG_TRACKER_POST_INTERVAL_S * 1000)
@@ -25,9 +21,6 @@ LOG_MODULE_REGISTER(loc_fsm, CONFIG_TRACKER_LOG_LEVEL);
  * perfect sky; the empty-sky bail must not count epochs before this, or every
  * boot would abandon its first acquisition while GNSS was still warming up. */
 #define SKY_GRACE_MS     30000
-
-/* Reading ephemeris state is a modem call; it does not change at 1 Hz. */
-#define EPHE_POLL_MS 5000
 
 /* "Hot start impossible" (fewer than SATS_FOR_FIX ephemeris-bearing satellites
  * in view) must be sustained before REPORT gives up on a stale fix and takes a
@@ -51,7 +44,6 @@ BUILD_ASSERT(ARRAY_SIZE(loc_state_names) == LOC_STATE_COUNT,
 static enum loc_state state;
 static int64_t state_entered_ms;
 static int64_t last_fix_ms;
-static int64_t last_ephe_poll_ms;
 /* Consecutive OBSERVED epochs with zero satellites. Blanked epochs (LTE held
  * the radio; DEADLINE_MISSED set) count toward neither side. */
 static uint8_t sky_empty_streak;
@@ -86,12 +78,6 @@ static uint8_t acquire_failures;
 static uint32_t rest_backoff_s;
 static int64_t rest_backoff_bumped_ms;
 
-/* Cached ephemeris inventory, refreshed at most every EPHE_POLL_MS. Kept as the
- * raw frame so `visible` can be recomputed against every PVT frame. ~800 B, so
- * static rather than on a stack. */
-static struct nrf_modem_gnss_agnss_expiry ephe;
-static bool ephe_valid;
-
 const char *loc_state_str(enum loc_state s)
 {
 	return (s < LOC_STATE_COUNT) ? loc_state_names[s] : "?";
@@ -122,12 +108,10 @@ void loc_fsm_init(int64_t now_ms)
 	state = LOC_LTE_ATTACH;
 	state_entered_ms  = now_ms;
 	last_fix_ms       = now_ms - GPS_STALE_MS;
-	last_ephe_poll_ms = now_ms - EPHE_POLL_MS;
 	sky_empty_streak   = 0;
 	chopped_streak     = 0;
 	last_visible_ok_ms = now_ms;
 	cell_sent = false;
-	ephe_valid = false;
 	acquire_failures = 0;
 	agnss_supply = false;
 	imu_wake = false;
@@ -151,40 +135,16 @@ void loc_fsm_set_imu_wake(bool present)
 	imu_wake = present;
 }
 
-static void poll_ephemeris(int64_t now_ms)
+/* Does the inventory hold a usable ephemeris for this satellite? GPS only:
+ * the masks cover sv_id 1..32 (see the struct comment in loc_fsm.h). */
+static bool sv_has_ephemeris(const struct ephe_inventory *inv, uint16_t sv_id)
 {
-	static struct nrf_modem_gnss_agnss_expiry fresh;
-
-	if ((now_ms - last_ephe_poll_ms) < EPHE_POLL_MS) {
-		return;
-	}
-	last_ephe_poll_ms = now_ms;
-
-	/* On failure keep the previous inventory: a failed read is not evidence
-	 * that the ephemerides were lost. */
-	if (nrf_modem_gnss_agnss_expiry_get(&fresh) == 0) {
-		ephe = fresh;
-		ephe_valid = true;
-	}
-}
-
-/* Does the cached inventory hold a usable ephemeris for this satellite? */
-static bool sv_has_ephemeris(uint16_t sv_id)
-{
-	if (!ephe_valid) {
-		return false;
-	}
-	for (int i = 0; i < ephe.sv_count; i++) {
-		/* Numeric match is sufficient: with GPS(+QZSS) enabled the ID
-		 * spaces don't collide (GPS 1..32, QZSS 193..202). */
-		if (ephe.sv[i].sv_id == sv_id) {
-			return ephe.sv[i].ephe_expiry > 0;
-		}
-	}
-	return false;
+	return sv_id >= 1 && sv_id <= 32 &&
+	       (inv->held_mask & (1ULL << (sv_id - 1)));
 }
 
 static void read_sky(const struct nrf_modem_gnss_pvt_data_frame *pvt,
+		     const struct ephe_inventory *inv,
 		     struct loc_status *st)
 {
 	/* ephemeris_visible drives the REPORT->ACQUIRE decision, so an epoch in
@@ -212,7 +172,7 @@ static void read_sky(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 		if (sv->flags & NRF_MODEM_GNSS_SV_FLAG_USED_IN_FIX) {
 			st->used++;
 		}
-		if (sv_has_ephemeris(sv->sv)) {
+		if (sv_has_ephemeris(inv, sv->sv)) {
 			visible++;
 		}
 	}
@@ -222,43 +182,28 @@ static void read_sky(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 	}
 	st->ephemeris_visible = last_visible;
 
-	st->ephemeris_held = 0;
-	st->min_ephe_expiry_min = 0;
-	st->gps_time_known = false;
-	if (ephe_valid) {
-		st->gps_time_known = !(ephe.data_flags &
-			NRF_MODEM_GNSS_AGNSS_GPS_SYS_TIME_AND_SV_TOW_REQUEST);
-		for (int i = 0; i < ephe.sv_count; i++) {
-			uint16_t e = ephe.sv[i].ephe_expiry;
-
-			if (e == 0) {
-				continue;
-			}
-			st->ephemeris_held++;
-			if (st->min_ephe_expiry_min == 0 ||
-			    e < st->min_ephe_expiry_min) {
-				st->min_ephe_expiry_min = e;
-			}
-		}
-	}
+	st->ephemeris_held = inv->valid ? inv->held : 0;
+	st->min_ephe_expiry_min = inv->valid ? inv->min_expiry_min : 0;
+	st->gps_time_known = inv->valid &&
+		!(inv->data_flags &
+		  NRF_MODEM_GNSS_AGNSS_GPS_SYS_TIME_AND_SV_TOW_REQUEST);
 
 	st->pdop = pvt->pdop;
 }
 
 void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
+		    const struct ephe_inventory *inv,
 		    int64_t now_ms, bool lte_registered, bool stationary,
 		    struct loc_status *out)
 {
 	bool fix = pvt->flags & NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID;
-
 
 	if (fix) {
 		last_fix_ms = now_ms;
 		acquire_failures = 0;
 	}
 
-	poll_ephemeris(now_ms);
-	read_sky(pvt, out);
+	read_sky(pvt, inv, out);
 	/* Staleness is judged against the CURRENT sampling cadence: at 1 Hz a
 	 * 30 s hole means trouble, but under periodic checks a fix is only
 	 * expected every check interval -- three missed checks is the
@@ -519,6 +464,13 @@ void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 				state == LOC_REPORT_GNSS ||
 				state == LOC_CELL_LOOP ||
 				state == LOC_QUIESCENT);
+	/* Fetch permission (see loc_fsm.h): publishing states with LTE already
+	 * awake, or ACQUIRE while the inventory cannot support a fix — the
+	 * radio-policy half of what lived in agnss.c's allowed-states list. */
+	out->agnss_fetch_allowed =
+		((state == LOC_REPORT_CELL || state == LOC_REPORT_GNSS ||
+		  state == LOC_CELL_LOOP) && out->publish_allowed) ||
+		(state == LOC_GNSS_ACQUIRE && inv->healthy < SATS_FOR_FIX);
 	out->prefer_cell = (state != LOC_REPORT_GNSS &&
 			    !(state == LOC_QUIESCENT && parked_had_fix &&
 			      !imu_wake)) || !out->gps_current;
@@ -531,7 +483,8 @@ void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 }
 
 void loc_fsm_log(const struct loc_status *st,
-		 const struct nrf_modem_gnss_pvt_data_frame *pvt)
+		 const struct nrf_modem_gnss_pvt_data_frame *pvt,
+		 const struct ephe_inventory *inv)
 {
 	if (st->gps_current) {
 		LOG_DBG("loc:  %s | fix | ephemeris %u held / %u visible | next expiry %u min",
@@ -560,7 +513,7 @@ void loc_fsm_log(const struct loc_status *st,
 		LOG_DBG("  sv %3u  C/N0 %.1f dB-Hz%s%s%s", sv->sv,
 			(double)sv->cn0 / 10.0,
 			sv->cn0 >= CN0_STRONG_01DBHZ ? "  strong" : "  weak",
-			sv_has_ephemeris(sv->sv) ? "  ephe" : "",
+			sv_has_ephemeris(inv, sv->sv) ? "  ephe" : "",
 			(sv->flags & NRF_MODEM_GNSS_SV_FLAG_USED_IN_FIX) ? "  used" : "");
 	}
 }

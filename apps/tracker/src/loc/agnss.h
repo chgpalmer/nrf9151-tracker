@@ -25,10 +25,12 @@
  * elevation-filter the ephemerides. Pointer is kept, not copied. */
 void agnss_set_device_id(const char *id);
 
-/* Evaluate need/allowance and, at most once per pass, run one fetch+inject
- * exchange (blocks <= ~2.5 s while LTE is already active). Call once per
- * main-loop pass, after the FSM update. */
-void agnss_poll(int64_t now_ms, const struct loc_status *loc);
+/* Evaluate need (from the shared inventory digest) against the FSM's fetch
+ * permission (loc->agnss_fetch_allowed) and, at most once per pass, run one
+ * fetch+inject exchange (blocks <= ~2.5 s while LTE is already active).
+ * Call once per main-loop pass, after the FSM update. */
+void agnss_poll(int64_t now_ms, const struct loc_status *loc,
+		const struct ephe_inventory *inv);
 
 /* Is the assistance supply believed alive? True unless disabled (`agnss
  * off` on the shell) or fetch-locked-out (5 consecutive failures). Feeds
@@ -40,10 +42,12 @@ bool agnss_supply_ok(void);
 #else
 
 static inline void agnss_set_device_id(const char *id) { (void)id; }
-static inline void agnss_poll(int64_t now_ms, const struct loc_status *loc)
+static inline void agnss_poll(int64_t now_ms, const struct loc_status *loc,
+			      const struct ephe_inventory *inv)
 {
 	(void)now_ms;
 	(void)loc;
+	(void)inv;
 }
 static inline bool agnss_supply_ok(void) { return false; }
 

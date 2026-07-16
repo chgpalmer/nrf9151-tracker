@@ -19,6 +19,33 @@
 #include <stdint.h>
 #include <nrf_modem_gnss.h>
 
+/* Four unknowns -- x, y, z and the receiver clock bias -- so four satellites,
+ * each with a valid ephemeris to say where it was when it transmitted. Shared
+ * vocabulary: the FSM's C2 gate and agnss's cold verdict key on it. */
+#define SATS_FOR_FIX 4
+
+/* Snapshot of the modem's GPS ephemeris inventory, digested once per poll by
+ * gnss_ctrl (the single owner of nrf_modem_gnss_agnss_expiry_get) and passed
+ * into loc_fsm_update and agnss_poll as data — the FSM stays a pure function
+ * and both consumers provably read the same numbers.
+ *
+ * Bit i-1 = GPS sv_id i. GPS (1..32) only: QZSS ephemerides no longer count
+ * toward held/visible (they did under the old per-frame scan) — QZSS is
+ * regional to Japan and has never been sighted by this tracker.
+ *
+ * held vs healthy: held = any validity left (enough for a hot start, even
+ * 10 min); healthy = at least TRACKER_AGNSS_MIN_LEFT_MIN (30) minutes left
+ * (worth counting when deciding whether to fetch). */
+struct ephe_inventory {
+	bool     valid;          /* at least one successful read since boot */
+	uint64_t held_mask;      /* any validity left (expiry > 0) */
+	uint64_t healthy_mask;   /* >= TRACKER_AGNSS_MIN_LEFT_MIN minutes left */
+	uint8_t  held;
+	uint8_t  healthy;
+	uint16_t min_expiry_min; /* min over held; 0 when none held */
+	uint32_t data_flags;     /* raw NRF_MODEM_GNSS_AGNSS_* request flags */
+};
+
 /* States are modes with distinct policy (is GNSS running? may we publish?
  * which source? what cadence?). Events like "got a fix" or "timed out" are
  * NOT states -- they are the labelled edges between states, carried by the
@@ -178,6 +205,14 @@ struct loc_status {
 	/* Publish cadence for the current state. */
 	uint32_t publish_interval_ms;
 
+	/* May agnss run a fetch exchange right now? True in the publishing
+	 * states (LTE is already awake for reports), and in GNSS_ACQUIRE while
+	 * the inventory cannot support a fix (healthy < SATS_FOR_FIX) — there
+	 * the ~1 KB fetch IS the fast path to having anything to acquire with,
+	 * pairing with the C2 escalation gate. Never in EXCLUSIVE (radio
+	 * silence is the point) or QUIESCENT (radio sleep is the point). */
+	bool agnss_fetch_allowed;
+
 	/* A fix newer than CONFIG_TRACKER_GPS_STALE_S. */
 	bool gps_current;
 
@@ -230,16 +265,19 @@ void loc_fsm_set_agnss_supply(bool available);
  * judging a frozen frame. Defaults false = legacy GPS-check behavior. */
 void loc_fsm_set_imu_wake(bool present);
 
-/* Feed one PVT frame (or a stale one, if GNSS produced no event) and get the
- * current policy back. Call at the PVT rate; it is cheap and has no side
- * effects beyond its own state. */
+/* Feed one PVT frame (or a stale one, if GNSS produced no event) plus the
+ * current ephemeris inventory, and get the policy back. Call at the PVT
+ * rate; it is cheap and — being a pure function of its inputs plus its own
+ * state — has no side effects and makes no modem calls. */
 void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
+		    const struct ephe_inventory *inv,
 		    int64_t now_ms, bool lte_registered, bool stationary,
 		    struct loc_status *out);
 
 /* Human-readable progress: which stage of the cold start we are at, plus C/N0
  * per satellite. Drive it from the status block, not the PVT rate. */
 void loc_fsm_log(const struct loc_status *st,
-		 const struct nrf_modem_gnss_pvt_data_frame *pvt);
+		 const struct nrf_modem_gnss_pvt_data_frame *pvt,
+		 const struct ephe_inventory *inv);
 
 #endif /* LOC_FSM_H__ */

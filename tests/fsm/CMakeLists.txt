@@ -10,9 +10,9 @@ project(loc_fsm_test)
 
 set(TRACKER_SRC ${CMAKE_CURRENT_SOURCE_DIR}/../../apps/tracker/src)
 
-# The unit under test is compiled in directly; the test's own main.c provides
-# the one modem call it makes (nrf_modem_gnss_agnss_expiry_get) as a
-# controllable fake, and ztest provides main().
+# The unit under test is compiled in directly. loc_fsm makes no modem calls
+# (the ephemeris inventory is a plain input, digested by gnss_ctrl in the
+# app); ztest provides main().
 target_sources(app PRIVATE
   src/main.c
   src/motion_test.c

@@ -52,7 +52,8 @@ static char device_id[HW_ID_LEN];
 
 /* ── status block ─────────────────────────────────────────────────  */
 static void print_status(const struct nrf_modem_gnss_pvt_data_frame *p,
-			 const struct loc_status *loc, int64_t uptime_ms,
+			 const struct loc_status *loc,
+			 const struct ephe_inventory *inv, int64_t uptime_ms,
 			 bool gnss_live)
 {
 	LOG_DBG("===== status @ %llds =====", (long long)(uptime_ms / 1000));
@@ -122,7 +123,7 @@ static void print_status(const struct nrf_modem_gnss_pvt_data_frame *p,
 			}
 		}
 	}
-	loc_fsm_log(loc, p);
+	loc_fsm_log(loc, p, inv);
 
 	int psm_tau_s, psm_active_s;
 
@@ -256,6 +257,12 @@ int main(void)
 		const struct nrf_modem_gnss_pvt_data_frame *pvt = gnss_ctrl_pvt();
 		int64_t now = k_uptime_get();
 
+		/* One inventory digest per pass; loc_fsm and agnss read the
+		 * same snapshot (the C2 gate and the fetch trigger must agree). */
+		gnss_ctrl_poll_inventory(now);
+
+		const struct ephe_inventory *inv = gnss_ctrl_inventory();
+
 		/* With GNSS stopped (PARKED in IMU mode, LTE_ATTACH) the pvt
 		 * buffer is a FROZEN copy of the last frame — often FIX_VALID
 		 * from the parking fix. Re-processing it every 2 s tick would
@@ -316,7 +323,7 @@ int main(void)
 		/* Policy first: it owns the fix-staleness and ephemeris bookkeeping.
 		 * The supply verdict gates the C2 escalation (see loc_fsm.h). */
 		loc_fsm_set_agnss_supply(agnss_supply_ok());
-		loc_fsm_update(gnss_live ? pvt : &quiet, now,
+		loc_fsm_update(gnss_live ? pvt : &quiet, inv, now,
 			       lte_ctrl_registered(), motion_stationary(now),
 			       &loc);
 		leds_update(&loc, lte_ctrl_registered());
@@ -409,7 +416,7 @@ int main(void)
 			? 60000 : STATUS_INTERVAL_MS;
 		if (now - last_status_ms >= status_ivl) {
 			last_status_ms = now;
-			print_status(pvt, &loc, now, gnss_live);
+			print_status(pvt, &loc, inv, now, gnss_live);
 			if (wake_pvts) {
 				/* UART-only prevalence stats (DBG never
 				 * ships): do ALL wakes carry the flag? */
@@ -480,9 +487,9 @@ int main(void)
 		(void)uplink_poll(now);
 
 		/* A-GNSS: opportunistic assistance fetch while the radio is
-		 * already ours (never during acquisition silence or parked
-		 * sleep — see agnss.c for the policy). */
-		agnss_poll(now, &loc);
+		 * already ours (the FSM's agnss_fetch_allowed verdict; fetch
+		 * execution and pacing live in agnss.c). */
+		agnss_poll(now, &loc, inv);
 	}
 
 	return 0;

@@ -4,6 +4,12 @@ Reviewed 2026-07-12 against the code as of `defcb04`. This table is the
 normative description of the GNSS/LTE arbitration; the ztest suite encodes it
 row by row. If code and table disagree, one of them is wrong — fix whichever.
 
+2026-07-16: the ephemeris inventory became an explicit input — `struct
+ephe_inventory` (loc_fsm.h), digested once per pass by gnss_ctrl from the
+modem's expiry report and passed into both `loc_fsm_update` and `agnss_poll`,
+so the C2 gate and the fetch trigger provably read the same snapshot. The FSM
+makes no modem calls.
+
 ## Evidence (inputs computed every 1 Hz tick)
 
 | Signal | Definition | Notes |
@@ -20,7 +26,9 @@ row by row. If code and table disagree, one of them is wrong — fix whichever.
 | `stationary` | motion.c verdict (GPS centroid / cell-set LRU / IMU interrupt) | an input, like `lte_registered`; consumed by PARKED. `motion_note_imu()` (any-motion interrupt) flips it false instantly through both dwell verdicts |
 | `acquire_failures` | consecutive ACQUIRE/EXCLUSIVE give-ups (timeout or sky-empty) since the last fix | SURVIVES state changes; reset by any fix, and by leaving PARKED on motion |
 | `agnss_supply` | main.c reports `agnss_supply_ok()` each pass: assistance compiled in, enabled, and not fetch-locked-out | an input, like `stationary`; defaults false (no supply). Goes false after 5 consecutive fetch failures (agnss lockout) and true again on the next success — the C2 gate inherits that hysteresis for free |
-| `cold` | `ephemeris_held < 4` (`SATS_FOR_FIX`) | the inventory cannot support ANY fix; distinct from `hotstart_dead` (visibility) |
+| `held` | inventory SVs with ANY ephemeris validity left (`ephe_inventory.held`) | enough for a hot start, even 10 min; GPS only |
+| `healthy` | inventory SVs with ≥ 30 min validity left (`ephe_inventory.healthy`, `TRACKER_AGNSS_MIN_LEFT_MIN`) | worth counting when deciding whether to fetch; drives the fetch trigger (< 8) and the ACQUIRE fetch unlock (< 4) |
+| `cold` | `held < 4` (`SATS_FOR_FIX`) | the inventory cannot support ANY fix; distinct from `hotstart_dead` (visibility) |
 | `imu_wake` | boot verdict: `imu_init()` succeeded (LIS3DH present and armed) | a MODE, not a per-tick signal (`loc_fsm_set_imu_wake`). Selects PARKED's policy; trusted absolutely — no runtime health checks (decided 2026-07-14) |
 | `parked_had_fix` | did PARKED get entered holding a fix? | internal flag selecting the legacy flavor (checks vs backoff); flips true if a check fixes. Meaningless in IMU mode |
 
@@ -133,6 +141,15 @@ the backoff cadence.
 
 \* gnss_mode is OFF whenever `!lte_registered`, except in EXCLUSIVE where
 being unregistered is deliberate — so GNSS is off while attaching.
+
+`agnss_fetch_allowed` (output, 2026-07-16 — moved here from agnss.c's
+private state-allowlist): true in REPORT_CELL / REPORT_GNSS / CELL_LOOP
+(publishing states — LTE is already awake), and in GNSS_ACQUIRE while
+`healthy < 4` (the fetch IS the fast path to having anything to acquire
+with, pairing with the C2 gate). Never in EXCLUSIVE (radio silence is the
+point) or QUIESCENT (radio sleep is the point). agnss_poll consumes it and
+keeps only fetch execution: enabled/pacing/lockout and the need verdict
+(`healthy < 8` or missing time/position).
 
 ## Findings
 

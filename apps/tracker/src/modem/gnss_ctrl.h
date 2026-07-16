@@ -47,4 +47,13 @@ void gnss_ctrl_mark_off(void);
  * the caller logs the edge.) */
 bool gnss_ctrl_blocked(void);
 
+/* Refresh the ephemeris-inventory digest (see struct ephe_inventory in
+ * loc_fsm.h). Call once per main-loop pass, before loc_fsm_update();
+ * internally rate-limited — the modem read does not change at 1 Hz. */
+void gnss_ctrl_poll_inventory(int64_t now_ms);
+
+/* The current digest. Stable between polls; valid=false until the first
+ * successful read. */
+const struct ephe_inventory *gnss_ctrl_inventory(void);
+
 #endif /* GNSS_CTRL_H__ */

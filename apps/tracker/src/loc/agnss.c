@@ -17,7 +17,6 @@ LOG_MODULE_REGISTER(agnss, CONFIG_TRACKER_LOG_LEVEL);
  * network: if RAI released the connection right after our request went out,
  * the ~1 KB response has to page us back — measured multi-second. */
 #define EXCHANGE_TIMEOUT_MS 8000
-#define NEED_CHECK_MS       30000
 #define RETRY_S             60
 /* Cold retry: with no fixable inventory the fetch IS the fast path to a
  * fix, and the RF changes second to second when moving — 60 s pacing gave
@@ -26,13 +25,7 @@ LOG_MODULE_REGISTER(agnss, CONFIG_TRACKER_LOG_LEVEL);
 #define LOCKOUT_S           900
 #define MAX_CONSEC_FAILS    5
 
-/* Below this many healthy ephemerides no fix is computable at all —
- * mirrors loc_fsm.c's SATS_FOR_FIX. "Cold" switches the retry pacing and
- * unlocks fetching from GNSS_ACQUIRE. */
-#define SATS_FOR_FIX        4
-
 static int64_t next_attempt_ms;
-static int64_t last_need_check_ms = -NEED_CHECK_MS;
 static bool    need;
 static uint32_t need_flags;
 static uint64_t need_mask;
@@ -47,7 +40,7 @@ static bool    exchange_failing;
  * the next successful exchange — the C2 gate (loc_fsm) errs toward "supply
  * alive" and demands positive proof of death. */
 static bool    locked_out;
-/* Fewer than SATS_FOR_FIX healthy ephemerides at the last need check. */
+/* Fewer than SATS_FOR_FIX healthy ephemerides in the last valid digest. */
 static bool    inventory_cold = true; /* boot = cold until proven otherwise */
 
 static const char *device_id_str;
@@ -77,43 +70,31 @@ void agnss_set_device_id(const char *id)
 	device_id_str = id;
 }
 
-/* Ask the modem what it is missing. "Thin" = fewer than MIN_HEALTHY GPS
- * satellites with at least MIN_LEFT_MIN of ephemeris left — the drive-gap
- * failure mode was a 4-5 SV inventory losing sight of one or two. */
-static void refresh_need(int64_t now_ms)
+/* What are we missing? "Thin" = fewer than MIN_HEALTHY GPS satellites with
+ * at least MIN_LEFT_MIN of ephemeris left — the drive-gap failure mode was
+ * a 4-5 SV inventory losing sight of one or two. Computed from the shared
+ * digest (gnss_ctrl owns the modem read); an invalid digest (no successful
+ * read yet) keeps the previous verdict, cold-at-boot included. */
+static void refresh_need(const struct ephe_inventory *inv)
 {
-	struct nrf_modem_gnss_agnss_expiry exp;
-
-	if (now_ms - last_need_check_ms < NEED_CHECK_MS) {
+	if (!inv->valid) {
 		return;
 	}
-	last_need_check_ms = now_ms;
 
-	if (nrf_modem_gnss_agnss_expiry_get(&exp) != 0) {
-		return; /* keep the previous verdict */
-	}
+	need_mask = inv->held_mask & ~inv->healthy_mask;
+	need_flags = inv->data_flags;
+	inventory_cold = inv->healthy < SATS_FOR_FIX;
 
-	int healthy = 0;
+	bool prev = need;
 
-	need_mask = 0;
-	for (int i = 0; i < exp.sv_count; i++) {
-		if (exp.sv[i].sv_id < 1 || exp.sv[i].sv_id > 32) {
-			continue; /* GPS only */
-		}
-		if (exp.sv[i].ephe_expiry >= CONFIG_TRACKER_AGNSS_MIN_LEFT_MIN) {
-			healthy++;
-		} else {
-			need_mask |= 1ULL << (exp.sv[i].sv_id - 1);
-		}
-	}
-	need_flags = exp.data_flags;
-	inventory_cold = healthy < SATS_FOR_FIX;
-	need = (healthy < CONFIG_TRACKER_AGNSS_MIN_HEALTHY) ||
-	       (exp.data_flags &
+	need = (inv->healthy < CONFIG_TRACKER_AGNSS_MIN_HEALTHY) ||
+	       (inv->data_flags &
 		(NRF_MODEM_GNSS_AGNSS_GPS_SYS_TIME_AND_SV_TOW_REQUEST |
 		 NRF_MODEM_GNSS_AGNSS_POSITION_REQUEST));
-	LOG_DBG("%d healthy SVs, flags 0x%02x -> %s", healthy,
-		exp.data_flags, need ? "want assistance" : "ok");
+	if (need != prev) { /* runs per pass now, not per 30 s: log the edge */
+		LOG_DBG("%d healthy SVs, flags 0x%02x -> %s", inv->healthy,
+			inv->data_flags, need ? "want assistance" : "ok");
+	}
 }
 
 /* Decode one AgnssEphemeris (streamed by nanopb) and hand it straight to the
@@ -241,26 +222,18 @@ bool agnss_supply_ok(void)
 	return agnss_enabled && !locked_out;
 }
 
-void agnss_poll(int64_t now_ms, const struct loc_status *loc)
+void agnss_poll(int64_t now_ms, const struct loc_status *loc,
+		const struct ephe_inventory *inv)
 {
-	/* Only when the radio is already ours to use: publishing states with
-	 * the socket up. EXCLUSIVE needs silence; QUIESCENT/REST need sleep —
-	 * both re-enter a publishing state before they could benefit.
-	 * ACQUIRE's radio quiet protects acquisition — moot when the
-	 * inventory cannot support one: LTE is up there anyway, and the
-	 * fetch IS the fast path to having anything to acquire with (this
-	 * pairs with the FSM's C2 cold-with-supply gate holding us here). */
-	bool allowed = ((loc->state == LOC_REPORT_CELL ||
-			 loc->state == LOC_REPORT_GNSS ||
-			 loc->state == LOC_CELL_LOOP) &&
-			loc->publish_allowed) ||
-		       (loc->state == LOC_GNSS_ACQUIRE && inventory_cold);
-
-	if (!agnss_enabled || !allowed || !coap_pub_ready() ||
+	/* The FSM owns the radio-policy half of this decision (see
+	 * loc_status.agnss_fetch_allowed); what remains here is fetch
+	 * execution: enabled, socket up, pacing, and whether the inventory
+	 * actually needs anything. */
+	if (!agnss_enabled || !loc->agnss_fetch_allowed || !coap_pub_ready() ||
 	    now_ms < next_attempt_ms) {
 		return;
 	}
-	refresh_need(now_ms);
+	refresh_need(inv);
 	if (!need) {
 		return;
 	}
@@ -277,8 +250,8 @@ void agnss_poll(int64_t now_ms, const struct loc_status *loc)
 		}
 		locked_out = false;
 		consec_fails = 0;
-		need = false;
-		last_need_check_ms = now_ms; /* re-evaluate in NEED_CHECK_MS */
+		/* need self-corrects: the injection lands in the next digest
+		 * (~5 s), and the cooldown dwarfs that window. */
 		next_attempt_ms = now_ms +
 			(int64_t)CONFIG_TRACKER_AGNSS_COOLDOWN_S * 1000;
 	} else if (!exchange_failing) {
