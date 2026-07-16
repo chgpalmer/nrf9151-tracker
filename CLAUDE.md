@@ -63,7 +63,9 @@ module pins have no wheels for newer Pythons; 26.04 breaks `make setup-zephyr`).
   cadence): parked ≈ 0.15–0.75 MB/mo vs 7.4 MB before. PENDING FIELD
   VERIFICATION: park ≥5 min → flush cadence drops & cell fixes stop; carry
   away → track resumes within ~2 min; overnight indoors → heartbeats only,
-  no churn logs. Board must be REFLASHED to get this + the F-1 fix.
+  no churn logs. Board reflashed 2026-07-16 (main @ 6b6a84c: arch-review
+  F1/F4/F5 refactors + single-owner ephemeris inventory, C2 gate on
+  `healthy`; moved log lines now ship module "lte"/"gnss", not "tracker").
 - Phase 2 (specced, queued): flash flight recorder + obs spill on the DK's
   32 MB NOR, epoch timestamps, log byte-budget backstop.
 - A-GNSS LIVE: server pulls IGS broadcast ephemeris (BKG BRDC00WRD_S, free
