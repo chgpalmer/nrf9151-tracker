@@ -27,6 +27,15 @@ LOG_MODULE_REGISTER(agnss, CONFIG_TRACKER_LOG_LEVEL);
 
 static int64_t next_attempt_ms;
 static bool    need;
+/* Did the need include EPHEMERIDES (vs time/position only)? A response
+ * without orbits when orbits were wanted is a failed fetch, whatever else
+ * it carried — field 2026-07-16: the server's own supply had dried up and
+ * "time+location, 0 ephemerides" counted as success, buying a 30 min
+ * cooldown while the device demodulated at 50 bps mid-ride. Failing it
+ * instead rides the normal retry/lockout path, so a starved supply flips
+ * agnss_supply_ok() false and the C2 gate re-opens the radio-dark
+ * fallback within ~2 min. */
+static bool    need_ephe;
 static uint32_t need_flags;
 static uint64_t need_mask;
 static uint8_t consec_fails;
@@ -87,7 +96,8 @@ static void refresh_need(const struct ephe_inventory *inv)
 
 	bool prev = need;
 
-	need = (inv->healthy < CONFIG_TRACKER_AGNSS_MIN_HEALTHY) ||
+	need_ephe = inv->healthy < CONFIG_TRACKER_AGNSS_MIN_HEALTHY;
+	need = need_ephe ||
 	       (inv->data_flags &
 		(NRF_MODEM_GNSS_AGNSS_GPS_SYS_TIME_AND_SV_TOW_REQUEST |
 		 NRF_MODEM_GNSS_AGNSS_POSITION_REQUEST));
@@ -186,6 +196,11 @@ static int inject(const uint8_t *payload, size_t len)
 	LOG_INF("injected%s%s %d ephemerides (%d rejected)",
 		time_ok ? " time" : "", loc_ok ? " location" : "",
 		count.written, count.failed);
+	/* Orbits wanted but none arrived = a dry supply, not a success —
+	 * whatever else the response carried (see need_ephe). */
+	if (need_ephe && count.written == 0) {
+		return -ENODATA;
+	}
 	return (count.written > 0 || time_ok) ? 0 : -ENODATA;
 }
 
