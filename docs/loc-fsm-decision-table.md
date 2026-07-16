@@ -133,7 +133,7 @@ the backoff cadence.
 | REPORT_CELL | CONT | yes | yes | yes | 1 s |
 | GNSS_ACQUIRE | CONT | yes | **no** | — | — |
 | GNSS_EXCLUSIVE | CONT | **no** | **no** | — | — |
-| REPORT_GNSS | CONT | yes | yes | only if fix stale | 1 s |
+| REPORT_GNSS | CONT | yes | yes | only if fix stale | 1 s (cell @ 30 s while fix stale — 2026-07-16: 1 Hz stale-fix cells each urgent-flushed = one 41 B datagram + radio wake per second, unbounded) |
 | CELL_LOOP | CONT | yes | yes | yes | 30 s |
 | QUIESCENT (IMU mode) | **OFF** | yes | yes | yes (after 30 s staleness) | heartbeat interval |
 | QUIESCENT (legacy, had_fix) | PERIODIC(check) | yes | yes | no (yes if stale) | check interval |

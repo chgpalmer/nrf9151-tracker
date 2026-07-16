@@ -516,10 +516,17 @@ ZTEST(loc_fsm, test_e3_stale_but_hotstart_viable_waits)
 	}
 	zassert_false(st.gps_current, "fix should be stale by now");
 	zassert_true(st.prefer_cell, "stale fix must fall back to cell");
+	/* ...and at the CELL cadence: 1 Hz stale-fix cells each rode an
+	 * urgent flush — one 41 B datagram + radio wake per second,
+	 * unbounded (bench, 2026-07-16). */
+	zassert_equal(st.publish_interval_ms, (uint32_t)CELL_POST_MS,
+		      "stale-fix cells go at the cell cadence");
 	/* The awaited re-fix arrives: still REPORT_GNSS, GPS preferred again. */
 	st = step(true, 4, OBSERVED);
 	ASSERT_STATE(st, LOC_REPORT_GNSS);
 	zassert_false(st.prefer_cell, "current fix must prefer GPS");
+	zassert_equal(st.publish_interval_ms, (uint32_t)POST_MS,
+		      "re-fix restores the 1 Hz GPS cadence");
 }
 
 /* F-1 regression: a current fix with ephemeris about to expire must STAY in

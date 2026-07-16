@@ -482,6 +482,14 @@ void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 			      !imu_wake)) || !out->gps_current;
 	out->publish_interval_ms =
 		(state == LOC_CELL_LOOP)  ? CELL_POST_MS :
+		/* REPORT_GNSS riding out a stale fix publishes CELLS — at the
+		 * cell cadence, not the 1 Hz GPS one: every queued cell urgent-
+		 * flushes, so 1 Hz meant a 41 B datagram + radio wake per
+		 * second, unbounded (bench, 2026-07-16 — a tunnel would bleed
+		 * for its whole length). REPORT_CELL stays 1 Hz on purpose:
+		 * it exits on the first confirmed send (bounded), and that
+		 * retry rate is the boot-to-map latency. */
+		(state == LOC_REPORT_GNSS && out->prefer_cell) ? CELL_POST_MS :
 		(state != LOC_QUIESCENT)     ? POST_MS :
 		(parked_had_fix && !imu_wake)
 			? (uint32_t)CONFIG_TRACKER_QUIESCENT_CHECK_S * 1000
