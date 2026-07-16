@@ -28,7 +28,7 @@ makes no modem calls.
 | `agnss_supply` | main.c reports `agnss_supply_ok()` each pass: assistance compiled in, enabled, and not fetch-locked-out | an input, like `stationary`; defaults false (no supply). Goes false after 5 consecutive fetch failures (agnss lockout) and true again on the next success — the C2 gate inherits that hysteresis for free |
 | `held` | inventory SVs with ANY ephemeris validity left (`ephe_inventory.held`) | enough for a hot start, even 10 min; GPS only |
 | `healthy` | inventory SVs with ≥ 30 min validity left (`ephe_inventory.healthy`, `TRACKER_AGNSS_MIN_LEFT_MIN`) | worth counting when deciding whether to fetch; drives the fetch trigger (< 8) and the ACQUIRE fetch unlock (< 4) |
-| `cold` | `held < 4` (`SATS_FOR_FIX`) | the inventory cannot support ANY fix; distinct from `hotstart_dead` (visibility) |
+| `cold` | `healthy < 4` (`SATS_FOR_FIX`) | the inventory cannot support a fix worth going dark for. Judged on `healthy`, not `held` (changed 2026-07-16): held ephemerides may belong to satellites that set hours ago or expire mid-hunt, and the gate must not bless a radio-dark hunt on such stock while a live supply could replace it — same verdict the fetch trigger uses, same snapshot. Distinct from `hotstart_dead` (visibility) |
 | `imu_wake` | boot verdict: `imu_init()` succeeded (LIS3DH present and armed) | a MODE, not a per-tick signal (`loc_fsm_set_imu_wake`). Selects PARKED's policy; trusted absolutely — no runtime health checks (decided 2026-07-14) |
 | `parked_had_fix` | did PARKED get entered holding a fix? | internal flag selecting the legacy flavor (checks vs backoff); flips true if a check fixes. Meaningless in IMU mode |
 

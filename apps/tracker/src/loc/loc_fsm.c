@@ -285,8 +285,7 @@ void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 		if (fix) {
 			next_state(LOC_REPORT_GNSS, now_ms, "fix acquired");
 		} else if (lte_chops_gnss && !stationary &&
-			   !(agnss_supply &&
-			     out->ephemeris_held < SATS_FOR_FIX)) {
+			   !(agnss_supply && inv->healthy < SATS_FOR_FIX)) {
 			/* Registered-but-silent isn't enough here: idle DRX or
 			 * coverage-edge reselection is slicing GNSS. Take the
 			 * radio outright; the re-attach is paid post-fix.
@@ -300,12 +299,19 @@ void loc_fsm_update(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 			 * line, and going dark trades a seconds fetch for
 			 * minutes of 50 bps demodulation — twice measured at
 			 * 10-11 min blind (2026-07-12 ride, 2026-07-13
-			 * commute). Cold-with-supply holds here: LTE stays
-			 * up, agnss_poll retries on its cold cadence, and
-			 * the acquire-timeout exit still bounds the stay.
-			 * The supply verdict goes false after repeated fetch
-			 * failures (lockout), which re-opens this gate — the
-			 * genuine no-server fallback is preserved. */
+			 * commute). "Cannot support a fix" is judged on
+			 * HEALTHY (>= 30 min left), not held: held counts
+			 * ephemerides whose satellites may have set hours
+			 * ago or die mid-hunt — the gate must not bless a
+			 * radio-dark hunt on stock like that while one fetch
+			 * would replace it (same verdict the fetch trigger
+			 * uses, same snapshot). Cold-with-supply holds here:
+			 * LTE stays up, agnss_poll retries on its cold
+			 * cadence, and the acquire-timeout exit still bounds
+			 * the stay. The supply verdict goes false after
+			 * repeated fetch failures (lockout), which re-opens
+			 * this gate — the genuine no-server fallback is
+			 * preserved. */
 			next_state(LOC_GNSS_EXCLUSIVE, now_ms, "LTE chops GNSS");
 		} else if (in_state > ACQUIRE_CAP_MS) {
 			if (acquire_failures < UINT8_MAX) {

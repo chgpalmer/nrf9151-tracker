@@ -277,9 +277,9 @@ ZTEST(loc_fsm, test_c2_cold_with_supply_never_goes_dark)
 	ASSERT_STATE(step(false, 1, CHOPPED), LOC_CELL_LOOP);
 }
 
-/* A warm inventory (>= SATS_FOR_FIX ephemerides held) escalates as before:
- * the chop is then genuinely blocking tracking of usable satellites, and
- * radio silence is the correct cure. */
+/* A warm inventory (>= SATS_FOR_FIX HEALTHY ephemerides) escalates as
+ * before: the chop is then genuinely blocking tracking of usable
+ * satellites, and radio silence is the correct cure. */
 ZTEST(loc_fsm, test_c2_warm_inventory_still_escalates)
 {
 	loc_fsm_set_agnss_supply(true);
@@ -306,19 +306,21 @@ ZTEST(loc_fsm, test_c2_supply_lost_restores_escalation)
 }
 
 /* The definitions row: an AGING inventory — plenty held, nothing healthy
- * (all under the 30 min floor). The C2 gate keys on `held`, so with the
- * supply alive it still escalates; `healthy` says the fetch was warranted.
- * This is the held/healthy divergence band made explicit — the gate flip
- * (commit 2 of the inventory refactor) changes this row to hold in ACQUIRE. */
-ZTEST(loc_fsm, test_c2_aging_inventory)
+ * (all under the 30 min floor). The C2 gate judges "cannot support a fix"
+ * on HEALTHY: held ephemerides may belong to satellites that set hours ago
+ * or die mid-hunt, so with the supply alive the gate holds and lets the
+ * fetch replace the stock; going dark would sever exactly that. The C3
+ * timeout still bounds the stay. */
+ZTEST(loc_fsm, test_c2_aging_inventory_holds_for_supply)
 {
 	loc_fsm_set_agnss_supply(true);
 	set_ephe(6, 10); /* held=6, healthy=0 */
 	to_acquire();
-	for (int i = 0; i < CHOPPED_EPOCHS - 1; i++) {
+	for (int i = 0; i < 3 * CHOPPED_EPOCHS; i++) {
 		ASSERT_STATE(step(false, 0, CHOPPED), LOC_GNSS_ACQUIRE);
 	}
-	ASSERT_STATE(step(false, 0, CHOPPED), LOC_GNSS_EXCLUSIVE);
+	t += ACQUIRE_CAP_MS;
+	ASSERT_STATE(step(false, 1, CHOPPED), LOC_CELL_LOOP);
 }
 
 /* agnss_fetch_allowed: the radio-policy half of the fetch decision, per
