@@ -6,6 +6,14 @@
 
 LOG_MODULE_REGISTER(imu, CONFIG_TRACKER_LOG_LEVEL);
 
+/* Runs in trigger context on every any-motion interrupt; see imu.h. */
+static void (*motion_hook)(void);
+
+void imu_on_motion(void (*cb)(void))
+{
+	motion_hook = cb;
+}
+
 #if DT_HAS_COMPAT_STATUS_OKAY(st_lis2dh)
 
 #include <zephyr/device.h>
@@ -14,7 +22,6 @@ LOG_MODULE_REGISTER(imu, CONFIG_TRACKER_LOG_LEVEL);
 #include <zephyr/shell/shell.h>
 #include <stdlib.h>
 #include <string.h>
-#include "leds.h"
 
 /* Wake threshold on HP-FILTERED acceleration (gravity already removed):
  * dynamic movement in any direction, at any orientation. ~0.8 m/s² fires
@@ -37,7 +44,9 @@ static void motion_trigger(const struct device *dev,
 	ARG_UNUSED(trig);
 	atomic_set(&kick, 1);
 	atomic_inc(&event_count);
-	leds_imu_pulse(); /* instant bench feedback, straight from the trigger */
+	if (motion_hook) {
+		motion_hook(); /* instant bench feedback, straight from the trigger */
+	}
 }
 
 static int set_threshold(int32_t val1, int32_t val2)
@@ -171,6 +180,9 @@ bool imu_take_motion(void)
 	if ((now - last_kick_ms) >= (int64_t)kick_s * 1000) {
 		last_kick_ms = now;
 		LOG_INF("sim: IMU kick");
+		if (motion_hook) {
+			motion_hook();
+		}
 		return true;
 	}
 	return false;

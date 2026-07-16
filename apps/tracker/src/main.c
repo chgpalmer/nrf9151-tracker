@@ -18,15 +18,16 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <nrf_modem_gnss.h>
-#include <nrf_modem_at.h>
 #include <modem/nrf_modem_lib.h>
-#include <modem/lte_lc.h>
 #include <hw_id.h>
 
 #include "loc_fsm.h"
 #include "motion.h"
 #include "imu.h"
 #include "agnss.h"
+#include "cell_info.h"
+#include "gnss_ctrl.h"
+#include "lte_ctrl.h"
 #include "coap_pub.h"
 #include "obs_queue.h"
 #include "event_queue.h"
@@ -40,322 +41,14 @@ LOG_MODULE_REGISTER(tracker, CONFIG_TRACKER_LOG_LEVEL);
 #define SERVER_HOST       CONFIG_TRACKER_SERVER_HOST
 #define SERVER_PORT       CONFIG_TRACKER_SERVER_PORT
 
-#define GNSS_INTERVAL_S   1   /* PVT event rate in continuous mode */
-/* In periodic mode, how long each check may hunt before giving up and
- * sleeping. Bounds the awake time (the whole point of periodic mode); a hot
- * start needs 1-3 s, so 30 s also covers a warm start without burning
- * minutes indoors where no fix is coming. */
-#define GNSS_CHECK_RETRY_S 30
 #define POST_INTERVAL_MS  (CONFIG_TRACKER_POST_INTERVAL_S * 1000)
 #define STATUS_INTERVAL_MS 5000
 /* GPS staleness now lives in loc_fsm, which owns the fix bookkeeping. */
 #define NET_RETRY_MS      10000  /* between socket-setup attempts */
 /* Flush cadence and all other send policy live in uplink now. */
 
-/* RSRP index → dBm (same formula as modem_info.h RSRP_IDX_TO_DBM). */
-#define RSRP_IDX_TO_DBM(idx) ((idx) < 0 ? (idx) - 140 : (idx) - 141)
-
-/* Serving-cell identity, parsed from AT%XMONITOR (cached registration data —
- * no radio scan). Enough for an OpenCelliD single-cell lookup. */
-struct serving_cell {
-	int      mcc;
-	int      mnc;
-	uint32_t tac;
-	uint32_t cid;
-	int      rsrp_dbm;
-	int      act;  /* 3GPP AcT: 7 = LTE-M, 9 = NB-IoT */
-	int      band;
-	char     op[32];
-	bool     valid;
-};
-
 /* ── state ───────────────────────────────────────────────────────── */
-static struct nrf_modem_gnss_pvt_data_frame pvt;
-static K_SEM_DEFINE(pvt_sem, 0, 1);
-
-static enum lte_lc_nw_reg_status lte_status = LTE_LC_NW_REG_NOT_REGISTERED;
-/* Set from the LTE callback thread, polled by the main loop. */
-static volatile bool lte_connected;
-
-/* Registration (lte_connected) is NOT the same as having an active default
- * PDN with an assigned IP; sockets and DNS only work once the PDN is up, so
- * socket setup gates on this. On native_sim CONFIG_LTE_LC_PDN_MODULE is off
- * (host sockets are always up), so default to true there. */
-#if defined(CONFIG_LTE_LC_PDN_MODULE)
-static volatile bool pdn_active;
-#else
-static volatile bool pdn_active = true;
-#endif
-
-/* GNSS only runs when LTE leaves the radio alone, so the two facts that explain
- * a starved GNSS are whether we are stuck in RRC connected and whether the
- * network actually granted PSM. Both are set from the LTE callback thread. */
-static volatile bool rrc_connected;
-static volatile int  psm_tau_s    = -1;
-static volatile int  psm_active_s = -1; /* -1 = PSM not granted */
-
-/* When the last publish went out. The LTE handler uses it to log how long RRC
- * stayed connected after we finished sending -- the tail RAI should shrink. */
-static volatile int64_t last_pub_ms;
-
 static char device_id[HW_ID_LEN];
-
-/* ── GNSS ─────────────────────────────────────────────────────────  */
-/* Set by EVT_BLOCKED/UNBLOCKED; the handler runs in ISR context, so it only
- * flags the change and the main loop logs the edge. */
-static volatile bool gnss_blocked;
-
-/* Registration was lost: the main loop asks the modem WHY (AT+CEER, the last
- * EMM/ESM failure cause) — one line per loss, the difference between "it
- * dropped" and "the network rejected TAU with cause 15". Set in the LTE
- * callback, consumed in the loop (AT commands don't belong in callbacks). */
-static volatile bool want_ceer;
-
-static void gnss_handler(int event)
-{
-	switch (event) {
-	case NRF_MODEM_GNSS_EVT_PVT:
-		if (nrf_modem_gnss_read(&pvt, sizeof(pvt),
-					NRF_MODEM_GNSS_DATA_PVT) == 0) {
-			k_sem_give(&pvt_sem);
-		}
-		break;
-	case NRF_MODEM_GNSS_EVT_BLOCKED:
-		gnss_blocked = true;
-		break;
-	case NRF_MODEM_GNSS_EVT_UNBLOCKED:
-		gnss_blocked = false;
-		break;
-	default:
-		break;
-	}
-}
-
-/* Set up GNSS without starting it: loc_fsm decides when it may run. */
-static int gnss_configure(void)
-{
-	int err;
-
-	err = nrf_modem_gnss_event_handler_set(gnss_handler);
-	if (err) {
-		LOG_ERR("gnss event handler: %d", err);
-		return err;
-	}
-
-	uint16_t nmea_mask = 0; /* no NMEA — we use PVT only */
-	nrf_modem_gnss_nmea_mask_set(nmea_mask);
-
-	nrf_modem_gnss_fix_interval_set(GNSS_INTERVAL_S);
-	nrf_modem_gnss_fix_retry_set(0); /* run continuously */
-
-	uint8_t use_case = NRF_MODEM_GNSS_USE_CASE_MULTIPLE_HOT_START;
-	nrf_modem_gnss_use_case_set(use_case);
-
-	return 0;
-}
-
-static int gnss_start(void)
-{
-	int err = nrf_modem_gnss_start();
-
-	if (err) {
-		LOG_ERR("gnss start: %d", err);
-	}
-	return err;
-}
-
-/* ── LTE ──────────────────────────────────────────────────────────  */
-static void lte_handler(const struct lte_lc_evt *const evt)
-{
-	switch (evt->type) {
-	case LTE_LC_EVT_NW_REG_STATUS: {
-		/* The searching EDGE splits the attach time: boot->searching is
-		 * modem init, searching->registered is scan + PLMN walk +
-		 * registration — the part band memory can shrink. One INF per
-		 * episode. */
-		static enum lte_lc_nw_reg_status prev_status =
-			LTE_LC_NW_REG_NOT_REGISTERED;
-
-		if (evt->nw_reg_status == LTE_LC_NW_REG_SEARCHING &&
-		    prev_status != LTE_LC_NW_REG_SEARCHING) {
-			LOG_INF("LTE: searching");
-		}
-		prev_status = evt->nw_reg_status;
-		lte_status = evt->nw_reg_status;
-		if (lte_status == LTE_LC_NW_REG_REGISTERED_HOME ||
-		    lte_status == LTE_LC_NW_REG_REGISTERED_ROAMING) {
-			LOG_INF("LTE registered (%s)",
-				lte_status == LTE_LC_NW_REG_REGISTERED_ROAMING
-					? "roaming" : "home");
-			lte_connected = true;
-		} else {
-			if (lte_connected) {
-				want_ceer = true; /* registered -> lost: ask why */
-			}
-			lte_connected = false;
-		}
-		break;
-	}
-	case LTE_LC_EVT_PSM_UPDATE:
-		/* active_time == -1 means the network refused PSM. Roaming networks
-		 * often do. Without PSM the modem keeps monitoring pagings and GNSS
-		 * never gets a long enough window for a cold start. Log at INF: this
-		 * was LOG_DBG and therefore invisible at CONFIG_TRACKER_LOG_LEVEL=3. */
-		psm_tau_s    = evt->psm_cfg.tau;
-		psm_active_s = evt->psm_cfg.active_time;
-		if (psm_active_s < 0) {
-			LOG_WRN("PSM: NOT granted by network (TAU %d)", psm_tau_s);
-		} else {
-			LOG_INF("PSM: granted — TAU %d s, active %d s",
-				psm_tau_s, psm_active_s);
-		}
-		break;
-#if defined(CONFIG_LTE_LC_PDN_MODULE)
-	case LTE_LC_EVT_PDN:
-		/* Default-context (CID 0) activation is when we actually have
-		 * an IP and sockets can be created. */
-		if (evt->pdn.cid == 0) {
-			if (evt->pdn.type == LTE_LC_EVT_PDN_ACTIVATED) {
-				pdn_active = true;
-				LOG_INF("PDN: default context active (IP up)");
-			} else if (evt->pdn.type == LTE_LC_EVT_PDN_DEACTIVATED) {
-				pdn_active = false;
-				LOG_WRN("PDN: default context down");
-			}
-		}
-		break;
-#endif
-	case LTE_LC_EVT_MODEM_EVENT: {
-		/* The modem narrating its own radio work — the observability
-		 * for "what is searching actually doing". Search-phase events
-		 * are sparse (one per search cycle); CE level shifts with
-		 * coverage and stays at DBG. */
-		switch (evt->modem_evt.type) {
-		case LTE_LC_MODEM_EVT_LIGHT_SEARCH_DONE:
-			LOG_INF("modem: light search done (no cell found yet)");
-			break;
-		case LTE_LC_MODEM_EVT_SEARCH_DONE:
-			LOG_DBG("modem: full search done");
-			break;
-		case LTE_LC_MODEM_EVT_RESET_LOOP:
-			LOG_WRN("modem: RESET LOOP restriction");
-			break;
-		case LTE_LC_MODEM_EVT_CE_LEVEL:
-			LOG_DBG("modem: CE level %d", evt->modem_evt.ce_level);
-			break;
-		default:
-			LOG_INF("modem: event %d", evt->modem_evt.type);
-			break;
-		}
-		break;
-	}
-	case LTE_LC_EVT_RRC_UPDATE:
-		rrc_connected = (evt->rrc_mode == LTE_LC_RRC_MODE_CONNECTED);
-		if (rrc_connected) {
-			LOG_DBG("RRC: connected (GNSS blocked)");
-		} else {
-			/* The tail between our last publish and RRC release is
-			 * radio time GNSS cannot use. RAI exists to shrink it;
-			 * this delta is the measurement of whether it works. */
-			int64_t tail = k_uptime_get() - last_pub_ms;
-
-			if (last_pub_ms > 0 && tail < 30000) {
-				LOG_DBG("RRC: idle (%lld ms after publish)",
-					(long long)tail);
-			} else {
-				LOG_DBG("RRC: idle");
-			}
-		}
-		break;
-	default:
-		break;
-	}
-}
-
-static const char *lte_status_str(void)
-{
-	switch (lte_status) {
-	case LTE_LC_NW_REG_NOT_REGISTERED:       return "not registered";
-	case LTE_LC_NW_REG_REGISTERED_HOME:      return "registered (home)";
-	case LTE_LC_NW_REG_SEARCHING:            return "searching";
-	case LTE_LC_NW_REG_REGISTRATION_DENIED:  return "denied";
-	case LTE_LC_NW_REG_UNKNOWN:              return "no coverage";
-	case LTE_LC_NW_REG_REGISTERED_ROAMING:   return "registered (roaming)";
-	default:                                  return "?";
-	}
-}
-
-/* ── cell identity (AT%XMONITOR) ─────────────────────────────────  */
-/* Helper: extract the next comma-delimited XMONITOR field, stripping the
- * surrounding quotes if present. Returns the token or NULL. Uses strtok state. */
-static char *xmon_field(char *first)
-{
-	char *f = strtok(first, ",");
-
-	if (f && f[0] == '"') {
-		f++;
-		char *e = strchr(f, '"');
-
-		if (e) {
-			*e = '\0';
-		}
-	}
-	return f;
-}
-
-/* Read the serving cell from AT%XMONITOR (cached — no radio scan). Fills sc.
- * XMONITOR: <reg>,"<long>","<short>","<plmn>","<tac>",<AcT>,<band>,
- *           "<cell_id>",<phys_cell_id>,<EARFCN>,<rsrp>,<snr>,...
- * PLMN is "MCCMNC" (MCC=first 3 digits); TAC and cell-id are hex strings. */
-static int read_serving_cell(struct serving_cell *sc)
-{
-	char at_resp[256];
-
-	memset(sc, 0, sizeof(*sc));
-
-	if (nrf_modem_at_cmd(at_resp, sizeof(at_resp), "AT%%XMONITOR") != 0) {
-		return -EIO;
-	}
-
-	char *cp = strchr(at_resp, ':');
-
-	if (!cp) {
-		return -EINVAL;
-	}
-	cp++;
-
-	xmon_field(cp);                    /* 1: reg status */
-	char *longn = xmon_field(NULL);    /* 2: long name  */
-	xmon_field(NULL);                  /* 3: short name */
-	char *plmn = xmon_field(NULL);     /* 4: plmn "MCCMNC" */
-	char *tac  = xmon_field(NULL);     /* 5: tac (hex)  */
-	char *act  = xmon_field(NULL);     /* 6: AcT (7=LTE-M, 9=NB-IoT) */
-	char *band = xmon_field(NULL);     /* 7: band       */
-	char *cid  = xmon_field(NULL);     /* 8: cell id (hex) */
-	xmon_field(NULL);                  /* 9: phys cell  */
-	xmon_field(NULL);                  /* 10: EARFCN    */
-	char *rsrp = strtok(NULL, ",\r\n");/* 11: rsrp idx  */
-
-	if (!plmn || strlen(plmn) < 5 || !tac || !cid) {
-		return -ENODATA;
-	}
-
-	/* Split PLMN: MCC = first 3 chars, MNC = the rest (2 or 3 digits). */
-	char mcc_buf[4] = { plmn[0], plmn[1], plmn[2], '\0' };
-
-	sc->mcc = atoi(mcc_buf);
-	sc->mnc = atoi(plmn + 3);
-	sc->tac = strtoul(tac, NULL, 16);
-	sc->cid = strtoul(cid, NULL, 16);
-	sc->act = act ? atoi(act) : 0;
-	sc->band = band ? atoi(band) : 0;
-	sc->rsrp_dbm = rsrp ? RSRP_IDX_TO_DBM(atoi(rsrp)) : 0;
-	if (longn) {
-		strncpy(sc->op, longn, sizeof(sc->op) - 1);
-	}
-	sc->valid = true;
-	return 0;
-}
 
 /* ── status block ─────────────────────────────────────────────────  */
 static void print_status(const struct nrf_modem_gnss_pvt_data_frame *p,
@@ -368,11 +61,12 @@ static void print_status(const struct nrf_modem_gnss_pvt_data_frame *p,
 	 * AT%XMONITOR read used for the cell-location fallback). */
 	struct serving_cell sc;
 
-	if (read_serving_cell(&sc) == 0 && sc.valid) {
+	if (cell_info_read(&sc) == 0 && sc.valid) {
 		LOG_DBG("LTE:  %s | op %s | band %d | cell %u | RSRP %d dBm",
-			lte_status_str(), sc.op, sc.band, sc.cid, sc.rsrp_dbm);
+			lte_ctrl_status_str(), sc.op, sc.band, sc.cid,
+			sc.rsrp_dbm);
 	} else {
-		LOG_DBG("LTE:  %s", lte_status_str());
+		LOG_DBG("LTE:  %s", lte_ctrl_status_str());
 	}
 
 	/* GNSS status. With the receiver stopped, the pvt buffer is a frozen
@@ -430,113 +124,23 @@ static void print_status(const struct nrf_modem_gnss_pvt_data_frame *p,
 	}
 	loc_fsm_log(loc, p);
 
+	int psm_tau_s, psm_active_s;
+
+	lte_ctrl_psm(&psm_tau_s, &psm_active_s);
 	if (psm_active_s < 0) {
 		LOG_DBG("LTE:  RRC %s | PSM not granted",
-			rrc_connected ? "connected" : "idle");
+			lte_ctrl_rrc_connected() ? "connected" : "idle");
 	} else {
 		LOG_DBG("LTE:  RRC %s | PSM TAU %ds active %ds",
-			rrc_connected ? "connected" : "idle",
+			lte_ctrl_rrc_connected() ? "connected" : "idle",
 			psm_tau_s, psm_active_s);
 	}
 
 	/* PDN state next to socket state, so a "no socket" that is really
 	 * "PDN not up yet" is obvious in the log. */
 	LOG_DBG("net:  %s | pdn %s", coap_pub_ready() ? "ready" : "no socket",
-		pdn_active ? "active" : "down");
+		lte_ctrl_pdn_active() ? "active" : "down");
 }
-
-#if defined(CONFIG_NRF_MODEM_LIB)
-#include <modem/at_monitor.h>
-
-/* SIM readiness timing: "%XSIM: 1" marks the UICC initialized. Whether it
- * lands at +5 s or +60 s decides if the boot-attach gap is the SIM applet
- * (nothing we can do) or the modem's search scheduling (tunable below). */
-static void xsim_handler(const char *notif)
-{
-	char buf[32];
-
-	strncpy(buf, notif, sizeof(buf) - 1);
-	buf[sizeof(buf) - 1] = '\0';
-	buf[strcspn(buf, "\r\n")] = '\0';
-	LOG_INF("SIM: %s", buf);
-}
-AT_MONITOR(xsim_monitor, "%XSIM", xsim_handler);
-
-/* Front-load search attempts when unregistered: the default scheduling let
- * the modem idle ~60 s between a failed +9 s boot light search and the full
- * search that then succeeded in 6 s (measured 2026-07-12). Retry at 5 s,
- * then 10/20/40, then loop every 60 s — worst case a handful of extra scans
- * per outage, each seconds long. Written to modem NVM; `fastsearch off`
- * clears back to modem defaults. */
-static void fast_search_configure(void)
-{
-	struct lte_lc_periodic_search_cfg cfg = {
-		.loop = true,
-		.return_to_pattern = 0,
-		.band_optimization = 1,
-		.pattern_count = 1,
-		.patterns = { {
-			.type = LTE_LC_PERIODIC_SEARCH_PATTERN_TABLE,
-			.table = { .val_1 = 5, .val_2 = 10, .val_3 = 20,
-				   .val_4 = 40, .val_5 = 60 },
-		} },
-	};
-	int err = lte_lc_periodic_search_set(&cfg);
-
-	if (err) {
-		LOG_WRN("LTE: fast search pattern rejected (%d)", err);
-	} else {
-		LOG_INF("LTE: fast search pattern set");
-	}
-}
-
-#if defined(CONFIG_SHELL)
-#include <zephyr/shell/shell.h>
-
-static int cmd_fastsearch(const struct shell *sh, size_t argc, char **argv)
-{
-	if (argc == 2 && strcmp(argv[1], "off") == 0) {
-		shell_print(sh, "clear: %d (reboot re-applies unless rebuilt)",
-			    lte_lc_periodic_search_clear());
-	} else if (argc == 2 && strcmp(argv[1], "on") == 0) {
-		fast_search_configure();
-		shell_print(sh, "set");
-	}
-	return 0;
-}
-SHELL_CMD_ARG_REGISTER(fastsearch, NULL,
-		       "Aggressive out-of-coverage search pattern (on|off)",
-		       cmd_fastsearch, 1, 1);
-#endif
-#endif /* CONFIG_NRF_MODEM_LIB */
-
-/* ── attach-speed experiment: network-state checkpoint ────────────────────
- * The modem persists its network history (band, channel, PLMN — and GNSS
- * data) to its own NVM only on CFUN=0, which an abrupt dev reset never
- * performs — so every cold boot pays a full scan (measured ~90 s vs 32-39 s
- * warm). Once per boot, at the first parked entry (radio idle, nobody
- * waiting), cycle power-off -> normal: one extra re-attach at the quietest
- * possible moment buys the NEXT reset a warm start. `checkpoint off` on the
- * shell disables it at runtime. */
-static bool checkpoint_enabled = IS_ENABLED(CONFIG_TRACKER_LTE_CHECKPOINT);
-static bool checkpoint_done;
-
-#if defined(CONFIG_SHELL)
-#include <zephyr/shell/shell.h>
-
-static int cmd_checkpoint(const struct shell *sh, size_t argc, char **argv)
-{
-	if (argc == 2) {
-		checkpoint_enabled = (strcmp(argv[1], "on") == 0);
-	}
-	shell_print(sh, "checkpoint %s%s", checkpoint_enabled ? "on" : "off",
-		    checkpoint_done ? " (already ran this boot)" : "");
-	return 0;
-}
-SHELL_CMD_ARG_REGISTER(checkpoint, NULL,
-		       "LTE network-state checkpoint (on|off)",
-		       cmd_checkpoint, 1, 1);
-#endif
 
 /* A datagram left the device: pulse the TX LED, stamp the RRC-tail
  * measurement, and tell the FSM when the coarse position is on the map (it
@@ -544,7 +148,7 @@ SHELL_CMD_ARG_REGISTER(checkpoint, NULL,
 static void on_uplink_sent(uint32_t kinds_mask)
 {
 	leds_tx_pulse();
-	last_pub_ms = k_uptime_get();
+	lte_ctrl_note_publish(k_uptime_get());
 	if (kinds_mask & UPLINK_KIND_CELL) {
 		loc_fsm_note_cell_sent();
 	}
@@ -582,47 +186,22 @@ int main(void)
 	agnss_set_device_id(device_id);
 	leds_init();
 
-#if defined(CONFIG_NRF_MODEM_LIB)
-	/* Time the SIM (%XSIM notifications) and front-load search retries —
-	 * both persist/apply before the attach we're about to start. */
-	(void)nrf_modem_at_printf("AT%%XSIM=1");
-	fast_search_configure();
-#endif
-
 	/* Start LTE async — don't block, status loop shows progress */
 	LOG_INF("starting LTE (async)...");
-	err = lte_lc_connect_async(lte_handler);
+	err = lte_ctrl_start();
 	if (err) {
-		LOG_ERR("lte_lc_connect_async: %d", err);
 		return err;
 	}
-
-#if defined(CONFIG_LTE_LC_PDN_MODULE)
-	/* Default-context PDN events tell us when the IP is actually up,
-	 * not just when we've registered. */
-	err = lte_lc_pdn_default_ctx_events_enable();
-	if (err) {
-		LOG_WRN("pdn events enable: %d", err);
-	}
-#endif
 
 	/* Configure GNSS but do NOT start it yet. An unregistered modem runs a
 	 * continuous cell search; GNSS running against that starves the search and
 	 * gains nothing itself. loc_fsm starts it once LTE has registered. */
-	err = gnss_configure();
+	err = gnss_ctrl_configure();
 	if (err) {
 		LOG_ERR("gnss configure: %d", err);
 		return err;
 	}
-	/* The GNSS mode actually applied to the modem. Reconfiguring requires a
-	 * stop/set/start cycle; a failed start leaves this at OFF so the next
-	 * loop pass retries rather than latching a wrong mode. */
-	enum loc_gnss_mode gnss_mode_applied = LOC_GNSS_OFF;
-	uint16_t gnss_interval_applied = 0;
 	bool gnss_blocked_prev = false;
-	/* lte_lc_connect_async() below turns the stack on; GNSS_EXCLUSIVE is the
-	 * only thing that turns it off. */
-	bool lte_stack_on = true;
 	/* Snapshot of the most recent PVT frame with FIX_VALID set. The live `pvt`
 	 * global only carries defined lat/lon while the flag is set, but the FSM
 	 * lets us publish for up to GPS_STALE_S after the fix lapses -- those
@@ -660,7 +239,10 @@ int main(void)
 	motion_init(k_uptime_get());
 	/* Boot picks the parked mode: IMU present = GNSS off while parked,
 	 * accelerometer owns departure; absent = legacy periodic checks.
-	 * Trusted absolutely after this probe — no runtime health checks. */
+	 * Trusted absolutely after this probe — no runtime health checks.
+	 * The LED pulse is wired here (before triggers can fire) so imu never
+	 * depends on ui. */
+	imu_on_motion(leds_imu_pulse);
 	loc_fsm_set_imu_wake(imu_init());
 	LOG_INF("IMU: %s", imu_present() ?
 		"present — quiescent wake source is the accelerometer" :
@@ -669,8 +251,9 @@ int main(void)
 	for (;;) {
 		/* Wait for next PVT event (1 Hz) with a 2s timeout so the
 		 * status block still prints even if GNSS is blocked by LTE. */
-		k_sem_take(&pvt_sem, K_SECONDS(2));
+		gnss_ctrl_wait_pvt(K_SECONDS(2));
 
+		const struct nrf_modem_gnss_pvt_data_frame *pvt = gnss_ctrl_pvt();
 		int64_t now = k_uptime_get();
 
 		/* With GNSS stopped (PARKED in IMU mode, LTE_ATTACH) the pvt
@@ -678,19 +261,19 @@ int main(void)
 		 * from the parking fix. Re-processing it every 2 s tick would
 		 * ghost-refresh staleness, motion evidence and wake forensics
 		 * forever; treat it as no observation at all. */
-		bool gnss_live = (gnss_mode_applied != LOC_GNSS_OFF);
+		bool gnss_live = (gnss_ctrl_mode() != LOC_GNSS_OFF);
 
 		if (gnss_live &&
-		    (pvt.flags & (NRF_MODEM_GNSS_PVT_FLAG_SLEEP_BETWEEN_PVT |
-				  NRF_MODEM_GNSS_PVT_FLAG_SCHED_DOWNLOAD))) {
+		    (pvt->flags & (NRF_MODEM_GNSS_PVT_FLAG_SLEEP_BETWEEN_PVT |
+				   NRF_MODEM_GNSS_PVT_FLAG_SCHED_DOWNLOAD))) {
 			last_wake.ms    = now;
-			last_wake.slept = pvt.flags &
+			last_wake.slept = pvt->flags &
 				NRF_MODEM_GNSS_PVT_FLAG_SLEEP_BETWEEN_PVT;
-			last_wake.sched = pvt.flags &
+			last_wake.sched = pvt->flags &
 				NRF_MODEM_GNSS_PVT_FLAG_SCHED_DOWNLOAD;
-			last_wake.fix   = pvt.flags &
+			last_wake.fix   = pvt->flags &
 				NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID;
-			last_wake.acc   = pvt.accuracy;
+			last_wake.acc   = pvt->accuracy;
 			wake_pvts++;
 			wake_fixes += last_wake.fix;
 			sched_pvts += last_wake.sched;
@@ -701,7 +284,7 @@ int main(void)
 		};
 
 		if (gnss_live &&
-		    (pvt.flags & NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID)) {
+		    (pvt->flags & NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID)) {
 			/* Known cosmetic quirk, deliberately NOT special-cased:
 			 * the first fix after a periodic-mode sleep can carry a
 			 * near-pre-sleep position (solver seeded with held state;
@@ -712,10 +295,10 @@ int main(void)
 			 * per rare wake beats permanently shipped validation
 			 * logic that may never fire again — detect in the DB via
 			 * impossible implied speed if it ever matters. */
-			fix_pvt = pvt;
+			fix_pvt = *pvt;
 			fix_pvt_ms = now;
-			motion_note_gps(pvt.latitude, pvt.longitude,
-					(double)pvt.accuracy, now);
+			motion_note_gps(pvt->latitude, pvt->longitude,
+					(double)pvt->accuracy, now);
 		}
 
 		/* IMU any-motion interrupt. While quiescent it is the WAKE:
@@ -733,103 +316,55 @@ int main(void)
 		/* Policy first: it owns the fix-staleness and ephemeris bookkeeping.
 		 * The supply verdict gates the C2 escalation (see loc_fsm.h). */
 		loc_fsm_set_agnss_supply(agnss_supply_ok());
-		loc_fsm_update(gnss_live ? &pvt : &quiet, now, lte_connected,
-			       motion_stationary(now), &loc);
-		leds_update(&loc, lte_connected);
+		loc_fsm_update(gnss_live ? pvt : &quiet, now,
+			       lte_ctrl_registered(), motion_stationary(now),
+			       &loc);
+		leds_update(&loc, lte_ctrl_registered());
 
 		/* First parked entry of this boot: checkpoint the modem's NVM
-		 * (see the block comment at checkpoint_enabled). CFUN=0 takes
-		 * everything down — socket, registration, GNSS — so close the
-		 * socket and force the GNSS mode to be reapplied; the FSM sees
-		 * the registration drop and walks the normal re-attach path. */
-		if (checkpoint_enabled && !checkpoint_done &&
-		    loc.state == LOC_QUIESCENT) {
-			checkpoint_done = true;
-			LOG_INF("LTE: checkpoint — persisting network state "
-				"(one re-attach)");
+		 * (see lte_ctrl.c). CFUN=0 takes everything down — socket,
+		 * registration, GNSS — so close the socket and force the GNSS
+		 * mode to be reapplied; the FSM sees the registration drop and
+		 * walks the normal re-attach path. */
+		if (loc.state == LOC_QUIESCENT && lte_ctrl_checkpoint_due()) {
 			coap_pub_close();
-			(void)lte_lc_func_mode_set(LTE_LC_FUNC_MODE_POWER_OFF);
-			(void)lte_lc_func_mode_set(LTE_LC_FUNC_MODE_NORMAL);
-			gnss_mode_applied = LOC_GNSS_OFF;
+			lte_ctrl_checkpoint();
+			gnss_ctrl_mark_off();
 		}
 
 		/* Apply the FSM's GNSS mode. Runs GNSS only when the FSM says
 		 * so (a searching modem owns the radio), and switches between
 		 * continuous 1 Hz and the modem's periodic-navigation mode
 		 * when the parked states ask for it. */
-		if (loc.gnss_mode != gnss_mode_applied ||
-		    (loc.gnss_mode == LOC_GNSS_PERIODIC &&
-		     loc.gnss_interval_s != gnss_interval_applied)) {
-			if (gnss_mode_applied != LOC_GNSS_OFF) {
-				(void)nrf_modem_gnss_stop();
-			}
-			gnss_mode_applied = LOC_GNSS_OFF;
-			if (loc.gnss_mode == LOC_GNSS_OFF) {
-				/* Off while unregistered (search owns the
-				 * radio) or IMU-parked (nothing to check). */
-				LOG_INF("GNSS off");
-			} else {
-				bool cont = (loc.gnss_mode == LOC_GNSS_CONTINUOUS);
-				uint16_t ivl = cont ? GNSS_INTERVAL_S
-						    : loc.gnss_interval_s;
-
-				nrf_modem_gnss_fix_interval_set(ivl);
-				nrf_modem_gnss_fix_retry_set(
-					cont ? 0 : GNSS_CHECK_RETRY_S);
-				if (gnss_start() == 0) {
-					LOG_INF("GNSS %s (interval %u s)",
-						cont ? "continuous" : "periodic",
-						ivl);
-					gnss_mode_applied = loc.gnss_mode;
-					gnss_interval_applied =
-						loc.gnss_interval_s;
-				} /* else: stays OFF, retried next pass */
-			}
-		}
+		gnss_ctrl_apply(loc.gnss_mode, loc.gnss_interval_s);
 
 		/* GNSS_EXCLUSIVE: take the LTE stack down entirely so idle-mode
 		 * DRX/reselection can't slice GNSS; bring it back on exit. GNSS
 		 * keeps running across both edges — DEACTIVATE_LTE leaves it be. */
-		if (!loc.lte_wanted && lte_stack_on) {
+		if (!loc.lte_wanted && lte_ctrl_stack_on()) {
 			LOG_WRN("deactivating LTE — GNSS gets the radio outright");
-			if (lte_lc_func_mode_set(LTE_LC_FUNC_MODE_DEACTIVATE_LTE) == 0) {
-				lte_stack_on = false;
-			}
+			(void)lte_ctrl_set_stack(false);
 			coap_pub_close(); /* socket dies with the PDN */
-		} else if (loc.lte_wanted && !lte_stack_on) {
+		} else if (loc.lte_wanted && !lte_ctrl_stack_on()) {
 			LOG_INF("re-activating LTE (re-attach follows)");
-			if (lte_lc_func_mode_set(LTE_LC_FUNC_MODE_ACTIVATE_LTE) == 0) {
-				lte_stack_on = true;
-			}
+			(void)lte_ctrl_set_stack(true);
 		}
 
 		/* A PDN drop (deactivation or network-side) orphans the UDP socket;
 		 * recreate it when the PDN returns rather than sending into a void. */
-		if (!pdn_active && coap_pub_ready()) {
+		if (!lte_ctrl_pdn_active() && coap_pub_ready()) {
 			LOG_WRN("PDN down — closing CoAP socket");
 			coap_pub_close();
 		}
 
-		/* Registration loss post-mortem: one CEER read per loss edge. */
-		if (want_ceer) {
-			want_ceer = false;
-			char ceer[64];
-
-			if (nrf_modem_at_cmd(ceer, sizeof(ceer), "AT+CEER") == 0) {
-				char *nl = strpbrk(ceer, "\r\n");
-
-				if (nl) {
-					*nl = '\0';
-				}
-				LOG_INF("LTE lost: %s", ceer);
-			}
-		}
+		/* Deferred LTE work (the CEER post-mortem after a loss). */
+		lte_ctrl_poll();
 
 		/* EVT_BLOCKED/UNBLOCKED arrive in ISR context; log the edge here. */
-		if (gnss_blocked != gnss_blocked_prev) {
-			gnss_blocked_prev = gnss_blocked;
+		if (gnss_ctrl_blocked() != gnss_blocked_prev) {
+			gnss_blocked_prev = !gnss_blocked_prev;
 			LOG_DBG("GNSS: %s by LTE",
-				gnss_blocked ? "blocked" : "unblocked");
+				gnss_blocked_prev ? "blocked" : "unblocked");
 		}
 
 		/* One-time UDP socket setup, retried on failure. Needs LTE up (DNS
@@ -839,8 +374,9 @@ int main(void)
 		 * which is the whole point of the CoAP move. Gated on pdn_active
 		 * too: before the default PDN has an IP, getaddrinfo/socket can
 		 * only fail. (Always true on native_sim.) */
-		if (loc.publish_allowed && pdn_active &&
-		    lte_connected && !coap_pub_ready() && now >= next_net_ms) {
+		if (loc.publish_allowed && lte_ctrl_pdn_active() &&
+		    lte_ctrl_registered() && !coap_pub_ready() &&
+		    now >= next_net_ms) {
 			next_net_ms = now + NET_RETRY_MS;
 			if (coap_pub_init(SERVER_HOST, SERVER_PORT)) {
 				LOG_WRN("CoAP setup failed (retry in %d s)",
@@ -873,7 +409,7 @@ int main(void)
 			? 60000 : STATUS_INTERVAL_MS;
 		if (now - last_status_ms >= status_ivl) {
 			last_status_ms = now;
-			print_status(&pvt, &loc, now, gnss_live);
+			print_status(pvt, &loc, now, gnss_live);
 			if (wake_pvts) {
 				/* UART-only prevalence stats (DBG never
 				 * ships): do ALL wakes carry the flag? */
@@ -896,13 +432,13 @@ int main(void)
 					queued_fix_ms = fix_pvt_ms;
 					obs_queue_add_gps(&fix_pvt, fix_pvt_ms);
 				}
-			} else if (lte_connected) {
+			} else if (lte_ctrl_registered()) {
 				struct serving_cell sc;
 				/* Condition, not event: don't repeat the WRN every
 				 * cell interval while XMONITOR keeps failing. */
 				static bool cell_unavail;
 
-				if (read_serving_cell(&sc) == 0 && sc.valid) {
+				if (cell_info_read(&sc) == 0 && sc.valid) {
 					cell_unavail = false;
 					obs_queue_add_cell(sc.mcc, sc.mnc, sc.tac,
 							   sc.cid, sc.rsrp_dbm,

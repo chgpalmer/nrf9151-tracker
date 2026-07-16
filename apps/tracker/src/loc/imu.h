@@ -13,6 +13,12 @@
 
 #include <stdbool.h>
 
+/* Hook invoked on every any-motion interrupt, straight from the sensor
+ * trigger (a cooperative thread) so it fires instantly even when the main
+ * loop is blocked. Wired by main (to the IMU LED pulse) — imu itself stays
+ * ignorant of ui. Set it BEFORE imu_init(); triggers can fire from then on. */
+void imu_on_motion(void (*cb)(void));
+
 /* Probe and configure the accelerometer (AN3308 wake-up: HP-filtered
  * any-motion on INT1). Returns true when present and armed. */
 bool imu_init(void);
