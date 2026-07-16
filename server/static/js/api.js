@@ -71,6 +71,7 @@ export async function fetchLogs(deviceId, opts = {}) {
   if (opts.to_ts     != null) params.set('to_ts',     opts.to_ts);
   if (opts.min_level != null) params.set('min_level', opts.min_level);
   if (opts.limit     != null) params.set('limit',     opts.limit);
+  if (opts.origin    != null) params.set('origin',    opts.origin);
 
   const r = await fetch(`/api/logs?${params}`);
   if (!r.ok) throw new Error(`/api/logs: ${r.status}`);

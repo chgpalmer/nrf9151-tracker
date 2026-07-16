@@ -168,11 +168,23 @@ async def logs(device: str, from_ts: float = 0, to_ts: float = 0,
     numbering: 1=ERR 2=WRN 3=INF 4=DBG — lower is more severe, so
     min_level=2 returns ERR+WRN). origin 'device' (default) = the device's
     uplinked logs; 'server' = the server's own events concerning that
-    device (device=_server for global ones like startup)."""
+    device; 'all' = both interleaved — the correlated view. Whenever server
+    rows are included, so are the GLOBAL ones (device_id '_server': startup
+    markers, assistance-supply health) — an outage that starves every
+    device belongs in any single device's story (2026-07-16)."""
     db = app.state.db
-    params = [device, origin, min_level]
-    sql = ("SELECT id, received_ts, level, module, text "
-           "FROM logs WHERE device_id = ? AND origin = ? AND level <= ?")
+    sel = "SELECT id, received_ts, level, module, text, origin FROM logs "
+    if origin == "all":
+        params = [device, min_level]
+        sql = sel + ("WHERE (device_id = ? OR device_id = '_server') "
+                     "AND level <= ?")
+    elif origin == "server":
+        params = [device, min_level]
+        sql = sel + ("WHERE (device_id = ? OR device_id = '_server') "
+                     "AND origin = 'server' AND level <= ?")
+    else:
+        params = [device, origin, min_level]
+        sql = sel + "WHERE device_id = ? AND origin = ? AND level <= ?"
     if from_ts and to_ts:
         sql += " AND received_ts BETWEEN ? AND ?"
         params += [from_ts, to_ts]

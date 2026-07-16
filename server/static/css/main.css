@@ -1519,6 +1519,12 @@ tr.lvl-1 .log-text { color: var(--danger); }
 tr.lvl-2 .log-text { color: var(--amber); }
 tr.lvl-4 .log-text, tr.lvl-4 .log-mod { color: var(--text-dim); }
 
+/* Server-origin rows (the ingest's own events, interleaved in SOURCE=BOTH):
+ * italic + dimmed module so the two narrators stay distinguishable at a
+ * glance without stealing attention from the device's story. */
+tr.log-origin-server .log-text { font-style: italic; }
+tr.log-origin-server .log-mod  { color: var(--text-dim); font-style: italic; }
+
 /* Prev/next day steppers beside the date input. */
 .date-step {
   background: var(--surface);
