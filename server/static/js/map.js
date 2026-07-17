@@ -408,12 +408,14 @@ async function loadDay() {
 
   // Best current position (parked = last GPS fix, not the newest heartbeat
   // cell). Fetched AFTER the first paint so it never delays the page; the
-  // dot corrects itself one render later.
+  // dot corrects itself one render later — and LIVE re-fits, because the
+  // first fit ran without this fix and parked-overnight it sits outside
+  // every row of the day window.
   liveFix = null;
   if (isToday) {
     try {
       liveFix = await fetchCurrent(deviceId);
-      if (liveFix) applyView(false);
+      if (liveFix) applyView(sel.mode === 'live');
     } catch (e) { /* dot falls back to newest row */ }
   }
 }

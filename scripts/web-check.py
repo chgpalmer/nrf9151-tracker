@@ -228,6 +228,43 @@ def main():
                     problems.append("trip band click ignored inside a "
                                     "custom range window")
 
+        # LIVE-fit contract (mapview level; the seed's newest row is GPS, so
+        # the parked scenario is driven synthetically): the fit must CONTAIN
+        # the live dot even when the window holds only a distant heartbeat
+        # cell (parked overnight), the auto-zoom caps at street context
+        # (zoom <= 16), and an EMPTY window still draws the dot instead of
+        # the empty-state overlay.
+        live_fit = page.evaluate("""(() => {
+          const mv = window._mapView;
+          const cell = { id: 9001, source: 'cell', lat: 51.60, lon: -0.20,
+                         acc: 1500, received_ts: 1700000600 };
+          const gps  = { id: 9002, source: 'gps', lat: 51.50, lon: -0.10,
+                         acc: 8, received_ts: 1700000000 };
+          mv.render([cell], { fitBounds: true, liveDot: true, liveFix: gps });
+          const contains = mv.map.getBounds().contains([gps.lat, gps.lon]);
+          mv.render([], { fitBounds: true, liveDot: true, liveFix: gps });
+          const overlay = document.querySelector('#page-map .empty-state');
+          return { contains,
+                   zoom: mv.map.getZoom(),
+                   emptyDots: mv.debugCounts().points,
+                   overlayShown: !!overlay && overlay.style.display !== 'none' };
+        })()""")
+        if not live_fit["contains"]:
+            problems.append("LIVE fit does not contain the live dot "
+                            "(parked: fitted the tower, not the device)")
+        if live_fit["zoom"] > 16:
+            problems.append(f"LIVE point-like fit zoomed to {live_fit['zoom']} "
+                            "(>16) — too tight to tell where the device is")
+        if live_fit["emptyDots"] != 1:
+            problems.append(f"empty live window drew {live_fit['emptyDots']} "
+                            "markers, want the live dot alone")
+        if live_fit["overlayShown"]:
+            problems.append("empty live window showed the empty-state overlay "
+                            "over the live dot")
+        # Restore the real day view for the checks below.
+        page.locator("#trip-chips .trip-chip", has_text="DAY").click()
+        page.wait_for_timeout(300)
+
         # CELLS tab: serving-cell history with a tower-swap marker and a
         # dimmed unresolved row; clicking a row marks it active.
         page.click('#side-tabs .side-tab[data-tab="cells"]')

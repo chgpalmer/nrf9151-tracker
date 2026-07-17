@@ -216,6 +216,7 @@ export function createMapView(containerId, onFixClick) {
     if ('liveFix' in opts)       liveFix    = opts.liveFix;
     if ('tripWindows' in opts)   tripWindows = opts.tripWindows;
 
+    fixes = fixes || [];
     currentFixes = fixes;
 
     trackLayer.clearLayers();
@@ -223,7 +224,11 @@ export function createMapView(containerId, onFixClick) {
     arrowLayer.clearLayers();
     selectedLayer.clearLayers();
 
-    if (!fixes || fixes.length === 0) {
+    // LIVE: the dot can outlive the window — parked overnight the best
+    // current fix predates every row of the day, and the source chips can
+    // filter the heartbeat cells away. An empty window must still show the
+    // device, not an empty-state overlay.
+    if (fixes.length === 0 && !(liveDot && liveFix)) {
       showEmpty(opts.emptyMsg || 'No fixes in this window',
                 opts.emptySub != null ? opts.emptySub
                                       : 'Try a wider time range or check device connection.');
@@ -316,9 +321,15 @@ export function createMapView(containerId, onFixClick) {
       if (sel) highlightSelected(sel);
     }
 
-    // Fit map to track
+    // Fit map to track. The fit must CONTAIN the live dot: while parked
+    // the window holds only heartbeat cells, so fitting the window alone
+    // framed the tower centroid while the dot (the parked GPS fix, possibly
+    // days old) sat off-screen. maxZoom 16 ≈ a-few-blocks context: a
+    // point-like fit (lone parked fix, or dot + adjacent tower) at 17 was
+    // too tight to tell where the device actually is.
     if (opts.fitBounds !== false) {
-      map.fitBounds(computeBounds(fixes), { padding: [30, 30], maxZoom: 17 });
+      const fitFixes = (liveDot && liveFix) ? fixes.concat([liveFix]) : fixes;
+      map.fitBounds(computeBounds(fitFixes), { padding: [30, 30], maxZoom: 16 });
     }
   }
 
