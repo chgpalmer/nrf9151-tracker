@@ -115,20 +115,31 @@ open-ports:
 >    || sudo sh -c 'iptables-save > /etc/iptables/rules.v4'
 > @echo "ports 80/443 tcp + $(COAP_PORT) udp open + persisted"
 
+# Web logins: space-separated user:password pairs (set CADDY_USERS in .env
+# to give each person their own login — revoke one without re-sharing the
+# rest). Defaults to the original single CADDY_USERNAME/CADDY_PASSWORD pair.
+# Passwords may contain colons (split is at the FIRST colon) but not spaces.
+CADDY_USERS ?= $(CADDY_USERNAME):$(CADDY_PASSWORD)
+
 # Write the Caddyfile for the current mode and (re)load the caddy service.
 #   CADDY_DOMAIN unset -> HTTP on :80, reachable by public IP
 #   CADDY_DOMAIN=host  -> auto-HTTPS for host + www (needs DNS -> this host)
 caddy: setup-caddy
-> HASH=$$(caddy hash-password --plaintext "$(CADDY_PASSWORD)"); \
-> CADDY_CREDENTIALS="$(CADDY_USERNAME) $$HASH"; \
+> CREDS=""; \
+> for up in $(CADDY_USERS); do \
+>     case "$$up" in *:*) ;; *) echo "CADDY_USERS entry '$$up' is not user:password"; exit 1;; esac; \
+>     u="$${up%%:*}"; p="$${up#*:}"; \
+>     [ -n "$$u" ] && [ -n "$$p" ] || { echo "CADDY_USERS entry '$$up' has an empty user or password"; exit 1; }; \
+>     CREDS="$$CREDS        $$u $$(caddy hash-password --plaintext "$$p")\n"; \
+> done; \
 > if [ -n "$(CADDY_DOMAIN)" ]; then \
->     printf '%s {\n    basicauth * {\n        %s\n    }\n    reverse_proxy 127.0.0.1:%s\n}\n' \
->         "$(CADDY_DOMAIN), www.$(CADDY_DOMAIN)" "$$CADDY_CREDENTIALS" "$(HTTP_PORT)" \
+>     printf '%s {\n    basicauth * {\n%b    }\n    reverse_proxy 127.0.0.1:%s\n}\n' \
+>         "$(CADDY_DOMAIN), www.$(CADDY_DOMAIN)" "$$CREDS" "$(HTTP_PORT)" \
 >         | sudo tee $(CADDYFILE) >/dev/null; \
 >     echo "Caddy: HTTPS for $(CADDY_DOMAIN) (+www) -> 127.0.0.1:$(HTTP_PORT)"; \
 > else \
->     printf ':80 {\n    basicauth * {\n        %s\n    }\n    reverse_proxy 127.0.0.1:%s\n}\n' \
->         "$$CADDY_CREDENTIALS" "$(HTTP_PORT)" \
+>     printf ':80 {\n    basicauth * {\n%b    }\n    reverse_proxy 127.0.0.1:%s\n}\n' \
+>         "$$CREDS" "$(HTTP_PORT)" \
 >         | sudo tee $(CADDYFILE) >/dev/null; \
 >     echo "Caddy: HTTP on :80 (reach by IP) -> 127.0.0.1:$(HTTP_PORT)"; \
 > fi
