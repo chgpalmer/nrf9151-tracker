@@ -1,0 +1,6 @@
+/* flogtest only: shrink the flight_log ring to 64 KB (2 logical sectors of
+ * 32 KB with CONFIG_TRACKER_FLOG_SECTORS=2) so the rotate/reclaim path is
+ * reachable with seconds of shell input instead of a megabyte of logs. */
+&flight_log {
+	reg = <0x00100000 0x00010000>;
+};

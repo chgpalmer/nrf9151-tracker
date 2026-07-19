@@ -22,6 +22,11 @@ target_sources(app PRIVATE
 )
 target_include_directories(app PRIVATE src/loc src/modem src/net src/proto src/ui)
 
+if(CONFIG_TRACKER_FLOG)
+  target_sources(app PRIVATE src/flog/flog.c)
+  target_include_directories(app PRIVATE src/flog)
+endif()
+
 if(NOT CONFIG_NRF_MODEM_LIB)
   # Nordic headers are not on the include path when NRF_MODEM_LIB=n.
   # Add them explicitly so main.c and the mock files can include them.

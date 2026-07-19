@@ -11,6 +11,9 @@ module pins have no wheels for newer Pythons; 26.04 breaks `make setup-zephyr`).
 - `make sim` → `make demo` — native_sim + local CoAP server + web map on :8080
 - `./smoke.sh` — build + demo e2e; `make webtest` — headless-Chromium UI test
 - `make fsmtest` — loc_fsm unit test vs `docs/loc-fsm-decision-table.md`
+- `make flogtest` — flash flight recorder e2e on native_sim (init,
+  persistence across reboot, ring rotation, erase); mandatory for any
+  `src/flog/` change
 - `make proto` — regen nanopb C + server `tracker_pb2.py` after editing
   `proto/tracker.proto` (generated code is committed; never hand-edit it)
 
@@ -66,8 +69,21 @@ module pins have no wheels for newer Pythons; 26.04 breaks `make setup-zephyr`).
   no churn logs. Board reflashed 2026-07-16 (main @ 6b6a84c: arch-review
   F1/F4/F5 refactors + single-owner ephemeris inventory, C2 gate on
   `healthy`; moved log lines now ship module "lte"/"gnss", not "tracker").
-- Phase 2 (specced, queued): flash flight recorder + obs spill on the DK's
-  32 MB NOR, epoch timestamps, log byte-budget backstop.
+- FIELD INCIDENT (open, 2026-07-17 11:36): device went silent mid-ride for
+  45+ h — LTE registered, GNSS fixing, main loop provably alive (LED2
+  blink→solid needs leds_update), yet zero packets on the wire and the
+  carrier saw no data. Server fully exonerated (ingest healthy, tcpdump
+  empty). Wedge is in the ship path: publish_allowed stuck, socket setup
+  failing forever, or a zombie socket. Board still fielded @ 6b6a84c;
+  UART capture on next physical access is the diagnosis path.
+- Flight recorder SHIPPED (src/flog: log backend → RAM ring → FCB circular
+  log; 8 MB of the DK's 32 MB NOR, 1 MB flash_sim partition on native_sim,
+  `flog dump/stats/mark/erase` shell). ~5 days of full-DBG at a realistic
+  mix, ~85 days at INF. Sim-verified (`make flogtest`); NOT yet run on
+  hardware — the board is in the field; flash + verify on next access.
+  Remaining Phase 2: obs spill (24 MB reserved after the 8 MB ring), epoch
+  timestamps, uplink extraction of flash logs, spi_nor DPD power tuning,
+  uplink liveness watchdog (the incident's real fix).
 - A-GNSS LIVE: server pulls IGS broadcast ephemeris (BKG BRDC00WRD_S, free
   anonymous HTTPS, 30 min refresh) and serves POST /agnss; device fetches
   ~1 KB when its inventory is thin and injects via agnss_write. All scaling

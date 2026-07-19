@@ -110,6 +110,7 @@ help:
 > @echo "  make sim                      build tracker as native Linux process (no DK)"
 > @echo "  make run-sim [SIM_DEVICE_ID=] run the sim binary (foreground)"
 > @echo "  make fsmtest                  unit-test loc_fsm vs its decision table"
+> @echo "  make flogtest                 e2e the flash flight recorder on native_sim"
 > @echo ""
 > @echo "SERVER (mk/server.mk)"
 > @echo "  make coap-server              start CoAP→SQLite ingest (UDP 5683, fg)"

@@ -34,6 +34,9 @@
 #include "uplink.h"
 #include "log_uplink.h"
 #include "leds.h"
+#ifdef CONFIG_TRACKER_FLOG
+#include "flog.h"
+#endif
 
 LOG_MODULE_REGISTER(tracker, CONFIG_TRACKER_LOG_LEVEL);
 
@@ -159,6 +162,12 @@ static void on_uplink_sent(uint32_t kinds_mask)
 int main(void)
 {
 	int err;
+
+	/* Flight recorder first: the boot lines below are exactly the ones a
+	 * post-mortem wants. Failure leaves it offline, never blocks boot. */
+#ifdef CONFIG_TRACKER_FLOG
+	(void)flog_init();
+#endif
 
 	LOG_INF("tracker starting");
 

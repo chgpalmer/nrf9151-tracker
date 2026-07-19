@@ -83,6 +83,50 @@ config TRACKER_LOG_UPLINK_RING_LINES
 	  oldest and reports the count in-band; the flash flight recorder
 	  (phase 2) is the durable tier.
 
+config TRACKER_FLOG
+	bool "Flash flight recorder (circular log on the flight_log partition)"
+	default y
+	depends on FLASH_MAP
+	help
+	  Land every compiled log line in a circular flash log (FCB on the
+	  fixed-partition "flight_log": 8 MB external NOR on the DK, 1 MB
+	  flash_simulator on native_sim) surviving reboot and power loss.
+	  Extraction via shell (`flog dump/stats`). Born from the 2026-07-17
+	  wedge: 45 h of field silence whose diagnosis existed only in the
+	  DBG stream nobody was recording.
+
+config TRACKER_FLOG_LEVEL
+	int "Max log level recorded to flash (1=ERR 2=WRN 3=INF 4=DBG)"
+	default 4
+	range 1 4
+	depends on TRACKER_FLOG
+	help
+	  4 records everything the binary can say: ~5 days on the DK's 8 MB
+	  ring at a realistic parked/riding mix, ~9 days parked (measured
+	  line sizes, see flog.c). 3 stretches it to ~85 days if capacity
+	  ever beats detail.
+
+config TRACKER_FLOG_RING_LINES
+	int "Flight-recorder RAM staging ring (lines)"
+	default 64
+	range 16 512
+	depends on TRACKER_FLOG
+	help
+	  Lines buffered between the log backend (any thread; immediate
+	  mode) and the flash drain thread, ~120 B each. Must absorb log
+	  bursts across a sector-rotate erase (~1-2 s); overflow drops
+	  oldest and is counted in `flog stats`.
+
+config TRACKER_FLOG_SECTORS
+	int "Flight-recorder logical sector count"
+	default 32
+	range 2 64
+	depends on TRACKER_FLOG
+	help
+	  The ring rotates (erases) one logical sector at a time; each is
+	  partition_size / this. More sectors = finer-grained reclaim but a
+	  bigger RAM descriptor array and more frequent erase pauses.
+
 config TRACKER_CELL_POST_INTERVAL_S
 	int "Cell publish interval while GNSS has no usable sky (seconds)"
 	default 30

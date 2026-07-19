@@ -1,0 +1,12 @@
+/* Flight recorder on the simulator: the board's 2 MB sim-flash only maps
+ * partitions over its first half (mcuboot/slots/storage, unused by this
+ * app) — the second megabyte is free, so the flight_log ring claims it.
+ * Same node label as the hardware overlay: src/flog binds by label. */
+&flash0 {
+	partitions {
+		flight_log: partition@100000 {
+			label = "flight-log";
+			reg = <0x00100000 0x00100000>;
+		};
+	};
+};
