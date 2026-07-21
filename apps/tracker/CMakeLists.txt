@@ -11,6 +11,7 @@ target_sources(app PRIVATE
   src/modem/cell_info.c
   src/modem/gnss_ctrl.c
   src/modem/lte_ctrl.c
+  src/sys/guard.c
   src/net/coap_pub.c
   src/net/obs_queue.c
   src/net/event_queue.c
@@ -20,7 +21,7 @@ target_sources(app PRIVATE
   # Generated from proto/tracker.proto by `make proto` — do not edit.
   src/proto/tracker.pb.c
 )
-target_include_directories(app PRIVATE src/loc src/modem src/net src/proto src/ui)
+target_include_directories(app PRIVATE src/loc src/modem src/net src/proto src/sys src/ui)
 
 if(CONFIG_TRACKER_FLOG)
   target_sources(app PRIVATE src/flog/flog.c)

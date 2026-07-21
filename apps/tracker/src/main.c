@@ -34,6 +34,7 @@
 #include "uplink.h"
 #include "log_uplink.h"
 #include "leds.h"
+#include "guard.h"
 #ifdef CONFIG_TRACKER_FLOG
 #include "flog.h"
 #endif
@@ -170,6 +171,9 @@ int main(void)
 #endif
 
 	LOG_INF("tracker starting");
+	/* Right after the boot identity: if the last session died (watchdog,
+	 * modem fault), its death certificate is the next line out. */
+	guard_init();
 
 	err = nrf_modem_lib_init();
 	if (err) {
@@ -259,6 +263,12 @@ int main(void)
 		"absent — quiescent wake source is GPS checks");
 
 	for (;;) {
+		/* One feed per pass: any pass that stalls past
+		 * TRACKER_GUARD_WDT_S (a blocking modem call that never
+		 * returns — both field freezes) reboots into a clean session
+		 * with a named death note instead of a silent coma. */
+		guard_feed();
+
 		/* Wait for next PVT event (1 Hz) with a 2s timeout so the
 		 * status block still prints even if GNSS is blocked by LTE. */
 		gnss_ctrl_wait_pvt(K_SECONDS(2));

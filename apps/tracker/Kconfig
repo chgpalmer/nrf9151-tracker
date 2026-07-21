@@ -280,6 +280,18 @@ config TRACKER_LTE_CHECKPOINT
 	  CFUN 0->1: one re-attach at an idle moment buys the next reset a
 	  warm attach. Shell: `checkpoint on|off`.
 
+config TRACKER_GUARD_WDT_S
+	int "Main-loop watchdog timeout (seconds)"
+	default 120
+	range 30 600
+	help
+	  A loop pass that takes longer than this reboots the SoC (task_wdt;
+	  see src/sys/guard.c). Two field freezes (2026-07-17, 2026-07-21)
+	  wedged the loop inside blocking modem calls for hours. Must exceed
+	  the longest legitimate stall: the 8 s A-GNSS exchange, DNS over a
+	  fresh PDN, and the LTE checkpoint's CFUN cycle. 120 s is generous;
+	  a frozen tracker recovers ~90 s sooner than any human would notice.
+
 config TRACKER_SIM_DEVICE_ID
 	string "native_sim fallback device ID"
 	default "sim-dev-1"
