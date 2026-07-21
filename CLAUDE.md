@@ -69,13 +69,18 @@ module pins have no wheels for newer Pythons; 26.04 breaks `make setup-zephyr`).
   no churn logs. Board reflashed 2026-07-16 (main @ 6b6a84c: arch-review
   F1/F4/F5 refactors + single-owner ephemeris inventory, C2 gate on
   `healthy`; moved log lines now ship module "lte"/"gnss", not "tracker").
-- FIELD INCIDENT (open, 2026-07-17 11:36): device went silent mid-ride for
-  45+ h — LTE registered, GNSS fixing, main loop provably alive (LED2
-  blink→solid needs leds_update), yet zero packets on the wire and the
-  carrier saw no data. Server fully exonerated (ingest healthy, tcpdump
-  empty). Wedge is in the ship path: publish_allowed stuck, socket setup
-  failing forever, or a zombie socket. Board still fielded @ 6b6a84c;
-  UART capture on next physical access is the diagnosis path.
+- FIELD INCIDENT DIAGNOSED (2026-07-21, flight-recorder tape + repro on
+  07-20 overnight): the device hard-freezes — main loop AND modem
+  callbacks together — mid-ride under handover churn, always at 12-14 h
+  uptime (the IMU rework made long warm sessions possible; every earlier
+  ride began with a power cycle). Flash tape simply stops between lines;
+  "LED2 alive" was a misread (blip pattern is a k_timer, LED4 is the
+  trigger thread — both survive a dead loop). Best theory: modem core
+  wedges, next blocking nrf_modem call never returns. MITIGATED by
+  src/sys/guard.c (6b20557): task watchdog on the loop (120 s) + modem
+  fault handler + __noinit death note reported at ERR on next boot;
+  bench-verified via `hang`. True root cause still open — every future
+  freeze now leaves a tape ending at the fatal line + a named reboot.
 - Flight recorder SHIPPED (src/flog: log backend → RAM ring → FCB circular
   log; 8 MB of the DK's 32 MB NOR, 1 MB flash_sim partition on native_sim,
   `flog dump/stats/mark/erase` shell). ~5 days of full-DBG at a realistic
