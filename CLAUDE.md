@@ -69,18 +69,23 @@ module pins have no wheels for newer Pythons; 26.04 breaks `make setup-zephyr`).
   no churn logs. Board reflashed 2026-07-16 (main @ 6b6a84c: arch-review
   F1/F4/F5 refactors + single-owner ephemeris inventory, C2 gate on
   `healthy`; moved log lines now ship module "lte"/"gnss", not "tracker").
-- FIELD INCIDENT DIAGNOSED (2026-07-21, flight-recorder tape + repro on
-  07-20 overnight): the device hard-freezes — main loop AND modem
-  callbacks together — mid-ride under handover churn, always at 12-14 h
-  uptime (the IMU rework made long warm sessions possible; every earlier
-  ride began with a power cycle). Flash tape simply stops between lines;
-  "LED2 alive" was a misread (blip pattern is a k_timer, LED4 is the
-  trigger thread — both survive a dead loop). Best theory: modem core
-  wedges, next blocking nrf_modem call never returns. MITIGATED by
-  src/sys/guard.c (6b20557): task watchdog on the loop (120 s) + modem
-  fault handler + __noinit death note reported at ERR on next boot;
-  bench-verified via `hang`. True root cause still open — every future
-  freeze now leaves a tape ending at the fatal line + a named reboot.
+- FREEZE INCIDENT CLOSED (2026-07-23): root cause caught on the flight
+  recorder's tape — a state-change flush at the GNSS→LTE handover edge
+  sent datagram #1 (RAI_ONGOING), then the offloaded zsock_send for #2
+  blocked forever on a wedged modem (no send timeout existed). All three
+  field freezes (07-17 45 h, 07-21 3 h, 07-23 ~2 min) sat at a flush
+  burst under radio contention. Fixed: SO_SNDTIMEO 10 s + send-health
+  escalation (4482bb1) — first timeout = one WRN + modem post-mortem
+  (%CONEVAL/+CEER/+CEREG into flash); second consecutive = guard reboot
+  with a named note (warn-forever would be alive-but-mute). WHY the
+  modem stops answering is unproven (mfw bug vs our RAI pattern);
+  the modem-trace-to-flash backend (NCS modem_trace_flash sample, fits
+  the reserved 24 MB) is the agreed next step if it recurs.
+  src/sys/guard.c (6b20557) stays as backstop: task watchdog
+  (120 s) + modem fault handler + __noinit death note at ERR on next
+  boot; its 07-23 field debut turned the freeze into a 2-min outage and
+  produced the diagnosing tape. "LEDs alive during a freeze" proves
+  nothing (LED2 blip = k_timer, LED4 = trigger thread).
 - Flight recorder SHIPPED (src/flog: log backend → RAM ring → FCB circular
   log; 8 MB of the DK's 32 MB NOR, 1 MB flash_sim partition on native_sim,
   `flog dump/stats/mark/erase` shell). ~5 days of full-DBG at a realistic
