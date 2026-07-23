@@ -446,6 +446,76 @@ static int cmd_dump(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+/* ---- bench: split the dump path's ~7.5 ms/record three ways -------------
+ * (flash walk vs shell printing vs the host-side transport). Field question
+ * 2026-07-23: dumps ran 9.6 KB/s at BOTH 115200 and 1 Mbaud. */
+
+struct bench_ctx {
+	uint32_t limit;
+	uint32_t count;
+	uint32_t bytes;
+};
+
+static int bench_cb(struct fcb_entry_ctx *ctx, void *arg)
+{
+	struct bench_ctx *b = arg;
+	uint8_t buf[REC_MAX];
+	uint16_t len = MIN(ctx->loc.fe_data_len, sizeof(buf));
+
+	/* Same read the dump does, minus the printing. */
+	if (flash_area_read(ctx->fap, FCB_ENTRY_FA_DATA_OFF(ctx->loc),
+			    buf, len) == 0) {
+		b->bytes += len;
+	}
+	b->count++;
+	return (b->count >= b->limit) ? 1 : 0; /* nonzero stops the walk */
+}
+
+static int cmd_bench(const struct shell *sh, size_t argc, char **argv)
+{
+	uint32_t n = (argc > 2) ? strtoul(argv[2], NULL, 10) : 2000;
+
+	if (argc > 1 && strcmp(argv[1], "walk") == 0) {
+		if (fcb.fap == NULL) {
+			shell_warn(sh, "recorder never initialised");
+			return -ENODEV;
+		}
+
+		struct bench_ctx b = { .limit = n };
+		int64_t t0 = k_uptime_get();
+
+		fcb_walk(&fcb, NULL, bench_cb, &b);
+
+		int64_t dt = k_uptime_get() - t0;
+
+		shell_print(sh, "walk: %u records, %u B, %lld ms (%lld rec/s)",
+			    b.count, b.bytes, (long long)dt,
+			    dt ? (long long)(b.count * 1000 / dt) : 0);
+		return 0;
+	}
+	if (argc > 1 && strcmp(argv[1], "print") == 0) {
+		/* ~72 chars/line like a real dump line; no flash involved.
+		 * Device-side elapsed includes shell TX backpressure, so
+		 * pair it with host-side arrival timing to see the wire. */
+		int64_t t0 = k_uptime_get();
+
+		for (uint32_t i = 0; i < n; i++) {
+			shell_print(sh, "[bench %6u] ................"
+				    "........................................",
+				    i);
+		}
+
+		int64_t dt = k_uptime_get() - t0;
+
+		shell_print(sh, "print: %u lines, %lld ms (%lld lines/s)",
+			    n, (long long)dt,
+			    dt ? (long long)(n * 1000 / dt) : 0);
+		return 0;
+	}
+	shell_print(sh, "usage: flog bench walk|print [n]");
+	return 0;
+}
+
 static int cmd_stats(const struct shell *sh, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc); ARG_UNUSED(argv);
@@ -500,6 +570,8 @@ SHELL_STATIC_SUBCMD_SET_CREATE(flog_cmds,
 	SHELL_CMD_ARG(dump, NULL, "dump [n] — last n lines (default 50)",
 		      cmd_dump, 1, 1),
 	SHELL_CMD(stats, NULL, "recorder state", cmd_stats),
+	SHELL_CMD_ARG(bench, NULL, "bench walk|print [n] — dump-path timing",
+		      cmd_bench, 2, 1),
 	SHELL_CMD_ARG(mark, NULL, "mark <text> — operator marker",
 		      cmd_mark, 2, 8),
 	SHELL_CMD(erase, NULL, "erase the ring (recovery path)", cmd_erase),
