@@ -6,13 +6,15 @@
 #   APP=tracker                  app under apps/  (hello, gnss, tracker)
 #   BOARD=nrf9151dk/nrf9151/ns   board; the secure nrf9151dk/nrf9151 has no modem
 #   PORT=/dev/ttyACM0         serial port for `make uart`
-#   BAUD=115200               serial baud
+#   BAUD=1000000              serial baud (console overlay runs 1 M)
 #   RUNNER=nrfutil            west flash/debug runner (nrfutil|nrfjprog|openocd)
 
 APP    ?= tracker
 BOARD  ?= nrf9151dk/nrf9151/ns
 PORT   ?= /dev/ttyACM0
-BAUD   ?= 115200
+# 1 M to match the console overlay (hardware builds dump multi-MB flight
+# recorder tapes; 115200 was the bottleneck). Override for other targets.
+BAUD   ?= 1000000
 RUNNER ?= nrfutil
 
 APP_DIR := apps/$(APP)
