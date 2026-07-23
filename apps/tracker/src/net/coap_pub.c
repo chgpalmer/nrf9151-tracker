@@ -61,6 +61,21 @@ int coap_pub_init(const char *host, uint16_t port)
 		return -errno;
 	}
 
+	/* Send timeout: the offloaded send blocks on a modem RPC, and a modem
+	 * that wedges mid-burst never answers — flight-recorder tape
+	 * 2026-07-23 +51:38:29: datagram #1 of a flush sent (RAI_ONGOING),
+	 * zsock_send for #2 never returned, watchdog rebooted 120 s later.
+	 * All three field freezes sat at a flush burst on the GNSS<->LTE
+	 * handover edge. Bounded, a wedged send now costs one rolled-back
+	 * datagram (uplink retries next flush) instead of the whole device;
+	 * the watchdog stays as the backstop for everything else. */
+	struct zsock_timeval tv = { .tv_sec = 10 };
+
+	if (zsock_setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO,
+			     &tv, sizeof(tv)) < 0) {
+		LOG_WRN("SO_SNDTIMEO: errno %d (unbounded sends)", errno);
+	}
+
 	LOG_INF("CoAP target %s:%u (UDP) — socket %d ready", host, port, sock);
 	return 0;
 }
@@ -134,7 +149,11 @@ int coap_pub_send(const uint8_t *payload, size_t len, bool last)
 
 	rai_hint_before_send(last);
 	if (zsock_send(sock, pkt.data, pkt.offset, 0) < 0) {
-		LOG_WRN("send: errno %d (%s)", errno, strerror(errno));
+		/* DBG, not WRN: during a wedged-modem episode this repeats
+		 * every retry — the EPISODE is edge-logged by main.c's
+		 * send-health tracking (onset WRN, recovery INF, escalation
+		 * to a guard reboot). Flash still records every failure. */
+		LOG_DBG("send: errno %d (%s)", errno, strerror(errno));
 		return -errno;
 	}
 
@@ -212,7 +231,9 @@ int coap_pub_exchange(const char *path, const uint8_t *req, size_t req_len,
 
 	rai_one_resp_before_send();
 	if (zsock_send(sock, pkt.data, pkt.offset, 0) < 0) {
-		LOG_WRN("exchange send: errno %d (%s)", errno, strerror(errno));
+		/* DBG for the same reason as coap_pub_send: agnss edge-logs
+		 * its exchange episodes; per-attempt lines are flash-only. */
+		LOG_DBG("exchange send: errno %d (%s)", errno, strerror(errno));
 		return -errno;
 	}
 	LOG_DBG("CoAP → /%s (%zu B payload, CON), awaiting response",

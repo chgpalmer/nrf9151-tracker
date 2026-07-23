@@ -48,6 +48,13 @@ void lte_ctrl_checkpoint(void);
  * per registration-loss edge. Call once per main-loop pass. */
 void lte_ctrl_poll(void);
 
+/* Modem post-mortem: snapshot what the modem CLAIMS its state is
+ * (%CONEVAL: RRC state + link quality; +CEER; +CEREG?) into the log —
+ * flash always, wire when sends recover. Called by main on the first
+ * send timeout of an episode. May itself block if the modem IPC is dead:
+ * that is diagnostic — the watchdog reboots and the tape ends here. */
+void lte_ctrl_post_mortem(void);
+
 /* A publish left the device: stamp the RRC-tail measurement (the handler
  * logs how long RRC lingers after the last send — RAI should shrink it). */
 void lte_ctrl_note_publish(int64_t now_ms);

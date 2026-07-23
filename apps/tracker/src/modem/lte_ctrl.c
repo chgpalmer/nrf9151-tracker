@@ -345,6 +345,27 @@ void lte_ctrl_note_publish(int64_t now_ms)
 	last_pub_ms = now_ms;
 }
 
+void lte_ctrl_post_mortem(void)
+{
+	/* One line per command, response truncated to the log-line budget.
+	 * A command that errors (or hangs — the watchdog's problem, and
+	 * itself proof the IPC is dead) is part of the evidence. */
+	static const char *const cmds[] = { "AT%%CONEVAL", "AT+CEER",
+					    "AT+CEREG?" };
+	char resp[128];
+
+	for (size_t i = 0; i < ARRAY_SIZE(cmds); i++) {
+		int err = nrf_modem_at_cmd(resp, sizeof(resp), cmds[i]);
+
+		if (err) {
+			LOG_INF("post-mortem %s: err %d", cmds[i], err);
+			continue;
+		}
+		resp[strcspn(resp, "\r\n")] = '\0';
+		LOG_INF("post-mortem %s", resp);
+	}
+}
+
 bool lte_ctrl_rrc_connected(void)
 {
 	return rrc_connected;

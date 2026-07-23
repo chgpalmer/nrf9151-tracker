@@ -29,4 +29,10 @@ void guard_init(void);
  * the bite-reboot-report path stays testable on the bench. */
 void guard_feed(void);
 
+/* The modem stopped answering sends (two consecutive SO_SNDTIMEO
+ * expiries across flushes — main.c's send-health policy): reboot with a
+ * named note, same as a watchdog bite. A modem that answers nothing is
+ * a modem only a reset talks to. No-op-ish on native_sim (logs ERR). */
+void guard_modem_dead(void);
+
 #endif /* GUARD_H__ */

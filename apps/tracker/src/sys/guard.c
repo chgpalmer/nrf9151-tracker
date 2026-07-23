@@ -18,6 +18,7 @@ LOG_MODULE_REGISTER(guard, CONFIG_TRACKER_LOG_LEVEL);
 enum guard_death {
 	GUARD_WDT = 1,
 	GUARD_MODEM_FAULT = 2,
+	GUARD_MODEM_DEAF = 3,
 };
 static struct guard_note {
 	uint32_t magic;
@@ -25,6 +26,7 @@ static struct guard_note {
 	uint32_t pc;
 } note __noinit;
 
+#if defined(CONFIG_REBOOT)
 static void die(enum guard_death kind, uint32_t pc)
 {
 	note.magic = NOTE_MAGIC;
@@ -32,6 +34,7 @@ static void die(enum guard_death kind, uint32_t pc)
 	note.pc = pc;
 	sys_reboot(SYS_REBOOT_COLD);
 }
+#endif
 
 #if defined(CONFIG_TASK_WDT)
 static int wdt_channel = -ENODEV;
@@ -67,7 +70,9 @@ void guard_init(void)
 		 * a death certificate nobody has to go looking for. */
 		LOG_ERR("previous session died: %s (pc 0x%08x)",
 			note.kind == GUARD_WDT ? "main loop stalled (watchdog)" :
-			note.kind == GUARD_MODEM_FAULT ? "MODEM FAULT" : "?",
+			note.kind == GUARD_MODEM_FAULT ? "MODEM FAULT" :
+			note.kind == GUARD_MODEM_DEAF ?
+				"modem stopped answering sends" : "?",
 			note.pc);
 		note.magic = 0;
 	}
@@ -111,6 +116,17 @@ void guard_feed(void)
 	if (wdt_channel >= 0) {
 		task_wdt_feed(wdt_channel);
 	}
+#endif
+}
+
+void guard_modem_dead(void)
+{
+#if defined(CONFIG_REBOOT)
+	die(GUARD_MODEM_DEAF, 0);
+#else
+	/* native_sim: dying would end the demo; the ERR says what would
+	 * have happened on hardware. */
+	LOG_ERR("modem stopped answering sends (would reboot on hardware)");
 #endif
 }
 

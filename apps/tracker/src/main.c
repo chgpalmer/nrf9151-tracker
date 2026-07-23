@@ -147,6 +147,17 @@ static void print_status(const struct nrf_modem_gnss_pvt_data_frame *p,
 		lte_ctrl_pdn_active() ? "active" : "down");
 }
 
+/* Send-health policy (the uplink liveness watchdog): the offloaded send is
+ * bounded by SO_SNDTIMEO, so a wedged modem surfaces as timeout errors from
+ * uplink_poll instead of a frozen loop. Episode shape, agreed 2026-07-23:
+ * first timeout = one WRN + a modem post-mortem (%CONEVAL/+CEER/+CEREG into
+ * flash — may itself hang, which the watchdog turns into its own evidence);
+ * a second consecutive timeout = the modem answers nothing a reset would
+ * not fix faster — guard reboot with a named note. A success in between
+ * closes the episode at INF. Only timeout errnos escalate: encode bugs and
+ * socket races are not modem death. */
+static uint8_t send_fail_streak;
+
 /* A datagram left the device: pulse the TX LED, stamp the RRC-tail
  * measurement, and tell the FSM when the coarse position is on the map (it
  * holds the radio for GNSS until the boot cell report is out). */
@@ -156,6 +167,10 @@ static void on_uplink_sent(uint32_t kinds_mask)
 	lte_ctrl_note_publish(k_uptime_get());
 	if (kinds_mask & UPLINK_KIND_CELL) {
 		loc_fsm_note_cell_sent();
+	}
+	if (send_fail_streak) {
+		send_fail_streak = 0;
+		LOG_INF("uplink sends recovered");
 	}
 }
 
@@ -503,7 +518,19 @@ int main(void)
 			? (uint32_t)CONFIG_TRACKER_QUIESCENT_FLUSH_S * 1000
 			: (uint32_t)CONFIG_TRACKER_FLUSH_INTERVAL_S * 1000);
 		uplink_set_allowed(loc.publish_allowed);
-		(void)uplink_poll(now);
+
+		int uerr = uplink_poll(now);
+
+		if (uerr == -EAGAIN || uerr == -ETIMEDOUT) {
+			send_fail_streak++;
+			if (send_fail_streak == 1) {
+				LOG_WRN("uplink send timed out — modem "
+					"unresponsive? (retry next flush)");
+				lte_ctrl_post_mortem();
+			} else {
+				guard_modem_dead(); /* no return on hardware */
+			}
+		}
 
 		/* A-GNSS: opportunistic assistance fetch while the radio is
 		 * already ours (the FSM's agnss_fetch_allowed verdict; fetch
